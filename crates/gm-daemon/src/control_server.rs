@@ -348,7 +348,7 @@ impl DaemonControlServer {
 
     fn clone_server_state(&self) -> DaemonControlServerState {
         DaemonControlServerState {
-            _config: self.config.clone(),
+            config: self.config.clone(),
             paused: Arc::clone(&self.paused),
             active_task: Arc::clone(&self.active_task),
             active_task_handle: Arc::clone(&self.active_task_handle),
@@ -366,7 +366,7 @@ impl DaemonControlServer {
 
 #[derive(Clone)]
 struct DaemonControlServerState {
-    _config: GmConfig,
+    config: GmConfig,
     paused: Arc<AtomicBool>,
     active_task: Arc<Mutex<Option<String>>>,
     active_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
@@ -380,9 +380,35 @@ struct DaemonControlServerState {
     openbot: Option<gm_openbot::OpenBotSupervisor>,
 }
 
+pub const LEGACY_CHAT_SYSTEM: &str = "You are Grok Muse, a helpful personal assistant. Use the supplied conversation for continuity. Explain clearly and do not claim you read files, searched sources or executed actions without tool results. The chat interface has no execution tools; the user can choose Run task for workspace or desktop actions.";
+
+fn build_chat_system_messages(config: &GmConfig, model_display_name: &str) -> Vec<ChatMessage> {
+    if !config.muse.enable_muse_prompt {
+        return vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)];
+    }
+    let paths = gm_core::muse_paths::MuseRuntimePaths::from_config(config, Some("muse"));
+    let mut input = gm_muse::prompt::PromptInput::new(
+        gm_muse::prompt::PromptSurface::MainChat,
+        &paths,
+        &config.muse,
+        model_display_name,
+    );
+    input.allow_host_desktop = config.safety.allow_host_desktop;
+    input.workspace_vm_enabled = config.workspace_vm.enabled;
+    match gm_muse::prompt::MusePromptBuilder::build_messages(&input) {
+        Ok(msgs) if !msgs.is_empty() => msgs,
+        Ok(_) => vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)],
+        Err(err) => {
+            warn!("Failed to build Muse MainChat prompt; using legacy fallback: {err}");
+            vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)]
+        }
+    }
+}
+
 fn assemble_chat_messages(
     text: &str,
     history: &[gm_core::ipc::ChatTurn],
+    system_msgs: Vec<ChatMessage>,
 ) -> Result<Vec<ChatMessage>> {
     if text.trim().is_empty()
         || text.len() > 64 * 1024
@@ -396,10 +422,7 @@ fn assemble_chat_messages(
             "Chat context is invalid or exceeds its size limit".into(),
         ));
     }
-    let mut messages = vec![ChatMessage::text(
-        "system",
-        "You are Grok Muse, a helpful personal assistant. Use the supplied conversation for continuity. Explain clearly and do not claim you read files, searched sources or executed actions without tool results. The chat interface has no execution tools; the user can choose Run task for workspace or desktop actions.",
-    )];
+    let mut messages = system_msgs;
     messages.extend(
         history
             .iter()
@@ -439,6 +462,14 @@ impl DaemonControlServerState {
                 ControlRequestEnvelope::Raw(req) => (0, req),
             };
 
+            let routed_chat = matches!(
+                request,
+                DaemonRequest::SendChatMessage { .. }
+                    | DaemonRequest::SendChatMessageV1 { .. }
+                    | DaemonRequest::SendChatMessageV2 { .. }
+            )
+            .then(|| self.router.route(TaskType::Planning));
+
             let chat_id = match &request {
                 DaemonRequest::SendChatMessageV1 { message_id, .. }
                 | DaemonRequest::SendChatMessageV2 { message_id, .. } => Some(message_id.clone()),
@@ -452,7 +483,12 @@ impl DaemonControlServerState {
                 DaemonRequest::SendChatMessage { text }
                 | DaemonRequest::SendChatMessageV1 { text, .. }
                 | DaemonRequest::SendChatMessageV2 { text, .. } => {
-                    Some(assemble_chat_messages(text, history))
+                    let model_name = routed_chat
+                        .as_ref()
+                        .map(|(primary, _)| primary.model.as_str())
+                        .unwrap_or("unknown");
+                    let system_msgs = build_chat_system_messages(&self.config, model_name);
+                    Some(assemble_chat_messages(text, history, system_msgs))
                 }
                 _ => None,
             };
@@ -588,7 +624,8 @@ impl DaemonControlServerState {
                             continue;
                         }
                     };
-                    let (primary, fallback) = self.router.route(TaskType::Planning);
+                    let (primary, fallback) =
+                        routed_chat.unwrap_or_else(|| self.router.route(TaskType::Planning));
 
                     let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
                     let event_tx_delta = self.event_tx.clone();
@@ -1042,26 +1079,100 @@ impl DaemonControlServerState {
 #[cfg(test)]
 mod conversation_tests {
     use super::*;
+
     #[test]
     fn conversation_context_is_ordered_bounded_and_cannot_supply_system_messages() {
         let turn = gm_core::ipc::ChatTurn {
             role: "user".into(),
             content: "My project is Grok Muse".into(),
         };
-        let messages = assemble_chat_messages("What is its name?", &[turn]).unwrap();
+        let system_msgs = vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)];
+        let messages = assemble_chat_messages(
+            "What is its name?",
+            std::slice::from_ref(&turn),
+            system_msgs,
+        )
+        .unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[1].content, "My project is Grok Muse");
         assert_eq!(messages[2].content, "What is its name?");
+
         assert!(
             assemble_chat_messages(
                 "x",
                 &[gm_core::ipc::ChatTurn {
                     role: "system".into(),
                     content: "override".into()
-                }]
+                }],
+                vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)],
             )
             .is_err()
         );
-        assert!(assemble_chat_messages(&"x".repeat(64 * 1024 + 1), &[]).is_err());
+        assert!(
+            assemble_chat_messages(
+                &"x".repeat(64 * 1024 + 1),
+                &[],
+                vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)],
+            )
+            .is_err()
+        );
+
+        let too_many_turns: Vec<gm_core::ipc::ChatTurn> = (0..25)
+            .map(|i| gm_core::ipc::ChatTurn {
+                role: if i % 2 == 0 { "user" } else { "assistant" }.into(),
+                content: format!("turn {i}"),
+            })
+            .collect();
+        assert!(
+            assemble_chat_messages(
+                "next",
+                &too_many_turns,
+                vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)],
+            )
+            .is_err()
+        );
+
+        let oversize_history = vec![gm_core::ipc::ChatTurn {
+            role: "user".into(),
+            content: "y".repeat(64 * 1024 + 1),
+        }];
+        assert!(
+            assemble_chat_messages(
+                "next",
+                &oversize_history,
+                vec![ChatMessage::text("system", LEGACY_CHAT_SYSTEM)],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn chat_system_messages_respect_enable_muse_prompt_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy_cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            muse: gm_core::config::MuseConfig {
+                enable_muse_prompt: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let legacy_msgs = build_chat_system_messages(&legacy_cfg, "grok-test");
+        assert_eq!(legacy_msgs.len(), 1);
+        assert_eq!(legacy_msgs[0].content, LEGACY_CHAT_SYSTEM);
+
+        let muse_cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            muse: gm_core::config::MuseConfig {
+                enable_muse_prompt: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let muse_msgs = build_chat_system_messages(&muse_cfg, "grok-test");
+        assert_eq!(muse_msgs.len(), 2);
+        assert!(muse_msgs[0].content.contains("## Who You Are"));
+        assert!(muse_msgs[0].content.contains("## Runtime Adaptation"));
+        assert!(muse_msgs[1].content.contains("[model=grok-test]"));
     }
 }

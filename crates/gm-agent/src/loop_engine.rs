@@ -157,6 +157,7 @@ pub struct AgentLoop<P: Platform> {
     capabilities: AgentCapabilities,
     secret_injection_enabled: bool,
     system_prompt: String,
+    system_messages: Vec<ChatMessage>,
     mutation_callback: Option<MutationCallback>,
     checkpoint_callback: Option<CheckpointCallback>,
     initial_history: Vec<StepRecord>,
@@ -205,6 +206,7 @@ impl<P: Platform> AgentLoop<P> {
             capabilities: AgentCapabilities::default(),
             secret_injection_enabled: false,
             system_prompt: String::new(),
+            system_messages: Vec::new(),
             mutation_callback: None,
             checkpoint_callback: None,
             initial_history: Vec::new(),
@@ -238,6 +240,11 @@ impl<P: Platform> AgentLoop<P> {
 
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
+        self
+    }
+
+    pub fn with_system_messages(mut self, messages: Vec<ChatMessage>) -> Self {
+        self.system_messages = messages;
         self
     }
 
@@ -300,6 +307,55 @@ impl<P: Platform> AgentLoop<P> {
     {
         self.progress_callback = Some(Arc::new(cb));
         self
+    }
+
+    /// Assemble step messages by preserving any configured Muse `[prefix, dynamic_tail]`
+    /// system messages (or legacy `system_prompt`) first and appending the Computer-Use
+    /// JSON & Set-of-Marks step contract afterward.
+    pub fn assemble_step_messages(
+        &self,
+        prompt_text: String,
+        som_jpeg: Option<&[u8]>,
+    ) -> Vec<ChatMessage> {
+        let cu_header = if som_jpeg.is_some() {
+            "## Computer-Use & Workspace Step Contract\nYou are an autonomous computer-use agent with vision. Output JSON with fields 'action' and 'params'. You can reference interactive elements by their Set-of-Marks badge (#1, #2, ...) or accessibility token. For pixel coordinates read from this image, add top-level coordinate_space: image. Accessibility coordinates and legend centers are desktop coordinates. Never guess coordinates outside the shared image."
+        } else {
+            "## Computer-Use & Workspace Step Contract\nYou are an autonomous computer-use agent. Output JSON with fields 'action' and 'params'."
+        };
+        let tool_contract = format!(
+            "{cu_header}\nCapabilities: GUI={}, shell={}, network={}. Workspace calls use {{\"action\":\"WorkspaceReadFile\",\"params\":{{\"path\":\"relative/path\"}}}}; also WorkspaceWriteFile (path, content), WorkspaceListFiles (path), WorkspaceShell (command, timeout_ms). Completion must use {{\"action\":\"Done\",\"params\":{{\"summary\":\"result and evidence\"}}}}. Never claim an action succeeded without its observed result.",
+            self.capabilities.allow_gui,
+            self.capabilities.allow_shell,
+            self.capabilities.allow_network,
+        );
+
+        let mut messages = if !self.system_messages.is_empty() {
+            let mut msgs = self.system_messages.clone();
+            if let Some(first) = msgs.first_mut() {
+                if !first.content.is_empty() && !first.content.ends_with('\n') {
+                    first.content.push('\n');
+                }
+                if !first.content.is_empty() {
+                    first.content.push('\n');
+                }
+                first.content.push_str(&tool_contract);
+            }
+            msgs
+        } else if self.system_prompt.trim().is_empty() {
+            vec![ChatMessage::text("system", tool_contract)]
+        } else {
+            vec![ChatMessage::text(
+                "system",
+                format!("{}\n\n{tool_contract}", self.system_prompt),
+            )]
+        };
+
+        let user_msg = match som_jpeg {
+            Some(jpeg) => ChatMessage::with_jpeg("user", prompt_text, jpeg),
+            None => ChatMessage::text("user", prompt_text),
+        };
+        messages.push(user_msg);
+        messages
     }
 
     pub async fn run_task(&self, task_id: &str, instruction: &str) -> Result<String> {
@@ -559,31 +615,10 @@ impl<P: Platform> AgentLoop<P> {
                 "Goal: {instruction}\n\nCurrent window state:\n{untrusted_block}{history_block}{feedback_block}{stagnation_block}{som_legend_block}{mcp_tools_block}\n\nPick the next action in JSON format."
             );
 
-            let mut messages = match &som_annotation {
-                Some(som) => vec![
-                    ChatMessage::text(
-                        "system",
-                        "You are an autonomous computer-use agent with vision. Output JSON with fields 'action' and 'params'. You can reference interactive elements by their Set-of-Marks badge (#1, #2, ...) or accessibility token. For pixel coordinates read from this image, add top-level coordinate_space: image. Accessibility coordinates and legend centers are desktop coordinates. Never guess coordinates outside the shared image.",
-                    ),
-                    ChatMessage::with_jpeg("user", prompt_text, &som.jpeg_bytes),
-                ],
-                None => vec![
-                    ChatMessage::text(
-                        "system",
-                        "You are an autonomous computer-use agent. Output JSON with fields 'action' and 'params'.",
-                    ),
-                    ChatMessage::text("user", prompt_text),
-                ],
-            };
-
-            let tool_contract = format!(
-                "{}\nCapabilities: GUI={}, shell={}, network={}. Workspace calls use {{\"action\":\"WorkspaceReadFile\",\"params\":{{\"path\":\"relative/path\"}}}}; also WorkspaceWriteFile (path, content), WorkspaceListFiles (path), WorkspaceShell (command, timeout_ms). Completion must use {{\"action\":\"Done\",\"params\":{{\"summary\":\"result and evidence\"}}}}. Never claim an action succeeded without its observed result.",
-                self.system_prompt,
-                self.capabilities.allow_gui,
-                self.capabilities.allow_shell,
-                self.capabilities.allow_network
+            let messages = self.assemble_step_messages(
+                prompt_text,
+                som_annotation.as_ref().map(|s| s.jpeg_bytes.as_slice()),
             );
-            messages[0].content.push_str(&format!("\n{tool_contract}"));
 
             // 11. Route and execute LLM step
             let (primary, fallback) = self.router.route(task_type);
@@ -2055,6 +2090,72 @@ mod tests {
             std::env::remove_var("OB_LOOP_SECRET_TEST");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn assemble_step_messages_preserves_muse_prefix_and_appends_cu_contract() {
+        let platform = Arc::new(MockPlatform::new());
+        let budget = Arc::new(BudgetManager::new(BudgetConfig::default()));
+        let llm = Arc::new(HybridLlmClient::new(
+            Arc::new(MockLlmBackend::new()),
+            budget,
+        ));
+        let router = LlmRouter::new(ProvidersConfig::default());
+
+        let muse_agent = AgentLoop::new(
+            Arc::clone(&platform),
+            Arc::clone(&llm),
+            router.clone(),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_capabilities(AgentCapabilities {
+            allow_gui: false,
+            allow_shell: true,
+            allow_network: false,
+        })
+        .with_system_messages(vec![
+            ChatMessage::text("system", "## Who You Are\nMuse baseline prefix"),
+            ChatMessage::text("system", "[Sat 2026-11-14] [model=muse-spark]"),
+        ]);
+
+        let msgs =
+            muse_agent.assemble_step_messages("Goal: check repo".into(), Some(&[0xFF, 0xD8]));
+        assert_eq!(msgs.len(), 3);
+        assert!(
+            msgs[0]
+                .content
+                .starts_with("## Who You Are\nMuse baseline prefix")
+        );
+        let contract_idx = msgs[0]
+            .content
+            .find("## Computer-Use & Workspace Step Contract")
+            .expect("CU step contract appended");
+        assert!(contract_idx > 0);
+        assert!(msgs[0].content.contains("Set-of-Marks badge"));
+        assert!(
+            msgs[0]
+                .content
+                .contains("Capabilities: GUI=false, shell=true, network=false.")
+        );
+        assert_eq!(msgs[1].content, "[Sat 2026-11-14] [model=muse-spark]");
+        assert_eq!(msgs[2].role, "user");
+        assert_eq!(msgs[2].images.len(), 1);
+
+        let legacy_agent = AgentLoop::new(
+            platform,
+            llm,
+            router,
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_system_prompt("Legacy persona".into());
+        let legacy_msgs = legacy_agent.assemble_step_messages("Goal: test".into(), None);
+        assert_eq!(legacy_msgs.len(), 2);
+        assert!(legacy_msgs[0].content.starts_with("Legacy persona"));
+        assert!(legacy_msgs[0].content.contains("Capabilities: GUI=false"));
     }
 }
 

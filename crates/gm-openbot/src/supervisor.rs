@@ -2,14 +2,15 @@ use crate::a2a::A2aCoordinator;
 use crate::channels::{ChannelInfo, ChannelMessageRecord, ChannelStore};
 use crate::compaction::ContextCompactor;
 use crate::queue::{DurableTaskQueue, QueuedTask};
-use crate::roster::BotRoster;
+use crate::roster::{BotProfile, BotRoster};
 use gm_agent::{
     AgentCapabilities, AgentLoop, AgentLoopConfig, InteractionHandler, NonInteractiveHandler,
 };
 use gm_core::config::GmConfig;
 use gm_core::error::{GmError, Result};
 use gm_core::ipc::{DaemonEvent, QueueControlAction};
-use gm_llm::{HybridLlmClient, LlmRouter, VaultSecretResolver};
+use gm_llm::{HybridLlmClient, LlmRouter, TaskType, VaultSecretResolver};
+use gm_muse::prompt::{MusePromptBuilder, PromptInput, PromptSurface};
 use gm_platform::Platform;
 use gm_safety::{AuditLogger, BlocklistManager, KillSwitch, SecretScrubber};
 use serde::{Deserialize, Serialize};
@@ -396,26 +397,19 @@ impl OpenBotSupervisor {
         let queue_for_mutation = self.queue.clone();
         let mutation_id = task.id.clone();
         let allow_gui = profile.allow_gui && self.config.safety.allow_host_desktop;
-        let effective_prompt = if let Some(chan_id) = &task.channel_id {
-            if let Ok(Some(chan)) = self.channels.get_channel(chan_id) {
-                if !chan.instructions.trim().is_empty() {
-                    format!(
-                        "{}\n\n## Channel Instructions (#{})\n{}",
-                        profile.system_prompt,
-                        chan.id,
-                        chan.instructions.trim()
-                    )
-                } else {
-                    profile.system_prompt.clone()
-                }
-            } else {
-                profile.system_prompt.clone()
-            }
+        let (primary_target, _) = router.route(if allow_gui {
+            TaskType::CuAxStep
         } else {
-            profile.system_prompt.clone()
-        };
+            TaskType::Planning
+        });
+        let (muse_messages, legacy_prompt) = self.build_task_system_messages(
+            &profile,
+            task.channel_id.as_deref(),
+            allow_gui,
+            &primary_target.model,
+        )?;
 
-        let agent = AgentLoop::new(
+        let mut agent = AgentLoop::new(
             platform.clone(),
             Arc::new(llm.scoped_job()),
             router,
@@ -435,48 +429,52 @@ impl OpenBotSupervisor {
             allow_network: profile.allow_network,
         })
         .with_secret_injection(self.config.safety.allow_secret_injection)
-        .with_system_prompt(effective_prompt)
-        .with_mutation_callback(move |in_flight| {
-            queue_for_mutation.set_mutating_in_flight(&mutation_id, in_flight)
-        })
-        .with_workspace_sandbox(sandbox)
-        .with_vault_resolver(VaultSecretResolver::default())
-        .with_secret_scrubber(self.scrubber.clone())
-        .with_audit(Arc::clone(&self.audit))
-        .with_interaction_handler(handler)
-        .with_delegation_callback(move |target_bot, goal, artifacts| {
-            let (_, child_task) = a2a.handoff(
-                &from_bot,
-                target_bot,
-                task_chan.as_deref(),
-                goal,
-                "Delegated from active agent loop",
-                artifacts,
-                current_depth,
-            )?;
-            Ok(format!(
-                "Delegated to @{target_bot} as task {}",
-                child_task.id
-            ))
-        })
-        .with_progress_callback(move |step, action_summary| {
-            sup_for_progress.emit_agui(
-                "TOOL_CALL_START",
-                &run_id_for_progress,
-                &bot_for_progress,
-                serde_json::json!({
-                    "step": step,
-                    "action": action_summary,
-                }),
-            );
-            let _ = sup_for_progress
-                .daemon_events_tx
-                .send(DaemonEvent::TaskProgress {
-                    task_id: run_id_for_progress.clone(),
-                    step,
-                    action_summary: action_summary.to_string(),
-                });
-        });
+        .with_system_prompt(legacy_prompt);
+        if let Some(sys_msgs) = muse_messages {
+            agent = agent.with_system_messages(sys_msgs);
+        }
+        let agent = agent
+            .with_mutation_callback(move |in_flight| {
+                queue_for_mutation.set_mutating_in_flight(&mutation_id, in_flight)
+            })
+            .with_workspace_sandbox(sandbox)
+            .with_vault_resolver(VaultSecretResolver::default())
+            .with_secret_scrubber(self.scrubber.clone())
+            .with_audit(Arc::clone(&self.audit))
+            .with_interaction_handler(handler)
+            .with_delegation_callback(move |target_bot, goal, artifacts| {
+                let (_, child_task) = a2a.handoff(
+                    &from_bot,
+                    target_bot,
+                    task_chan.as_deref(),
+                    goal,
+                    "Delegated from active agent loop",
+                    artifacts,
+                    current_depth,
+                )?;
+                Ok(format!(
+                    "Delegated to @{target_bot} as task {}",
+                    child_task.id
+                ))
+            })
+            .with_progress_callback(move |step, action_summary| {
+                sup_for_progress.emit_agui(
+                    "TOOL_CALL_START",
+                    &run_id_for_progress,
+                    &bot_for_progress,
+                    serde_json::json!({
+                        "step": step,
+                        "action": action_summary,
+                    }),
+                );
+                let _ = sup_for_progress
+                    .daemon_events_tx
+                    .send(DaemonEvent::TaskProgress {
+                        task_id: run_id_for_progress.clone(),
+                        step,
+                        action_summary: action_summary.to_string(),
+                    });
+            });
 
         let memory = self.roster.memory_store(bot_id)?;
         let memories = memory.search(&task.instruction, 5)?;
@@ -650,5 +648,137 @@ impl OpenBotSupervisor {
     ) -> Result<bool> {
         self.channels
             .update_channel_instructions(channel_id, instructions)
+    }
+
+    pub fn build_task_system_messages(
+        &self,
+        profile: &BotProfile,
+        channel_id: Option<&str>,
+        allow_gui: bool,
+        model_display_name: &str,
+    ) -> Result<(Option<Vec<gm_llm::ChatMessage>>, String)> {
+        let channel_block = channel_id.and_then(|chan_id| {
+            self.channels
+                .get_channel(chan_id)
+                .ok()
+                .flatten()
+                .and_then(|chan| {
+                    let trimmed = chan.instructions.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "## Channel Instructions (#{})\n{}",
+                            chan.id, trimmed
+                        ))
+                    }
+                })
+        });
+
+        if !self.config.muse.enable_muse_prompt {
+            let legacy = match channel_block {
+                Some(chan) => format!("{}\n\n{chan}", profile.system_prompt),
+                None => profile.system_prompt.clone(),
+            };
+            return Ok((None, legacy));
+        }
+
+        let bot_paths = self.roster.runtime_paths_for_bot(&profile.id);
+        let identity_existing = bot_paths
+            .identity_md()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .unwrap_or_default();
+        let profile_trimmed = profile.system_prompt.trim();
+        let combined_channel = match (
+            !profile_trimmed.is_empty() && !identity_existing.contains(profile_trimmed),
+            channel_block,
+        ) {
+            (true, Some(chan)) => Some(format!(
+                "## Bot Profile Instructions ({})\n{}\n\n{}",
+                profile.id, profile_trimmed, chan
+            )),
+            (true, None) => Some(format!(
+                "## Bot Profile Instructions ({})\n{}",
+                profile.id, profile_trimmed
+            )),
+            (false, chan) => chan,
+        };
+
+        let mut input = PromptInput::new(
+            PromptSurface::OpenBotTask,
+            &bot_paths,
+            &self.config.muse,
+            model_display_name,
+        );
+        input.channel_instructions = combined_channel.as_deref();
+        input.allow_host_desktop = allow_gui;
+        input.workspace_vm_enabled = self.config.workspace_vm.enabled;
+        Ok((
+            Some(MusePromptBuilder::build_messages(&input)?),
+            String::new(),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openbot_task_prompt_uses_compact_muse_with_channel_info_and_respects_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        let bots = storage.join("bots");
+        let (tx, _) = broadcast::channel(8);
+
+        let cfg = GmConfig {
+            storage_dir: storage.clone(),
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: bots.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sup =
+            OpenBotSupervisor::open(cfg, Arc::new(AuditLogger::in_memory()), tx.clone()).unwrap();
+        sup.update_channel_instructions("general", "Keep diffs small and verified.")
+            .unwrap();
+        let profile = sup.roster().get_bot("coder").unwrap();
+
+        let (muse_msgs, legacy) = sup
+            .build_task_system_messages(&profile, Some("general"), false, "muse-spark-1.3")
+            .unwrap();
+        assert!(legacy.is_empty());
+        let msgs = muse_msgs.expect("Muse messages built");
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].content.contains("## Who You Are"));
+        assert!(
+            msgs[0]
+                .content
+                .contains("## Channel Instructions (#general)")
+        );
+        assert!(msgs[0].content.contains("Keep diffs small and verified."));
+        assert!(msgs[1].content.contains("[model=muse-spark-1.3]"));
+
+        let legacy_cfg = GmConfig {
+            storage_dir: storage,
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: bots,
+                ..Default::default()
+            },
+            muse: gm_core::config::MuseConfig {
+                enable_muse_prompt: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let legacy_sup =
+            OpenBotSupervisor::open(legacy_cfg, Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let (muse_off, legacy_str) = legacy_sup
+            .build_task_system_messages(&profile, Some("general"), false, "muse-spark-1.3")
+            .unwrap();
+        assert!(muse_off.is_none());
+        assert!(legacy_str.contains(&profile.system_prompt));
+        assert!(legacy_str.contains("## Channel Instructions (#general)"));
     }
 }

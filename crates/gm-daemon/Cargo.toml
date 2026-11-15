@@ -29,6 +29,7 @@ gm-memory = { workspace = true }
 gm-goals = { workspace = true }
 gm-agent = { workspace = true }
 gm-openbot = { workspace = true }
+gm-muse = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

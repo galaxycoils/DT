@@ -990,6 +990,40 @@ pub async fn run_kill_with_config(_config: &GmConfig) -> Result<()> {
     Ok(())
 }
 
+pub const LEGACY_REPL_SYSTEM: &str = "You are Grok-Muse, a fast computer-use personal assistant for macOS. \
+You have direct access to local memory, system permissions, and desktop automation tools. \
+Respond concisely, accurately, and politely.";
+
+pub fn build_repl_system_messages(
+    config: &GmConfig,
+    system_override: Option<String>,
+    model_display_name: &str,
+) -> Vec<ChatMessage> {
+    if let Some(override_prompt) = system_override {
+        return vec![ChatMessage::text("system", override_prompt)];
+    }
+    if !config.muse.enable_muse_prompt {
+        return vec![ChatMessage::text("system", LEGACY_REPL_SYSTEM)];
+    }
+    let paths = gm_core::muse_paths::MuseRuntimePaths::from_config(config, Some("muse"));
+    let mut input = gm_muse::prompt::PromptInput::new(
+        gm_muse::prompt::PromptSurface::MainChat,
+        &paths,
+        &config.muse,
+        model_display_name,
+    );
+    input.allow_host_desktop = config.safety.allow_host_desktop;
+    input.workspace_vm_enabled = config.workspace_vm.enabled;
+    match gm_muse::prompt::MusePromptBuilder::build_messages(&input) {
+        Ok(msgs) if !msgs.is_empty() => msgs,
+        Ok(_) => vec![ChatMessage::text("system", LEGACY_REPL_SYSTEM)],
+        Err(err) => {
+            warn!("Failed to build Muse REPL prompt; using legacy fallback: {err}");
+            vec![ChatMessage::text("system", LEGACY_REPL_SYSTEM)]
+        }
+    }
+}
+
 pub async fn run_chat(system_override: Option<String>, config_path: Option<PathBuf>) -> Result<()> {
     let stdin = std::io::stdin();
     let reader = stdin.lock();
@@ -1028,14 +1062,9 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
     );
     let audit_log = AuditLogger::default_logger().unwrap_or_else(|_| AuditLogger::in_memory());
 
-    let system_prompt = system_override.unwrap_or_else(|| {
-        "You are Grok-Muse, a fast computer-use personal assistant for macOS. \
-        You have direct access to local memory, system permissions, and desktop automation tools. \
-        Respond concisely, accurately, and politely."
-            .into()
-    });
-
-    let mut history: Vec<ChatMessage> = vec![ChatMessage::text("system", system_prompt)];
+    let (chat_primary, _) = router.route(TaskType::Planning);
+    let mut history: Vec<ChatMessage> =
+        build_repl_system_messages(&config, system_override, &chat_primary.model);
 
     writeln!(
         writer,
@@ -1129,11 +1158,12 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
         }
 
         if input == "/clear" {
-            let sys = history.first().cloned();
-            history.clear();
-            if let Some(s) = sys {
-                history.push(s);
-            }
+            let leading_system: Vec<ChatMessage> = history
+                .iter()
+                .take_while(|m| m.role == "system")
+                .cloned()
+                .collect();
+            history = leading_system;
             writeln!(writer, "✔ Conversation history cleared.\n")?;
             writer.flush()?;
             continue;
@@ -1149,10 +1179,8 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
                 user_msgs,
                 asst_msgs
             )?;
-            for (idx, msg) in history.iter().enumerate() {
-                if idx == 0 && msg.role == "system" {
-                    continue;
-                }
+            for (turn_idx, msg) in history.iter().filter(|m| m.role != "system").enumerate() {
+                let idx = turn_idx + 1;
                 let preview: String = msg.content.chars().take(80).collect();
                 let ellipsis = if msg.content.chars().count() > 80 {
                     "..."
@@ -1422,6 +1450,24 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
         Arc::new(audit_log.clone()),
         Arc::clone(&platform),
     );
+
+    if config.muse.enable_muse_prompt {
+        let muse_paths = gm_core::muse_paths::MuseRuntimePaths::from_config(&config, Some("muse"));
+        if let Err(e) = gm_muse::templates::run_migrations(&muse_paths) {
+            warn!("Failed to run Muse runtime migrations: {e}");
+        }
+        let (chat_primary, _) = router.route(TaskType::Planning);
+        if let Err(e) = gm_muse::prompt::write_main_chat_system_prompt(
+            &muse_paths,
+            &config.muse,
+            &chat_primary.model,
+            config.safety.allow_host_desktop,
+            config.workspace_vm.enabled,
+            None,
+        ) {
+            warn!("Failed to write rendered workspace/system/system_prompt.md: {e}");
+        }
+    }
 
     let runtime_task = control_server.start_runtime()?;
 
@@ -2553,6 +2599,43 @@ mod tests {
         assert!(out_str.contains("[1] user:"));
         assert!(out_str.contains("[2] assistant:"));
         assert!(out_str.contains("Exiting Grok-Muse chat. Goodbye!"));
+    }
+
+    #[test]
+    fn repl_system_messages_respect_override_and_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let muse_cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        // Explicit --system override always wins even when Muse prompt is enabled.
+        let override_msgs = build_repl_system_messages(
+            &muse_cfg,
+            Some("Explicit override prompt".into()),
+            "muse-spark-1.3",
+        );
+        assert_eq!(override_msgs.len(), 1);
+        assert_eq!(override_msgs[0].content, "Explicit override prompt");
+
+        // Muse enabled with no override yields [stable_prefix, dynamic_tail].
+        let default_msgs = build_repl_system_messages(&muse_cfg, None, "muse-spark-1.3");
+        assert_eq!(default_msgs.len(), 2);
+        assert!(default_msgs[0].content.contains("## Who You Are"));
+        assert!(default_msgs[1].content.contains("[model=muse-spark-1.3]"));
+
+        // Muse disabled falls back cleanly to LEGACY_REPL_SYSTEM.
+        let legacy_cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            muse: gm_core::config::MuseConfig {
+                enable_muse_prompt: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let legacy_msgs = build_repl_system_messages(&legacy_cfg, None, "muse-spark-1.3");
+        assert_eq!(legacy_msgs.len(), 1);
+        assert_eq!(legacy_msgs[0].content, LEGACY_REPL_SYSTEM);
     }
 
     #[tokio::test]
