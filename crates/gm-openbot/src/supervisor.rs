@@ -62,7 +62,7 @@ impl OpenBotSupervisor {
             config.openbot.bots_dir = config.storage_dir.join("bots");
         }
         gm_core::storage::ensure_private_dir(&config.storage_dir)?;
-        let roster = BotRoster::open(&config.openbot.bots_dir)?;
+        let roster = BotRoster::open_with_storage(&config.openbot.bots_dir, &config.storage_dir)?;
         let db_path = config.storage_dir.join("openbot.sqlite");
         let queue = DurableTaskQueue::open(&db_path)?;
         let channels = ChannelStore::open(&db_path)?;
