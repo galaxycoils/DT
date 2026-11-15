@@ -36,7 +36,8 @@ This branch implements the task/runtime foundation, native daily-use features, s
 - CLI provider drivers in `gm-llm` (`CliDriver`, `CliLlmBackend`) for Claude, Codex, and Grok with explicit PATH/version availability checks, actionable auth instructions, and honest cost labeling (`0.0` USD).
 - SQLite automated corruption recovery (`open_sqlite_with_recovery`) preserving corrupt databases and WAL/SHM files to timestamped `.bak` files without silent data deletion.
 - Local health diagnostics (`gm diagnostics check`) and sanitized support bundle export (`gm diagnostics export`) with `SecretScrubber` credential redaction and SHA-256 fingerprint verification.
-- Release engineering documentation: `THIRD_PARTY_NOTICES.md`, `CONTRIBUTING.md`, `docs/SUPPORT_MATRIX.md`, `docs/TROUBLESHOOTING.md`, and `docs/PRIVACY.md`.
+- Release engineering documentation: `THIRD_PARTY_NOTICES.md`, `CONTRIBUTING.md`, `docs/SUPPORT_MATRIX.md`, `docs/TROUBLESHOOTING.md`, `docs/PRIVACY.md`, and `docs/MUSE.md`.
+- Muse agent integration (`crates/gm-muse`, `MuseConfig`): bundled upstream reference assets with SHA-256 manifest verification, two-message cache-friendly `MusePromptBuilder` (`[stable_prefix, dynamic_tail]`), `SharedFileStore` with `O_NOFOLLOW` + SHA-256 compare-and-swap + `SecretScrubber`, progressive-disclosure `SkillRegistry`, response directive parser (`<options>`, `<message_break/>`, `【source:...】`, `sandbox://`), SQLite `ProvenanceStore`, two-phase redacted `ForgetPlanner`/`ForgetExecutor`, fenced portable `MemoryImporter`, `GoalWorkspaceManager`, `ProactivePrefsStore`, `HeartbeatWorker`, `FeedStore`, `MemoryUpkeepJob`, `SelfImprovementJob`, per-chat Bridge `DiscretionStore` (`DISCRETION.md`), two-port loopback Static `SpacesManager` (`SpaceKind::Ts` rejected), CLI subcommands (`skills`, `goals`, `spaces`, `forget`, `import-memory`, `dream`), Companion Web UI tabs, and native `egui` Muse management windows.
 
 ## Running locally
 

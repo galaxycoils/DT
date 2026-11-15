@@ -2649,6 +2649,8 @@ dependencies = [
  "gm-agent",
  "gm-core",
  "gm-llm",
+ "gm-memory",
+ "gm-muse",
  "gm-openbot",
  "gm-platform",
  "gm-safety",

@@ -51,3 +51,18 @@ Grok Muse incorporates an automated `SecretScrubber` that operates across all ex
 
 - **Credential Exclusion**: Team templates exported via `gm team export` validate that no API keys, tokens, or personal identifiers are bundled into the template.
 - **Trigger Deactivation**: When importing a team template (`gm team import`), all scheduled routines and external triggers are forcefully initialized in a **disabled state**. Users must manually review instructions and enable routines before execution begins.
+
+---
+
+## 6. Muse Two-Phase Forget, Bridge Discretion & Static Spaces Isolation
+
+- **Redacted Two-Phase `Forget` (`crates/gm-memory/src/forget.rs`)**:
+  - `gm forget <query>` plans deletions across 9 local storage domains (`PersonalMemoryStore`, `ProvenanceStore`, `USER.md`, `MEMORY.md`, `PROACTIVE_PREFERENCES.md`, `FEEDBACK.md`, `memory/`, `dreams/`, `goals/`, `side-chats/`, `skills/`, `openbot.sqlite`, `audit.jsonl`, and `feed.sqlite`).
+  - The staged `.forget-pending.json` file and audit entries store only a 16-character SHA-256 `request_fingerprint`, record IDs, and line SHA-256 digests — never the raw query string.
+  - Executing a deletion (`ForgetConfirm`) is gated by `ActionTier::Irreversible` confirmation and explicitly discloses excluded archives (`migration/` receipts and visible channel transcripts).
+- **Per-Chat Bridge `DISCRETION.md` (`RULE-PRIVACY-DISCRETION`)**:
+  - External Slack, Telegram, and Discord bridge inputs are wrapped in `[BEGIN EXTERNAL CONTENT]` fences so third-party messages are treated strictly as untrusted data.
+  - Outbound bridge replies are evaluated against `side-chats/<chat-id>/DISCRETION.md` and `SecretScrubber` to block unrequested replies or private `USER.md` / credential disclosures.
+- **Static Spaces Two-Port Origin Isolation**:
+  - User/agent-authored Static Spaces are served exclusively from a second loopback port (`127.0.0.1:<spaces_port>`, default `companion_port + 1`) on a separate browser origin from the authenticated Companion API (`127.0.0.1:<companion_port>`). See [`docs/MUSE.md`](MUSE.md) for full details.
+
