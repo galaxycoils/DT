@@ -442,6 +442,7 @@ impl OpenBotSupervisor {
             .with_secret_scrubber(self.scrubber.clone())
             .with_audit(Arc::clone(&self.audit))
             .with_interaction_handler(handler)
+            .with_fanout_depth(task.handoff_depth, self.config.muse.subagent_fanout_depth)
             .with_delegation_callback(move |target_bot, goal, artifacts| {
                 let (_, child_task) = a2a.handoff(
                     &from_bot,
@@ -778,7 +779,119 @@ mod tests {
             .build_task_system_messages(&profile, Some("general"), false, "muse-spark-1.3")
             .unwrap();
         assert!(muse_off.is_none());
-        assert!(legacy_str.contains(&profile.system_prompt));
         assert!(legacy_str.contains("## Channel Instructions (#general)"));
+        assert!(legacy_str.contains(&profile.system_prompt));
+    }
+
+    #[tokio::test]
+    async fn supervisor_fanout_depth_allows_0_to_1_refuses_1_to_2_and_preserves_a2a_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        let bots = storage.join("bots");
+        let (tx, _) = broadcast::channel(16);
+
+        let cfg = GmConfig {
+            storage_dir: storage,
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: bots,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let audit = Arc::new(AuditLogger::in_memory());
+        let sup = OpenBotSupervisor::open(cfg, Arc::clone(&audit), tx).unwrap();
+
+        let platform = Arc::new(gm_platform::MockPlatform::new());
+        let backend = Arc::new(gm_llm::MockLlmBackend::new());
+        // Step 1-2 (depth 0 coder): DelegateToBot -> researcher, then Done.
+        backend.queue_response(
+            r#"{"action":"DelegateToBot","params":{"target_bot_id":"researcher","goal":"Gather facts"}}"#,
+        );
+        backend.queue_response(r#"{"action":"Done","params":{"summary":"Coder finished"}}"#);
+        // Step 3-4 (depth 1 researcher): DelegateToBot -> coder (refused), then Done.
+        backend.queue_response(
+            r#"{"action":"DelegateToBot","params":{"target_bot_id":"coder","goal":"Should not spawn"}}"#,
+        );
+        backend
+            .queue_response(r#"{"action":"Done","params":{"summary":"Researcher handled limit"}}"#);
+
+        let llm = Arc::new(HybridLlmClient::new(
+            Arc::clone(&backend),
+            Arc::new(gm_llm::BudgetManager::new(
+                gm_core::config::BudgetConfig::default(),
+            )),
+        ));
+        let router = LlmRouter::new(gm_core::config::ProvidersConfig::default());
+
+        let parent = sup
+            .submit_task(Some("coder"), Some("general"), "Analyze system", 0)
+            .unwrap();
+        assert_eq!(parent.handoff_depth, 0);
+
+        let done_coder = sup
+            .run_next_for_bot(
+                "coder",
+                Arc::clone(&platform),
+                Arc::clone(&llm),
+                router.clone(),
+                KillSwitch::new(),
+                BlocklistManager::default(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done_coder.status, crate::QueuedTaskStatus::Completed);
+
+        let researcher_tasks = sup.queue().list_tasks(Some("researcher")).unwrap();
+        assert_eq!(researcher_tasks.len(), 1);
+        assert_eq!(researcher_tasks[0].handoff_depth, 1);
+
+        let done_researcher = sup
+            .run_next_for_bot(
+                "researcher",
+                platform,
+                llm,
+                router,
+                KillSwitch::new(),
+                BlocklistManager::default(),
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(done_researcher.status, crate::QueuedTaskStatus::Completed);
+
+        // No child task was enqueued back onto `coder` at depth 2.
+        let coder_tasks = sup.queue().list_tasks(Some("coder")).unwrap();
+        assert_eq!(coder_tasks.len(), 1);
+
+        // Existing A2A max_handoff_depth (4) remains unchanged.
+        let (_, depth4_task) = sup
+            .a2a()
+            .handoff(
+                "coder",
+                "researcher",
+                None,
+                "Depth 4 allowed",
+                "ctx",
+                &[],
+                3,
+            )
+            .unwrap();
+        assert_eq!(depth4_task.handoff_depth, 4);
+        assert!(
+            sup.a2a()
+                .handoff(
+                    "coder",
+                    "researcher",
+                    None,
+                    "Depth 5 blocked",
+                    "ctx",
+                    &[],
+                    4
+                )
+                .is_err()
+        );
     }
 }
