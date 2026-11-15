@@ -2564,6 +2564,7 @@ dependencies = [
  "ed25519-dalek",
  "gm-core",
  "gm-llm",
+ "gm-muse",
  "gm-platform",
  "gm-safety",
  "hex",
@@ -2751,6 +2752,7 @@ dependencies = [
  "gm-core",
  "gm-llm",
  "gm-memory",
+ "gm-muse",
  "gm-platform",
  "gm-safety",
  "hex",
@@ -2802,6 +2804,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]

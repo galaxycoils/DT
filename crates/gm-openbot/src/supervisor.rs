@@ -73,7 +73,7 @@ impl OpenBotSupervisor {
             config.openbot.max_handoff_depth,
         );
         let compactor = ContextCompactor::new(
-            config.openbot.max_context_tokens,
+            config.muse.context_tokens,
             config.openbot.compaction_trigger_ratio,
             4,
         );
