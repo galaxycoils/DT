@@ -290,6 +290,29 @@ pub async fn run_nightly_review_with_llm<P: Platform>(
     Ok(summary)
 }
 
+/// Runs nightly review synthesis and, when `muse.enable_dreams` is true,
+/// executes `SelfImprovementJob` to produce daily dreams, `ALIGNMENT_SYNTHESIS.md`,
+/// relationship pages, quiet moments, and skill-amendment proposals.
+pub async fn run_nightly_review_and_dreams<P: Platform>(
+    platform: Option<&P>,
+    audit: &AuditLogger,
+    memory: &PersonalMemoryStore,
+    dogfood: Option<&crate::dogfood::DogfoodMetricsSummary>,
+    llm: Option<(&HybridLlmClient, &LlmRouter)>,
+    paths: &gm_core::muse_paths::MuseRuntimePaths,
+    muse: &gm_core::config::MuseConfig,
+    goals: Option<&crate::goal_workspace::GoalWorkspaceManager>,
+    now: DateTime<Utc>,
+) -> Result<(
+    NightlyReviewSummary,
+    crate::self_improvement::SelfImprovementReport,
+)> {
+    let summary = run_nightly_review_with_llm(platform, audit, memory, dogfood, llm, now).await?;
+    let dreams =
+        crate::self_improvement::SelfImprovementJob::run(paths, muse, memory, audit, goals, now)?;
+    Ok((summary, dreams))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

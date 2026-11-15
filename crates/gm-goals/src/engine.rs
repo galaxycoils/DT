@@ -1,5 +1,5 @@
 use crate::dogfood::DogfoodTracker;
-use crate::feed::{FeedItem, build_feed};
+use crate::feed::{FeedCategory, FeedItem, FeedPost, FeedStore, build_feed};
 use crate::ideas::{ProactiveIdea, generate_ideas};
 use crate::nightly_review::{NightlyReviewSummary, run_nightly_review};
 use crate::notice::ProactiveNotice;
@@ -22,6 +22,7 @@ pub struct ProactiveEngine {
     notices_history: Arc<Mutex<Vec<ProactiveNotice>>>,
     dogfood_tracker: Arc<DogfoodTracker>,
     llm: Option<(Arc<HybridLlmClient>, LlmRouter)>,
+    feed_store: Option<FeedStore>,
 }
 
 impl ProactiveEngine {
@@ -37,6 +38,7 @@ impl ProactiveEngine {
             notices_history: Arc::new(Mutex::new(Vec::new())),
             dogfood_tracker: tracker,
             llm: None,
+            feed_store: None,
         }
     }
 
@@ -52,12 +54,30 @@ impl ProactiveEngine {
             notices_history: Arc::new(Mutex::new(Vec::new())),
             dogfood_tracker,
             llm: None,
+            feed_store: None,
         }
     }
 
     pub fn with_llm(mut self, llm: Arc<HybridLlmClient>, router: LlmRouter) -> Self {
         self.llm = Some((llm, router));
         self
+    }
+
+    pub fn with_feed_store(mut self, feed_store: FeedStore) -> Self {
+        self.feed_store = Some(feed_store);
+        self
+    }
+
+    pub fn feed_store(&self) -> Option<&FeedStore> {
+        self.feed_store.as_ref()
+    }
+
+    pub fn reset_feed_signals(&self) -> Result<usize> {
+        if let Some(ref feed) = self.feed_store {
+            feed.reset_feed_signals()
+        } else {
+            Ok(0)
+        }
     }
 
     pub fn scheduler(&self) -> &ProactiveScheduler {
@@ -333,6 +353,20 @@ impl ProactiveEngine {
                     self.budget.config().daily_spend_cap_usd,
                     now,
                 );
+                if let Some(ref feed) = self.feed_store {
+                    let _ = feed.record_signal(&dedup_hash, &notice.topic);
+                    let _ = feed.upsert_post(&FeedPost {
+                        id: format!("patrol-{}", notice.id),
+                        kicker: notice.topic.clone(),
+                        category: FeedCategory::PatrolInsight,
+                        title: notice.title.clone(),
+                        body: notice.body.clone(),
+                        signal_citations: vec![dedup_hash.clone()],
+                        rating: None,
+                        user_prompt: None,
+                        created_at: now,
+                    });
+                }
                 self.notices_history.lock().push(notice.clone());
                 delivered.push(notice);
             }
@@ -442,6 +476,20 @@ impl ProactiveEngine {
                     self.budget.config().daily_spend_cap_usd,
                     now,
                 );
+                if let Some(ref feed) = self.feed_store {
+                    let _ = feed.record_signal(&dedup_hash, &notice.topic);
+                    let _ = feed.upsert_post(&FeedPost {
+                        id: format!("patrol-{}", notice.id),
+                        kicker: notice.topic.clone(),
+                        category: FeedCategory::PatrolInsight,
+                        title: notice.title.clone(),
+                        body: notice.body.clone(),
+                        signal_citations: vec![dedup_hash.clone()],
+                        rating: None,
+                        user_prompt: None,
+                        created_at: now,
+                    });
+                }
                 self.notices_history.lock().push(notice.clone());
                 delivered.push(notice);
             }

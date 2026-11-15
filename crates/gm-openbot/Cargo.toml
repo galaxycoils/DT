@@ -13,6 +13,7 @@ gm-safety = { workspace = true }
 gm-memory = { workspace = true }
 gm-llm = { workspace = true }
 gm-muse = { workspace = true }
+gm-goals = { workspace = true }
 gm-platform = { workspace = true }
 gm-agent = { workspace = true }
 tokio = { workspace = true }

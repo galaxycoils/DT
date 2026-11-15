@@ -43,6 +43,8 @@ pub struct OpenBotSupervisor {
     channels: ChannelStore,
     a2a: A2aCoordinator,
     compactor: ContextCompactor,
+    feed_store: Arc<gm_goals::FeedStore>,
+    quiet_gate: gm_goals::QuietGate,
     gui_seat: Arc<AsyncMutex<()>>,
     daemon_events_tx: broadcast::Sender<DaemonEvent>,
     agui_events_tx: broadcast::Sender<AgUiEvent>,
@@ -67,6 +69,13 @@ impl OpenBotSupervisor {
         let db_path = config.storage_dir.join("openbot.sqlite");
         let queue = DurableTaskQueue::open(&db_path)?;
         let channels = ChannelStore::open(&db_path)?;
+        let feed_store = Arc::new(gm_goals::FeedStore::open(
+            config.storage_dir.join("feed.sqlite"),
+        )?);
+        let _ = feed_store.seed_getting_started_if_never_seeded();
+        let quiet_gate = gm_goals::QuietGate::new(gm_goals::QuietGateConfig::default());
+        let shared_paths = gm_core::muse_paths::MuseRuntimePaths::shared(&config.storage_dir);
+        let _ = gm_goals::ProactivePrefsStore::new(shared_paths).sync_with_quiet_gate(&quiet_gate);
         let a2a = A2aCoordinator::new(
             roster.clone(),
             queue.clone(),
@@ -90,6 +99,8 @@ impl OpenBotSupervisor {
             channels,
             a2a,
             compactor,
+            feed_store,
+            quiet_gate,
             gui_seat: Arc::new(AsyncMutex::new(())),
             daemon_events_tx,
             agui_events_tx,
@@ -135,6 +146,20 @@ impl OpenBotSupervisor {
 
     pub fn compactor(&self) -> &ContextCompactor {
         &self.compactor
+    }
+
+    pub fn feed_store(&self) -> &Arc<gm_goals::FeedStore> {
+        &self.feed_store
+    }
+
+    pub fn quiet_gate(&self) -> &gm_goals::QuietGate {
+        &self.quiet_gate
+    }
+
+    pub fn sync_quiet_gate_from_prefs(&self) -> Result<()> {
+        let shared_paths = gm_core::muse_paths::MuseRuntimePaths::shared(&self.config.storage_dir);
+        gm_goals::ProactivePrefsStore::new(shared_paths).sync_with_quiet_gate(&self.quiet_gate)?;
+        Ok(())
     }
 
     pub fn audit(&self) -> &Arc<AuditLogger> {

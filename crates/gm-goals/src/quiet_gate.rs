@@ -30,6 +30,7 @@ pub enum NoticeAction {
 #[derive(Debug, Clone)]
 pub struct QuietGate {
     config: QuietGateConfig,
+    quiet_hours: Arc<Mutex<(u32, u32)>>,
     opted_out_topics: Arc<Mutex<HashSet<String>>>,
     sent_notices_today: Arc<Mutex<u32>>,
     last_sent_date: Arc<Mutex<Option<chrono::NaiveDate>>>,
@@ -41,8 +42,10 @@ pub struct QuietGate {
 
 impl QuietGate {
     pub fn new(config: QuietGateConfig) -> Self {
+        let initial_hours = (config.quiet_start_hour, config.quiet_end_hour);
         Self {
             config,
+            quiet_hours: Arc::new(Mutex::new(initial_hours)),
             opted_out_topics: Arc::new(Mutex::new(HashSet::new())),
             sent_notices_today: Arc::new(Mutex::new(0)),
             last_sent_date: Arc::new(Mutex::new(None)),
@@ -51,6 +54,20 @@ impl QuietGate {
             snoozed_until: Arc::new(Mutex::new(None)),
             topic_snooze: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
+    }
+
+    pub fn set_quiet_hours(&self, start_hour: u32, end_hour: u32) {
+        if start_hour < 24 && end_hour < 24 {
+            *self.quiet_hours.lock() = (start_hour, end_hour);
+        }
+    }
+
+    pub fn quiet_hours(&self) -> (u32, u32) {
+        *self.quiet_hours.lock()
+    }
+
+    pub fn is_topic_opted_out(&self, topic: &str) -> bool {
+        self.opted_out_topics.lock().contains(&topic.to_lowercase())
     }
 
     pub fn opt_out_topic(&self, topic: &str) {
@@ -147,11 +164,12 @@ impl QuietGate {
 
         // 7. Quiet hours check
         let hour = current_time.hour();
-        let in_quiet_hours = if self.config.quiet_start_hour > self.config.quiet_end_hour {
+        let (quiet_start_hour, quiet_end_hour) = *self.quiet_hours.lock();
+        let in_quiet_hours = if quiet_start_hour > quiet_end_hour {
             // Overnight window e.g. 22 to 8
-            hour >= self.config.quiet_start_hour || hour < self.config.quiet_end_hour
+            hour >= quiet_start_hour || hour < quiet_end_hour
         } else {
-            hour >= self.config.quiet_start_hour && hour < self.config.quiet_end_hour
+            hour >= quiet_start_hour && hour < quiet_end_hour
         };
 
         if in_quiet_hours {

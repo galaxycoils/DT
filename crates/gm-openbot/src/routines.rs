@@ -405,11 +405,22 @@ impl OpenBotSupervisor {
     ) -> Result<Vec<RoutineRunRecord>> {
         self.queue().list_routine_runs(routine_id, limit)
     }
-    /// External trigger entry point. Applies the same bot/channel gates as scheduled ticks.
+    /// External trigger entry point at the current wall-clock time.
+    /// Applies bot/channel gates, `QuietGate`, and records a Feed post on delivery.
     pub fn trigger_routine(
         &self,
         routine_id: &str,
         delivery_id: &str,
+    ) -> Result<Option<RoutineTriggerOutcome>> {
+        self.trigger_routine_at(routine_id, delivery_id, Utc::now())
+    }
+
+    /// Deterministic timestamped variant of [`OpenBotSupervisor::trigger_routine`].
+    pub fn trigger_routine_at(
+        &self,
+        routine_id: &str,
+        delivery_id: &str,
+        now: DateTime<Utc>,
     ) -> Result<Option<RoutineTriggerOutcome>> {
         let Some(state) = self
             .queue()
@@ -429,13 +440,45 @@ impl OpenBotSupervisor {
                 _ => return Err(error("Routine channel is paused, archived or missing")),
             }
         }
-        let outcome = self
-            .queue()
-            .trigger_routine(routine_id, delivery_id, Utc::now())?;
+        let _ = self.sync_quiet_gate_from_prefs();
+        let dedup_key = format!("routine:{routine_id}:{delivery_id}");
+        if self.quiet_gate().is_topic_opted_out("routine")
+            || self.quiet_gate().is_topic_opted_out(&routine.name)
+        {
+            return Ok(Some(RoutineTriggerOutcome {
+                status: "skipped_quiet_hours".into(),
+                task_id: None,
+            }));
+        }
+        let (allowed, _) = self
+            .quiet_gate()
+            .can_deliver("routine", &dedup_key, false, now);
+        if !allowed {
+            return Ok(Some(RoutineTriggerOutcome {
+                status: "skipped_quiet_hours".into(),
+                task_id: None,
+            }));
+        }
+        let outcome = self.queue().trigger_routine(routine_id, delivery_id, now)?;
         if let Some(RoutineTriggerOutcome {
             task_id: Some(id), ..
         }) = &outcome
         {
+            self.quiet_gate().record_delivery_at(&dedup_key, now);
+            let _ = self
+                .feed_store()
+                .record_signal(&dedup_key, "routine_trigger");
+            let _ = self.feed_store().upsert_post(&gm_goals::FeedPost {
+                id: format!("routine-{id}"),
+                kicker: "Routine".into(),
+                category: gm_goals::FeedCategory::PatrolInsight,
+                title: format!("Routine triggered: {}", routine.name),
+                body: routine.instruction.clone(),
+                signal_citations: vec![dedup_key],
+                rating: None,
+                user_prompt: None,
+                created_at: now,
+            });
             self.emit_agui(
                 "ROUTINE_QUEUED",
                 id,
@@ -617,5 +660,46 @@ mod tests {
 
         drop(queue);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn test_supervisor_trigger_routine_uses_quiet_gate_and_creates_feed_post() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = gm_core::config::GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        cfg.openbot.bots_dir = dir.path().join("bots");
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let sup = OpenBotSupervisor::open(
+            cfg,
+            std::sync::Arc::new(gm_safety::AuditLogger::in_memory()),
+            tx,
+        )
+        .unwrap();
+
+        let routine = daily();
+        sup.save_routine(&routine).unwrap();
+
+        let quiet_utc = time("2026-11-04T02:00:00Z");
+        let quiet_res = sup
+            .trigger_routine_at(&routine.id, "d-quiet", quiet_utc)
+            .unwrap()
+            .unwrap();
+        assert_eq!(quiet_res.status, "skipped_quiet_hours");
+        assert!(quiet_res.task_id.is_none());
+
+        let initial_posts = sup.feed_store().list_posts(20).unwrap().len();
+        let daytime_utc = time("2026-11-04T14:00:00Z");
+        let ok_res = sup
+            .trigger_routine_at(&routine.id, "d-day", daytime_utc)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ok_res.status, "queued");
+        assert!(ok_res.task_id.is_some());
+
+        let posts = sup.feed_store().list_posts(20).unwrap();
+        assert_eq!(posts.len(), initial_posts + 1);
+        assert!(posts.iter().any(|p| p.kicker == "Routine"));
     }
 }
