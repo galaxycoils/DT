@@ -178,6 +178,72 @@ pub enum DaemonRequest {
         task_id: String,
         note: Option<String>,
     },
+    ListActivity,
+    RateActivity {
+        id: String,
+        rating: i32,
+    },
+    ListGoals,
+    SaveGoal {
+        op: String,
+        #[serde(default)]
+        slug: Option<String>,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+    ListSpaces,
+    CreateSpace {
+        slug: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        html: Option<String>,
+    },
+    SearchSkills {
+        #[serde(default)]
+        query: String,
+    },
+    ReadRuntimeFile {
+        #[serde(default)]
+        bot_id: Option<String>,
+        file: String,
+    },
+    SaveRuntimeFile {
+        #[serde(default)]
+        bot_id: Option<String>,
+        file: String,
+        content: String,
+        expected_sha256: Option<String>,
+    },
+    ImportMemory {
+        input: String,
+        #[serde(default)]
+        apply: bool,
+        #[serde(default)]
+        report_sha256: Option<String>,
+    },
+    ForgetPlan {
+        #[serde(default)]
+        bot_id: Option<String>,
+        request: String,
+    },
+    ForgetConfirm {
+        #[serde(default)]
+        bot_id: Option<String>,
+        plan_id: String,
+        #[serde(default)]
+        verification_query: Option<String>,
+        #[serde(default)]
+        confirmed: bool,
+    },
+    UpdateDiscretion {
+        chat_id: String,
+        rules: Vec<String>,
+        #[serde(default)]
+        expected_sha256: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +329,9 @@ pub enum DaemonEvent {
         bot_id: Option<String>,
         content: String,
         timestamp: String,
+    },
+    ActivityUpdated {
+        reason: String,
     },
 }
 
@@ -428,6 +497,109 @@ mod tests {
                 assert_eq!(blocker, "2FA code required");
             }
             _ => panic!("Expected WheelHandoffRequested"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_muse_ipc_all_new_variants_roundtrip() {
+        let requests = vec![
+            DaemonRequest::ListActivity,
+            DaemonRequest::RateActivity {
+                id: "post-1".into(),
+                rating: 5,
+            },
+            DaemonRequest::ListGoals,
+            DaemonRequest::SaveGoal {
+                op: "create".into(),
+                slug: Some("learn-rust".into()),
+                payload: serde_json::json!({"title": "Learn Rust"}),
+            },
+            DaemonRequest::ListSpaces,
+            DaemonRequest::CreateSpace {
+                slug: "budget".into(),
+                title: Some("Budget".into()),
+                kind: Some("static".into()),
+                html: None,
+            },
+            DaemonRequest::SearchSkills {
+                query: "goals".into(),
+            },
+            DaemonRequest::ReadRuntimeFile {
+                bot_id: Some("muse".into()),
+                file: "USER.md".into(),
+            },
+            DaemonRequest::SaveRuntimeFile {
+                bot_id: Some("muse".into()),
+                file: "USER.md".into(),
+                content: "# USER.md\n".into(),
+                expected_sha256: Some("abc123".into()),
+            },
+            DaemonRequest::ImportMemory {
+                input: "- Prefers green tea".into(),
+                apply: false,
+                report_sha256: None,
+            },
+            DaemonRequest::ForgetPlan {
+                bot_id: Some("muse".into()),
+                request: "old address".into(),
+            },
+            DaemonRequest::ForgetConfirm {
+                bot_id: Some("muse".into()),
+                plan_id: "plan-1".into(),
+                verification_query: None,
+                confirmed: true,
+            },
+            DaemonRequest::UpdateDiscretion {
+                chat_id: "slack-C123".into(),
+                rules: vec!["Keep concise".into()],
+                expected_sha256: Some("def456".into()),
+            },
+        ];
+
+        for (idx, req) in requests.into_iter().enumerate() {
+            let msg = IpcMessage {
+                id: (idx + 300) as u64,
+                payload: req,
+            };
+            let json_val = serde_json::to_value(&msg.payload).unwrap();
+            assert!(json_val.get("method").is_some());
+
+            let mut buf = Vec::new();
+            write_ipc_message(&mut buf, &msg).await.unwrap();
+            let mut cur = Cursor::new(buf);
+            let decoded: IpcMessage<DaemonRequest> = read_ipc_message(&mut cur).await.unwrap();
+            assert_eq!(decoded.id, (idx + 300) as u64);
+            assert_eq!(serde_json::to_value(&decoded.payload).unwrap(), json_val);
+        }
+
+        let evt_resp = IpcMessage {
+            id: 400,
+            payload: DaemonResponse::Event(DaemonEvent::ActivityUpdated {
+                reason: "feed_post_added".into(),
+            }),
+        };
+        let mut buf = Vec::new();
+        write_ipc_message(&mut buf, &evt_resp).await.unwrap();
+        let mut cur = Cursor::new(buf);
+        let decoded: IpcMessage<DaemonResponse> = read_ipc_message(&mut cur).await.unwrap();
+        match decoded.payload {
+            DaemonResponse::Event(DaemonEvent::ActivityUpdated { reason }) => {
+                assert_eq!(reason, "feed_post_added");
+            }
+            _ => panic!("Expected ActivityUpdated"),
+        }
+
+        let payload_resp = IpcMessage {
+            id: 401,
+            payload: DaemonResponse::JsonPayload(serde_json::json!({ "ok": true, "count": 3 })),
+        };
+        let mut buf2 = Vec::new();
+        write_ipc_message(&mut buf2, &payload_resp).await.unwrap();
+        let mut cur2 = Cursor::new(buf2);
+        let decoded2: IpcMessage<DaemonResponse> = read_ipc_message(&mut cur2).await.unwrap();
+        match decoded2.payload {
+            DaemonResponse::JsonPayload(v) => assert_eq!(v["count"], 3),
+            _ => panic!("Expected JsonPayload"),
         }
     }
 }

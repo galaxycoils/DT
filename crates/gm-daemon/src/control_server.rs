@@ -443,6 +443,40 @@ fn chat_event(id: &Option<String>, delta: String, done: bool) -> DaemonEvent {
     }
 }
 
+fn resolve_allowed_runtime_file(
+    sup: &gm_openbot::OpenBotSupervisor,
+    bot_id: Option<&str>,
+    file: &str,
+) -> Result<(String, std::path::PathBuf)> {
+    let target_bot = bot_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&sup.config().openbot.default_bot_id)
+        .to_string();
+    if sup.roster().get_bot(&target_bot).is_none() {
+        return Err(GmError::Config(format!("Unknown bot '{target_bot}'")));
+    }
+    let bot_paths = sup.roster().runtime_paths_for_bot(&target_bot);
+    let shared = sup.shared_paths();
+    let path = match file {
+        "SOUL.md" => bot_paths
+            .soul_md()
+            .ok_or_else(|| GmError::Config("Missing bot SOUL.md".into()))?,
+        "IDENTITY.md" => bot_paths
+            .identity_md()
+            .ok_or_else(|| GmError::Config("Missing bot IDENTITY.md".into()))?,
+        "USER.md" => shared.user_md(),
+        "MEMORY.md" => shared.memory_md(),
+        "PROACTIVE_PREFERENCES.md" => shared.proactive_preferences_md(),
+        _ => {
+            return Err(GmError::Config(format!(
+                "Unsupported runtime file '{file}'; allowed: SOUL.md, IDENTITY.md, USER.md, MEMORY.md, PROACTIVE_PREFERENCES.md"
+            )));
+        }
+    };
+    Ok((target_bot, path))
+}
+
 impl DaemonControlServerState {
     async fn handle_connection<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
@@ -1039,6 +1073,596 @@ impl DaemonControlServerState {
                     };
                     write_ipc_message(&mut stream, &res).await?;
                 }
+                DaemonRequest::ListActivity => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let posts = sup.feed_store().list_posts(50)?;
+                        let brief_prompt = sup.feed_store().get_brief_prompt()?;
+                        Ok::<_, GmError>(serde_json::json!({
+                            "posts": posts,
+                            "brief_prompt": brief_prompt,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::RateActivity { id, rating } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let ok = sup.feed_store().rate_post(&id, rating)?;
+                        if !ok {
+                            return Err(GmError::Config(format!("Feed post '{id}' not found")));
+                        }
+                        let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                            reason: "feed_rated".into(),
+                        });
+                        Ok::<_, GmError>(serde_json::json!({
+                            "ok": true,
+                            "id": id,
+                            "rating": rating.clamp(-1, 5),
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ListGoals => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let mgr = sup.goal_manager();
+                        let goals = mgr.list_goals()?;
+                        let enriched: Vec<serde_json::Value> = goals
+                            .into_iter()
+                            .map(|goal| {
+                                let files = mgr.list_goal_files(&goal.slug).unwrap_or_default();
+                                serde_json::json!({
+                                    "goal": goal,
+                                    "files": files,
+                                })
+                            })
+                            .collect();
+                        Ok::<_, GmError>(serde_json::Value::Array(enriched))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SaveGoal { op, slug, payload } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let mgr = sup.goal_manager();
+                        let target_slug = || -> Result<String> {
+                            slug.as_deref()
+                                .or_else(|| payload.get("slug").and_then(|v| v.as_str()))
+                                .or_else(|| payload.get("id").and_then(|v| v.as_str()))
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string)
+                                .ok_or_else(|| {
+                                    GmError::Config("Goal slug or id is required".into())
+                                })
+                        };
+                        let extract_stops = |val: &serde_json::Value| -> Vec<String> {
+                            val.get("stop_conditions")
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|x| x.as_str().map(str::to_string))
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
+                        let out = match op.trim().to_ascii_lowercase().as_str() {
+                            "create" => {
+                                let title = payload
+                                    .get("title")
+                                    .and_then(|v| v.as_str())
+                                    .or(slug.as_deref())
+                                    .unwrap_or("")
+                                    .trim();
+                                let desc = payload
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let cat = payload.get("category").and_then(|v| v.as_str());
+                                let stops = extract_stops(&payload);
+                                serde_json::to_value(mgr.create_goal(title, desc, cat, stops)?)?
+                            }
+                            "create_subgoal" | "subgoal" => {
+                                let parent = payload
+                                    .get("parent_slug")
+                                    .or_else(|| payload.get("parent_goal_id"))
+                                    .and_then(|v| v.as_str())
+                                    .or(slug.as_deref())
+                                    .map(str::trim)
+                                    .filter(|s| !s.is_empty())
+                                    .ok_or_else(|| {
+                                        GmError::Config("Parent goal slug/id is required".into())
+                                    })?;
+                                let title = payload
+                                    .get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .trim();
+                                let desc = payload
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let stops = extract_stops(&payload);
+                                serde_json::to_value(
+                                    mgr.create_subgoal(parent, title, desc, stops)?,
+                                )?
+                            }
+                            "update" => {
+                                let target = target_slug()?;
+                                let title = payload.get("title").and_then(|v| v.as_str());
+                                let desc = payload.get("description").and_then(|v| v.as_str());
+                                let stops = payload
+                                    .get("stop_conditions")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|x| x.as_str().map(str::to_string))
+                                            .collect()
+                                    });
+                                let sched = payload.get("track_brief_schedule").map(|v| v.as_str());
+                                let cat = payload.get("category").map(|v| v.as_str());
+                                serde_json::to_value(
+                                    mgr.update_goal(&target, title, desc, stops, sched, cat)?,
+                                )?
+                            }
+                            "complete" => {
+                                let target = target_slug()?;
+                                let verified = payload
+                                    .get("verified")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                serde_json::to_value(mgr.complete_goal(&target, verified)?)?
+                            }
+                            "abandon" => {
+                                let target = target_slug()?;
+                                serde_json::to_value(mgr.abandon_goal(&target)?)?
+                            }
+                            "delete" => {
+                                let target = target_slug()?;
+                                serde_json::json!({ "deleted_slugs": mgr.delete_goal(&target)? })
+                            }
+                            other => {
+                                return Err(GmError::Config(format!(
+                                    "Unsupported goal op '{other}'"
+                                )));
+                            }
+                        };
+                        let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                            reason: "goal_updated".into(),
+                        });
+                        Ok::<_, GmError>(out)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ListSpaces => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let spaces = sup.spaces().list_spaces()?;
+                        let sp_port = sup.spaces_port();
+                        let mut urls = serde_json::Map::new();
+                        if sup.config().muse.enable_spaces {
+                            for sp in &spaces {
+                                if let Ok(url) = sup.spaces().mint_url_for_slug(&sp.slug, sp_port) {
+                                    urls.insert(sp.slug.clone(), serde_json::Value::String(url));
+                                }
+                            }
+                        }
+                        Ok::<_, GmError>(serde_json::json!({
+                            "spaces": spaces,
+                            "urls": urls,
+                            "spaces_port": sp_port,
+                            "enable_spaces": sup.config().muse.enable_spaces,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::CreateSpace {
+                    slug,
+                    title,
+                    kind,
+                    html,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        if !sup.config().muse.enable_spaces {
+                            return Err(GmError::Config(
+                                "Spaces feature is disabled in MuseConfig".into(),
+                            ));
+                        }
+                        let kind_enum = match kind
+                            .as_deref()
+                            .unwrap_or("static")
+                            .trim()
+                            .to_ascii_lowercase()
+                            .as_str()
+                        {
+                            "static" => gm_openbot::SpaceKind::Static,
+                            "ts" | "typescript" => gm_openbot::SpaceKind::Ts,
+                            other => {
+                                return Err(GmError::Config(format!(
+                                    "Unknown Space kind '{other}'"
+                                )));
+                            }
+                        };
+                        let meta = sup.spaces().create_space(
+                            &slug,
+                            title.as_deref(),
+                            kind_enum,
+                            html.as_deref(),
+                        )?;
+                        let sp_port = sup.spaces_port();
+                        let url = sup.spaces().mint_url_for_slug(&meta.slug, sp_port)?;
+                        let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                            reason: "space_created".into(),
+                        });
+                        Ok::<_, GmError>(serde_json::json!({
+                            "space": meta,
+                            "url": url,
+                            "spaces_port": sp_port,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SearchSkills { query } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let reg = sup.skill_registry()?;
+                        Ok::<_, GmError>(serde_json::json!({
+                            "skills": reg.search_skills(&query),
+                            "connectors": reg.search_connectors(&query),
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ReadRuntimeFile { bot_id, file } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let (target_bot, path) =
+                            resolve_allowed_runtime_file(sup, bot_id.as_deref(), &file)?;
+                        let pair = gm_muse::shared_files::SharedFileStore::global()
+                            .read_text_with_sha256(&path)?;
+                        let (exists, content, sha256) = match pair {
+                            Some((c, s)) => (true, c, Some(s)),
+                            None => (false, String::new(), None),
+                        };
+                        Ok::<_, GmError>(serde_json::json!({
+                            "bot_id": target_bot,
+                            "file": file,
+                            "exists": exists,
+                            "content": content,
+                            "sha256": sha256,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SaveRuntimeFile {
+                    bot_id,
+                    file,
+                    content,
+                    expected_sha256,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let (target_bot, path) =
+                            resolve_allowed_runtime_file(sup, bot_id.as_deref(), &file)?;
+                        if sup.scrubber().scrub_str(&content) != content {
+                            return Err(GmError::SafetyViolation(
+                                "Refused plaintext secret in runtime file".into(),
+                            ));
+                        }
+                        let store = gm_muse::shared_files::SharedFileStore::global();
+                        let existing = store.read_text_with_sha256(&path)?;
+                        if existing.is_some() && expected_sha256.is_none() {
+                            return Err(GmError::Config(
+                                "expected_sha256 is required when overwriting an existing runtime file".into(),
+                            ));
+                        }
+                        match store.write_exact_sync(&path, expected_sha256.as_deref(), &content)? {
+                            gm_muse::shared_files::SharedUpdateOutcome::Conflict {
+                                current_sha256,
+                            } => Err(GmError::Config(format!(
+                                "Optimistic concurrency conflict: expected_sha256 does not match (current_sha256={})",
+                                current_sha256.as_deref().unwrap_or("<missing>")
+                            ))),
+                            gm_muse::shared_files::SharedUpdateOutcome::Updated {
+                                sha256,
+                                bytes,
+                            } => {
+                                if file == "PROACTIVE_PREFERENCES.md" {
+                                    let _ = sup.sync_quiet_gate_from_prefs();
+                                }
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "identity_updated".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "ok": true,
+                                    "bot_id": target_bot,
+                                    "file": file,
+                                    "sha256": sha256,
+                                    "bytes": bytes,
+                                }))
+                            }
+                        }
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ImportMemory {
+                    input,
+                    apply,
+                    report_sha256,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        if input.len() > gm_memory::MAX_IMPORT_BYTES {
+                            return Err(GmError::Config(format!(
+                                "Import payload exceeds {} byte limit",
+                                gm_memory::MAX_IMPORT_BYTES
+                            )));
+                        }
+                        let bot_id = &sup.config().openbot.default_bot_id;
+                        let paths = sup.shared_paths();
+                        let memory = sup.roster().memory_store(bot_id)?;
+                        let report = gm_memory::import_memory_portable_with_stores(
+                            &input,
+                            &paths,
+                            Some(sup.provenance()),
+                            Some(&memory),
+                            apply,
+                            report_sha256.as_deref(),
+                        )?;
+                        if report.applied {
+                            let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                reason: "memory_imported".into(),
+                            });
+                        }
+                        Ok::<_, GmError>(serde_json::to_value(report)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ForgetPlan { bot_id, request } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let plan = sup.plan_forget(bot_id.as_deref(), &request)?;
+                        Ok::<_, GmError>(serde_json::to_value(plan)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ForgetConfirm {
+                    bot_id,
+                    plan_id,
+                    verification_query,
+                    confirmed,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let report = sup.confirm_forget(
+                            bot_id.as_deref(),
+                            &plan_id,
+                            verification_query.as_deref(),
+                            confirmed,
+                        )?;
+                        Ok::<_, GmError>(serde_json::to_value(report)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::UpdateDiscretion {
+                    chat_id,
+                    rules,
+                    expected_sha256,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let clean_rules: Vec<String> = rules
+                            .into_iter()
+                            .map(|r| r.trim().to_string())
+                            .filter(|r| !r.is_empty())
+                            .collect();
+                        if clean_rules.is_empty() {
+                            return Err(GmError::Config(
+                                "At least one discretion rule is required".into(),
+                            ));
+                        }
+                        let policy = sup.discretion().update_user_rules(
+                            &chat_id,
+                            &clean_rules,
+                            expected_sha256.as_deref(),
+                        )?;
+                        sup.audit().log_governance(
+                            "discretion_updated",
+                            Some("muse"),
+                            gm_safety::AuditCategory::Permitted,
+                            "RULE-POLICY-001",
+                            "Updated bridge discretion user rules via IPC",
+                            &format!("Updated DISCRETION.md for chat '{chat_id}'"),
+                            serde_json::json!({ "chat_id": chat_id }),
+                        );
+                        Ok::<_, GmError>(serde_json::to_value(policy)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
                 DaemonRequest::SubscribeEvents => {
                     let mut rx = self.event_tx.subscribe();
                     let ack = IpcMessage {
@@ -1174,5 +1798,300 @@ mod conversation_tests {
         assert!(muse_msgs[0].content.contains("## Who You Are"));
         assert!(muse_msgs[0].content.contains("## Runtime Adaptation"));
         assert!(muse_msgs[1].content.contains("[model=grok-test]"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod muse_ipc_tests {
+    use super::*;
+    use gm_llm::MockLlmBackend;
+
+    async fn rpc_unix(
+        stream: &mut tokio::net::UnixStream,
+        id: u64,
+        req: DaemonRequest,
+    ) -> DaemonResponse {
+        write_ipc_message(stream, &IpcMessage { id, payload: req })
+            .await
+            .unwrap();
+        let resp: IpcMessage<DaemonResponse> = read_ipc_message(stream).await.unwrap();
+        assert_eq!(resp.id, id);
+        resp.payload
+    }
+
+    #[tokio::test]
+    async fn muse_ipc_handlers_cover_runtime_files_goals_spaces_skills_import_discretion_and_forget()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let short_id = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let daemon_socket = std::path::PathBuf::from(format!("/tmp/gmmuse_{short_id}.sock"));
+        let helper_socket = std::path::PathBuf::from(format!("/tmp/gmmuseh_{short_id}.sock"));
+        let storage = dir.path().join("storage");
+        let config = GmConfig {
+            storage_dir: storage.clone(),
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: storage.join("bots"),
+                ..Default::default()
+            },
+            daemon_socket_path: daemon_socket.clone(),
+            socket_path: helper_socket.clone(),
+            ..Default::default()
+        };
+
+        let budget = Arc::new(BudgetManager::new(config.budget.clone()));
+        let llm_client = Arc::new(HybridLlmClient::new(
+            Arc::new(MockLlmBackend::new()),
+            Arc::clone(&budget),
+        ));
+        let router = LlmRouter::new(config.providers.clone());
+        let server = DaemonControlServer::new(
+            config,
+            budget,
+            llm_client,
+            router,
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            Arc::new(AuditLogger::in_memory()),
+            Arc::new(IpcPlatformClient::new(&helper_socket)),
+        );
+        let srv_handle = tokio::spawn(async move {
+            let _ = server.run().await;
+        });
+
+        for _ in 0..40 {
+            if daemon_socket.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        }
+        let mut stream = tokio::net::UnixStream::connect(&daemon_socket)
+            .await
+            .unwrap();
+
+        // 1. ReadRuntimeFile allowlist rejection & valid read + SaveRuntimeFile CAS
+        let bad_file = rpc_unix(
+            &mut stream,
+            1,
+            DaemonRequest::ReadRuntimeFile {
+                bot_id: Some("muse".into()),
+                file: "../../etc/passwd".into(),
+            },
+        )
+        .await;
+        assert!(matches!(bad_file, DaemonResponse::Error(_)));
+
+        let user_read = rpc_unix(
+            &mut stream,
+            2,
+            DaemonRequest::ReadRuntimeFile {
+                bot_id: Some("muse".into()),
+                file: "USER.md".into(),
+            },
+        )
+        .await;
+        let user_val = match user_read {
+            DaemonResponse::JsonPayload(v) => v,
+            other => panic!("Expected JsonPayload, got {other:?}"),
+        };
+        let sha = user_val["sha256"].as_str().map(str::to_string);
+
+        // Wrong CAS sha256 fails
+        let conflict = rpc_unix(
+            &mut stream,
+            3,
+            DaemonRequest::SaveRuntimeFile {
+                bot_id: Some("muse".into()),
+                file: "USER.md".into(),
+                content: "# USER\n- Prefers concise briefs\n".into(),
+                expected_sha256: Some("0".repeat(64)),
+            },
+        )
+        .await;
+        assert!(matches!(conflict, DaemonResponse::Error(msg) if msg.contains("conflict")));
+
+        let saved = rpc_unix(
+            &mut stream,
+            4,
+            DaemonRequest::SaveRuntimeFile {
+                bot_id: Some("muse".into()),
+                file: "USER.md".into(),
+                content: "# USER\n- Prefers concise briefs\n".into(),
+                expected_sha256: sha,
+            },
+        )
+        .await;
+        assert!(matches!(saved, DaemonResponse::JsonPayload(v) if v["ok"] == true));
+
+        // 2. Goals: create -> subgoal -> depth-2 rejected -> list
+        let g1 = rpc_unix(
+            &mut stream,
+            5,
+            DaemonRequest::SaveGoal {
+                op: "create".into(),
+                slug: None,
+                payload: serde_json::json!({"title": "Ship release", "description": "Milestone"}),
+            },
+        )
+        .await;
+        let g1_val = match g1 {
+            DaemonResponse::JsonPayload(v) => v,
+            other => panic!("Expected goal JsonPayload, got {other:?}"),
+        };
+        let parent_slug = g1_val["slug"].as_str().unwrap().to_string();
+
+        let sub = rpc_unix(
+            &mut stream,
+            6,
+            DaemonRequest::SaveGoal {
+                op: "create_subgoal".into(),
+                slug: Some(parent_slug.clone()),
+                payload: serde_json::json!({"title": "Write docs"}),
+            },
+        )
+        .await;
+        let sub_slug = match sub {
+            DaemonResponse::JsonPayload(v) => v["slug"].as_str().unwrap().to_string(),
+            other => panic!("Expected subgoal JsonPayload, got {other:?}"),
+        };
+
+        let depth2 = rpc_unix(
+            &mut stream,
+            7,
+            DaemonRequest::SaveGoal {
+                op: "create_subgoal".into(),
+                slug: Some(sub_slug),
+                payload: serde_json::json!({"title": "Too deep"}),
+            },
+        )
+        .await;
+        assert!(matches!(depth2, DaemonResponse::Error(msg) if msg.contains("one subgoal")));
+
+        // 3. Spaces: Static succeeds, Ts rejected
+        let ts_err = rpc_unix(
+            &mut stream,
+            8,
+            DaemonRequest::CreateSpace {
+                slug: "ts-denied".into(),
+                title: Some("TS".into()),
+                kind: Some("ts".into()),
+                html: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(ts_err, DaemonResponse::Error(msg) if msg.contains("TS Spaces are not supported yet"))
+        );
+
+        let sp_ok = rpc_unix(
+            &mut stream,
+            9,
+            DaemonRequest::CreateSpace {
+                slug: "budget-view".into(),
+                title: Some("Budget View".into()),
+                kind: Some("static".into()),
+                html: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(sp_ok, DaemonResponse::JsonPayload(v) if v["url"].as_str().unwrap().contains("/spaces/v2/budget-view/"))
+        );
+
+        // 4. Activity, Skills, ImportMemory, Discretion, ForgetPlan -> ForgetConfirm
+        let act = rpc_unix(&mut stream, 10, DaemonRequest::ListActivity).await;
+        assert!(matches!(act, DaemonResponse::JsonPayload(v) if v["posts"].is_array()));
+
+        let skills = rpc_unix(
+            &mut stream,
+            11,
+            DaemonRequest::SearchSkills {
+                query: "goals".into(),
+            },
+        )
+        .await;
+        assert!(matches!(skills, DaemonResponse::JsonPayload(v) if v["skills"].is_array()));
+
+        let dry = rpc_unix(
+            &mut stream,
+            12,
+            DaemonRequest::ImportMemory {
+                input: "- Enjoys espresso every morning\n".into(),
+                apply: false,
+                report_sha256: None,
+            },
+        )
+        .await;
+        let report_sha = match dry {
+            DaemonResponse::JsonPayload(v) => v["report_sha256"].as_str().unwrap().to_string(),
+            other => panic!("Expected import dry-run report, got {other:?}"),
+        };
+        let applied = rpc_unix(
+            &mut stream,
+            13,
+            DaemonRequest::ImportMemory {
+                input: "- Enjoys espresso every morning\n".into(),
+                apply: true,
+                report_sha256: Some(report_sha),
+            },
+        )
+        .await;
+        assert!(matches!(applied, DaemonResponse::JsonPayload(v) if v["applied"] == true));
+
+        let disc = rpc_unix(
+            &mut stream,
+            14,
+            DaemonRequest::UpdateDiscretion {
+                chat_id: "slack-team".into(),
+                rules: vec!["Only summarize public sprint tickets".into()],
+                expected_sha256: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(disc, DaemonResponse::JsonPayload(v) if v["user_rules"].as_array().unwrap().len() == 1)
+        );
+
+        let plan_resp = rpc_unix(
+            &mut stream,
+            15,
+            DaemonRequest::ForgetPlan {
+                bot_id: Some("muse".into()),
+                request: "espresso".into(),
+            },
+        )
+        .await;
+        let plan_id = match plan_resp {
+            DaemonResponse::JsonPayload(v) => v["plan_id"].as_str().unwrap().to_string(),
+            other => panic!("Expected ForgetPlan, got {other:?}"),
+        };
+
+        let unconfirmed = rpc_unix(
+            &mut stream,
+            16,
+            DaemonRequest::ForgetConfirm {
+                bot_id: Some("muse".into()),
+                plan_id: plan_id.clone(),
+                verification_query: Some("espresso".into()),
+                confirmed: false,
+            },
+        )
+        .await;
+        assert!(matches!(unconfirmed, DaemonResponse::Error(_)));
+
+        let confirmed = rpc_unix(
+            &mut stream,
+            17,
+            DaemonRequest::ForgetConfirm {
+                bot_id: Some("muse".into()),
+                plan_id,
+                verification_query: Some("espresso".into()),
+                confirmed: true,
+            },
+        )
+        .await;
+        assert!(matches!(confirmed, DaemonResponse::JsonPayload(v) if v["status"] == "forgotten"));
+
+        srv_handle.abort();
+        let _ = std::fs::remove_file(&daemon_socket);
     }
 }

@@ -1,20 +1,29 @@
 use crate::a2a::A2aCoordinator;
 use crate::channels::{ChannelInfo, ChannelMessageRecord, ChannelStore};
 use crate::compaction::ContextCompactor;
+use crate::discretion::DiscretionStore;
 use crate::queue::{DurableTaskQueue, QueuedTask};
 use crate::roster::{BotProfile, BotRoster};
+use crate::spaces::{SpaceKind, SpacesManager};
 use gm_agent::{
-    AgentCapabilities, AgentLoop, AgentLoopConfig, InteractionHandler, NonInteractiveHandler,
+    AgentCapabilities, AgentLoop, AgentLoopConfig, DirectiveKind, GoalOpKind, InteractionHandler,
+    MuseWorkflowDelegate, NonInteractiveHandler, SpaceOpKind,
 };
 use gm_core::config::GmConfig;
 use gm_core::error::{GmError, Result};
 use gm_core::ipc::{DaemonEvent, QueueControlAction};
+use gm_core::muse_paths::MuseRuntimePaths;
 use gm_llm::{HybridLlmClient, LlmRouter, TaskType, VaultSecretResolver};
+use gm_memory::{ForgetExecutor, ForgetPlan, ForgetPlanner, ForgetResources, ProvenanceStore};
 use gm_muse::prompt::{MusePromptBuilder, PromptInput, PromptSurface};
+use gm_muse::shared_files::SharedFileStore;
+use gm_muse::skills::SkillRegistry;
 use gm_platform::Platform;
-use gm_safety::{AuditLogger, BlocklistManager, KillSwitch, SecretScrubber};
+use gm_safety::{AuditCategory, AuditLogger, BlocklistManager, KillSwitch, SecretScrubber};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use tokio::sync::{Mutex as AsyncMutex, broadcast};
 
 /// Standard AG-UI protocol event envelope (`CopilotKit/OpenBot` compatible).
@@ -31,7 +40,8 @@ pub struct AgUiEvent {
 }
 
 /// Coordinates the multi-bot roster, durable SQLite FIFO task queues, shared channels,
-/// A2A handoffs, `GuiSeatMutex` serialization, and AG-UI / DaemonEvent broadcasting.
+/// A2A handoffs, `GuiSeatMutex` serialization, Muse Stores (`SpacesManager`, `DiscretionStore`,
+/// `ProvenanceStore`, `FeedStore`), and AG-UI / DaemonEvent broadcasting.
 #[derive(Clone)]
 pub struct OpenBotSupervisor {
     pub(crate) config: GmConfig,
@@ -45,6 +55,11 @@ pub struct OpenBotSupervisor {
     compactor: ContextCompactor,
     feed_store: Arc<gm_goals::FeedStore>,
     quiet_gate: gm_goals::QuietGate,
+    spaces: SpacesManager,
+    discretion: DiscretionStore,
+    provenance: ProvenanceStore,
+    companion_port: Arc<AtomicU16>,
+    spaces_port: Arc<AtomicU16>,
     gui_seat: Arc<AsyncMutex<()>>,
     daemon_events_tx: broadcast::Sender<DaemonEvent>,
     agui_events_tx: broadcast::Sender<AgUiEvent>,
@@ -74,8 +89,30 @@ impl OpenBotSupervisor {
         )?);
         let _ = feed_store.seed_getting_started_if_never_seeded();
         let quiet_gate = gm_goals::QuietGate::new(gm_goals::QuietGateConfig::default());
-        let shared_paths = gm_core::muse_paths::MuseRuntimePaths::shared(&config.storage_dir);
-        let _ = gm_goals::ProactivePrefsStore::new(shared_paths).sync_with_quiet_gate(&quiet_gate);
+        let shared_paths = MuseRuntimePaths::shared(&config.storage_dir);
+        let _ = gm_goals::ProactivePrefsStore::new(shared_paths.clone())
+            .sync_with_quiet_gate(&quiet_gate);
+
+        let comp_port_val = config
+            .openbot
+            .companion_bind_addr
+            .parse::<SocketAddr>()
+            .map(|a| a.port())
+            .unwrap_or(7433);
+        let spaces_port_val = config
+            .muse
+            .spaces_port
+            .unwrap_or_else(|| comp_port_val.saturating_add(1));
+
+        let provenance = ProvenanceStore::open(shared_paths.provenance_db_path())?;
+        let spaces = SpacesManager::new(
+            shared_paths.clone(),
+            Arc::clone(&audit),
+            config.muse.clone(),
+            comp_port_val,
+        );
+        let discretion = DiscretionStore::new(shared_paths);
+
         let a2a = A2aCoordinator::new(
             roster.clone(),
             queue.clone(),
@@ -101,6 +138,11 @@ impl OpenBotSupervisor {
             compactor,
             feed_store,
             quiet_gate,
+            spaces,
+            discretion,
+            provenance,
+            companion_port: Arc::new(AtomicU16::new(comp_port_val)),
+            spaces_port: Arc::new(AtomicU16::new(spaces_port_val)),
             gui_seat: Arc::new(AsyncMutex::new(())),
             daemon_events_tx,
             agui_events_tx,
@@ -123,9 +165,27 @@ impl OpenBotSupervisor {
     }
 
     pub fn runtime_status(&self) -> serde_json::Value {
-        serde_json::json!({"demo_mode":self.runtime_demo.load(std::sync::atomic::Ordering::SeqCst),"protocol_version":1,"worker_running":self.runtime_active.load(std::sync::atomic::Ordering::SeqCst),
-            "host_desktop_opt_in":self.config.safety.allow_host_desktop,"shell_environment":if self.config.workspace_vm.enabled {"offline_vm_configured_unverified"} else {"unavailable"},
-            "platform":std::env::consts::OS})
+        serde_json::json!({
+            "demo_mode": self.runtime_demo.load(std::sync::atomic::Ordering::SeqCst),
+            "protocol_version": 1,
+            "worker_running": self.runtime_active.load(std::sync::atomic::Ordering::SeqCst),
+            "host_desktop_opt_in": self.config.safety.allow_host_desktop,
+            "shell_environment": if self.config.workspace_vm.enabled { "offline_vm_configured_unverified" } else { "unavailable" },
+            "platform": std::env::consts::OS,
+            "companion_port": self.companion_port(),
+            "spaces_port": self.spaces_port(),
+            "enable_spaces": self.config.muse.enable_spaces,
+            "enable_heartbeat": self.config.muse.enable_heartbeat,
+            "enable_dreams": self.config.muse.enable_dreams,
+        })
+    }
+
+    pub fn config(&self) -> &GmConfig {
+        &self.config
+    }
+
+    pub fn shared_paths(&self) -> MuseRuntimePaths {
+        MuseRuntimePaths::shared(&self.config.storage_dir)
     }
 
     pub fn roster(&self) -> &BotRoster {
@@ -156,9 +216,63 @@ impl OpenBotSupervisor {
         &self.quiet_gate
     }
 
+    pub fn spaces(&self) -> &SpacesManager {
+        &self.spaces
+    }
+
+    pub fn discretion(&self) -> &DiscretionStore {
+        &self.discretion
+    }
+
+    pub fn provenance(&self) -> &ProvenanceStore {
+        &self.provenance
+    }
+
+    pub fn goal_manager(&self) -> gm_goals::GoalWorkspaceManager {
+        gm_goals::GoalWorkspaceManager::new(self.shared_paths())
+    }
+
+    pub fn prefs_store(&self) -> gm_goals::ProactivePrefsStore {
+        gm_goals::ProactivePrefsStore::new(self.shared_paths())
+    }
+
+    pub fn skill_registry(&self) -> Result<SkillRegistry> {
+        SkillRegistry::open_with_scrubber(&self.shared_paths(), self.scrubber.clone())
+    }
+
+    pub fn companion_port(&self) -> u16 {
+        self.companion_port.load(Ordering::SeqCst)
+    }
+
+    pub fn spaces_port(&self) -> u16 {
+        self.spaces_port.load(Ordering::SeqCst)
+    }
+
+    pub fn companion_port_atomic(&self) -> Arc<AtomicU16> {
+        Arc::clone(&self.companion_port)
+    }
+
+    pub fn spaces_port_atomic(&self) -> Arc<AtomicU16> {
+        Arc::clone(&self.spaces_port)
+    }
+
+    pub fn set_companion_port(&self, port: u16) {
+        self.companion_port.store(port, Ordering::SeqCst);
+        self.spaces.set_companion_port(port);
+    }
+
+    pub fn set_spaces_port(&self, port: u16) {
+        self.spaces_port.store(port, Ordering::SeqCst);
+    }
+
+    pub fn set_ports(&self, companion: u16, spaces: u16) {
+        self.set_companion_port(companion);
+        self.set_spaces_port(spaces);
+    }
+
     pub fn sync_quiet_gate_from_prefs(&self) -> Result<()> {
-        let shared_paths = gm_core::muse_paths::MuseRuntimePaths::shared(&self.config.storage_dir);
-        gm_goals::ProactivePrefsStore::new(shared_paths).sync_with_quiet_gate(&self.quiet_gate)?;
+        gm_goals::ProactivePrefsStore::new(self.shared_paths())
+            .sync_with_quiet_gate(&self.quiet_gate)?;
         Ok(())
     }
 
@@ -500,7 +614,12 @@ impl OpenBotSupervisor {
                         step,
                         action_summary: action_summary.to_string(),
                     });
-            });
+            })
+            .with_workflow_delegate(Arc::new(OpenBotWorkflowDelegate {
+                supervisor: self.clone(),
+                bot_id: bot_id.to_string(),
+                task_id: task.id.clone(),
+            }));
 
         let memory = self.roster.memory_store(bot_id)?;
         let memories = memory.search(&task.instruction, 5)?;
@@ -743,6 +862,308 @@ impl OpenBotSupervisor {
             Some(MusePromptBuilder::build_messages(&input)?),
             String::new(),
         ))
+    }
+
+    pub fn plan_forget(&self, bot_id: Option<&str>, request: &str) -> Result<ForgetPlan> {
+        let target_bot = bot_id.unwrap_or(&self.config.openbot.default_bot_id);
+        let paths = self.shared_paths();
+        let memory = self.roster.memory_store(target_bot)?;
+        let mut res = ForgetResources::new(paths, memory, self.provenance.clone());
+        res.audit_logger = Some(Arc::clone(&self.audit));
+        res.forget_redact_audit = self.config.muse.forget_redact_audit;
+        ForgetPlanner::plan(&res, request)
+    }
+
+    pub fn confirm_forget(
+        &self,
+        bot_id: Option<&str>,
+        plan_id: &str,
+        verification_query: Option<&str>,
+        confirmed: bool,
+    ) -> Result<gm_memory::ForgetReport> {
+        let target_bot = bot_id.unwrap_or(&self.config.openbot.default_bot_id);
+        let paths = self.shared_paths();
+        let pending_path = paths.forget_pending_path();
+        let (raw, _) = SharedFileStore::global()
+            .read_text_with_sha256(&pending_path)?
+            .ok_or_else(|| {
+                GmError::Config("No pending Forget plan found; run ForgetPlan first".into())
+            })?;
+        let plan: ForgetPlan = serde_json::from_str(&raw)?;
+        if plan.plan_id != plan_id {
+            return Err(GmError::Config(format!(
+                "Forget plan ID mismatch (pending={}, requested={plan_id})",
+                plan.plan_id
+            )));
+        }
+        let memory = self.roster.memory_store(target_bot)?;
+        let mut res = ForgetResources::new(paths, memory, self.provenance.clone());
+        res.audit_logger = Some(Arc::clone(&self.audit));
+        res.forget_redact_audit = self.config.muse.forget_redact_audit;
+        let feed_store = Arc::clone(&self.feed_store);
+        res.feed_reset_fence = Some(Arc::new(move |_| {
+            feed_store.reset_feed_signals()?;
+            Ok(())
+        }));
+        let report = ForgetExecutor::confirm(&plan, &res, confirmed, verification_query)?;
+        let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+            reason: "forget_confirmed".into(),
+        });
+        Ok(report)
+    }
+}
+
+struct OpenBotWorkflowDelegate {
+    supervisor: OpenBotSupervisor,
+    bot_id: String,
+    task_id: String,
+}
+
+#[async_trait::async_trait]
+impl MuseWorkflowDelegate for OpenBotWorkflowDelegate {
+    async fn memory_search(&self, query: &str, limit: Option<u32>) -> Result<String> {
+        let store = self.supervisor.roster.memory_store(&self.bot_id)?;
+        let cap = limit.unwrap_or(8).clamp(1, 50) as usize;
+        let hits = store.search(query, cap)?;
+        Ok(serde_json::to_string_pretty(&hits)?)
+    }
+
+    async fn memory_explain(&self, target: &str) -> Result<String> {
+        let explanations = self.supervisor.provenance.explain_memory(target)?;
+        Ok(serde_json::to_string_pretty(&explanations)?)
+    }
+
+    async fn forget_plan(&self, request: &str) -> Result<String> {
+        let plan = self.supervisor.plan_forget(Some(&self.bot_id), request)?;
+        Ok(serde_json::to_string_pretty(&plan)?)
+    }
+
+    async fn forget_confirm(&self, plan_id: &str) -> Result<String> {
+        // `AgentLoop` enforces `ActionTier::Irreversible` interaction approval before reaching here.
+        let report = self
+            .supervisor
+            .confirm_forget(Some(&self.bot_id), plan_id, None, true)?;
+        Ok(serde_json::to_string_pretty(&report)?)
+    }
+
+    async fn goal_op(
+        &self,
+        op: GoalOpKind,
+        slug: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> Result<String> {
+        let mgr = self.supervisor.goal_manager();
+        let target_slug = || -> Result<String> {
+            slug.or_else(|| payload.get("slug").and_then(|v| v.as_str()))
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| GmError::Config("Goal slug or id is required".into()))
+        };
+        let extract_stop_conditions = |val: &serde_json::Value| -> Vec<String> {
+            val.get("stop_conditions")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        let val = match op {
+            GoalOpKind::Create => {
+                let title = payload
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .or(slug)
+                    .unwrap_or("")
+                    .trim();
+                let desc = payload
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let cat = payload.get("category").and_then(|v| v.as_str());
+                let stops = extract_stop_conditions(payload);
+                let goal = mgr.create_goal(title, desc, cat, stops)?;
+                serde_json::to_value(goal)?
+            }
+            GoalOpKind::CreateSubgoal => {
+                let parent = payload
+                    .get("parent_slug")
+                    .or_else(|| payload.get("parent_goal_id"))
+                    .and_then(|v| v.as_str())
+                    .or(slug)
+                    .ok_or_else(|| GmError::Config("Parent goal slug/id is required".into()))?;
+                let title = payload
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim();
+                let desc = payload
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let stops = extract_stop_conditions(payload);
+                let sub = mgr.create_subgoal(parent, title, desc, stops)?;
+                serde_json::to_value(sub)?
+            }
+            GoalOpKind::Update => {
+                let target = target_slug()?;
+                let title = payload.get("title").and_then(|v| v.as_str());
+                let desc = payload.get("description").and_then(|v| v.as_str());
+                let stops = payload
+                    .get("stop_conditions")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(str::to_string))
+                            .collect()
+                    });
+                let sched = payload.get("track_brief_schedule").map(|v| v.as_str());
+                let cat = payload.get("category").map(|v| v.as_str());
+                let updated = mgr.update_goal(&target, title, desc, stops, sched, cat)?;
+                serde_json::to_value(updated)?
+            }
+            GoalOpKind::Complete => {
+                let target = target_slug()?;
+                let verified = payload
+                    .get("verified")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                serde_json::to_value(mgr.complete_goal(&target, verified)?)?
+            }
+            GoalOpKind::Abandon => {
+                let target = target_slug()?;
+                serde_json::to_value(mgr.abandon_goal(&target)?)?
+            }
+            GoalOpKind::Delete => {
+                let target = target_slug()?;
+                serde_json::json!({ "deleted_slugs": mgr.delete_goal(&target)? })
+            }
+        };
+        let _ = self
+            .supervisor
+            .daemon_events_tx
+            .send(DaemonEvent::ActivityUpdated {
+                reason: format!("goal_{op:?}").to_lowercase(),
+            });
+        Ok(serde_json::to_string_pretty(&val)?)
+    }
+
+    async fn space_op(
+        &self,
+        op: SpaceOpKind,
+        slug: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String> {
+        if !self.supervisor.config.muse.enable_spaces {
+            return Err(GmError::Config(
+                "Spaces feature is disabled in MuseConfig".into(),
+            ));
+        }
+        let spaces = self.supervisor.spaces();
+        let val = match op {
+            SpaceOpKind::Create => {
+                let kind = match payload
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("static")
+                    .trim()
+                    .to_ascii_lowercase()
+                    .as_str()
+                {
+                    "static" => SpaceKind::Static,
+                    "ts" | "typescript" => SpaceKind::Ts,
+                    other => {
+                        return Err(GmError::Config(format!("Unknown Space kind '{other}'")));
+                    }
+                };
+                let title = payload.get("title").and_then(|v| v.as_str());
+                let html = payload
+                    .get("html")
+                    .or_else(|| payload.get("content"))
+                    .and_then(|v| v.as_str());
+                let meta = spaces.create_space(slug, title, kind, html)?;
+                let url = spaces.mint_url_for_slug(&meta.slug, self.supervisor.spaces_port())?;
+                serde_json::json!({ "space": meta, "url": url })
+            }
+            SpaceOpKind::Edit => {
+                let rel_path = payload
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("index.html");
+                let content = payload
+                    .get("content")
+                    .or_else(|| payload.get("html"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| GmError::Config("Space edit requires content string".into()))?;
+                let abs = spaces.update_space_file(slug, rel_path, content)?;
+                serde_json::json!({ "slug": slug, "updated_path": abs })
+            }
+            SpaceOpKind::Publish => {
+                let confirmed = payload
+                    .get("confirmed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                serde_json::to_value(spaces.publish_space(slug, confirmed)?)?
+            }
+            SpaceOpKind::Unpublish => serde_json::to_value(spaces.unpublish_space(slug)?)?,
+            SpaceOpKind::Delete => {
+                serde_json::json!({ "slug": slug, "deleted": spaces.delete_space(slug, true)? })
+            }
+        };
+        Ok(serde_json::to_string_pretty(&val)?)
+    }
+
+    async fn update_discretion(&self, chat_id: &str, rules: &str, loosens: bool) -> Result<String> {
+        let lines: Vec<String> = rules
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        if lines.is_empty() {
+            return Err(GmError::Config("At least one rule line is required".into()));
+        }
+        let policy = self
+            .supervisor
+            .discretion
+            .update_user_rules(chat_id, &lines, None)?;
+        self.supervisor.audit.log_governance(
+            "discretion_updated",
+            Some(&self.bot_id),
+            AuditCategory::Permitted,
+            if loosens {
+                "RULE-PRIVACY-DISCRETION"
+            } else {
+                "RULE-POLICY-001"
+            },
+            if loosens {
+                "Approved discretion rule loosening"
+            } else {
+                "Added external bridge discretion user rule"
+            },
+            &format!("Updated DISCRETION.md for chat '{chat_id}'"),
+            serde_json::json!({ "chat_id": chat_id, "loosens": loosens }),
+        );
+        Ok(serde_json::to_string_pretty(&serde_json::json!({
+            "chat_id": policy.chat_id,
+            "sha256": policy.sha256,
+            "user_rules": policy.user_rules,
+        }))?)
+    }
+
+    async fn emit_directive(&self, directive: &DirectiveKind) -> Result<String> {
+        self.supervisor.emit_agui(
+            "MUSE_DIRECTIVE",
+            &self.task_id,
+            &self.bot_id,
+            serde_json::json!({ "directive": directive }),
+        );
+        Ok(serde_json::to_string(&serde_json::json!({
+            "emitted": true,
+            "directive": directive,
+        }))?)
     }
 }
 

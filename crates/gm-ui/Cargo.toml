@@ -24,6 +24,7 @@ tracing-subscriber = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 gm-daemon = { workspace = true }
+gm-muse = { workspace = true }
 libc = { workspace = true }
 
 [build-dependencies]
