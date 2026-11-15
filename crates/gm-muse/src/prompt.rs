@@ -121,6 +121,7 @@ pub struct PromptInput<'a> {
     pub config: &'a MuseConfig,
     pub model_display_name: &'a str,
     pub skills_inventory: Option<&'a str>,
+    pub authenticated_connectors: &'a [String],
     pub goals_summary: Option<&'a str>,
     pub channel_instructions: Option<&'a str>,
     pub allow_host_desktop: bool,
@@ -142,6 +143,7 @@ impl<'a> PromptInput<'a> {
             config,
             model_display_name,
             skills_inventory: None,
+            authenticated_connectors: &[],
             goals_summary: None,
             channel_instructions: None,
             allow_host_desktop: false,
@@ -252,16 +254,33 @@ impl MusePromptBuilder {
         }
 
         // 5. Progressive-disclosure skills inventory (omitted for Minimal/Heartbeat)
-        if tier.skills_cap() > 0
-            && let Some(inv) = input
+        if tier.skills_cap() > 0 {
+            let auto_inventory;
+            let resolved_inventory = match input
                 .skills_inventory
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-        {
-            let clean = scrubber.scrub_str(inv);
-            let capped = truncate_utf8_for_file(&clean, tier.skills_cap(), "skills/index");
-            let section = format!("## Available Skills & Connectors\n{capped}");
-            append_capped_plain(&mut prefix, max_prefix_bytes, &section, "skills/index");
+            {
+                Some(explicit) => Some(explicit),
+                None if input.config.enable_skills => {
+                    let reg =
+                        crate::skills::SkillRegistry::open_resilient(input.paths, scrubber.clone());
+                    let inv = reg.prompt_inventory(input.authenticated_connectors);
+                    if inv.trim().is_empty() {
+                        None
+                    } else {
+                        auto_inventory = inv;
+                        Some(auto_inventory.as_str())
+                    }
+                }
+                None => None,
+            };
+            if let Some(inv) = resolved_inventory {
+                let clean = scrubber.scrub_str(inv);
+                let capped = truncate_utf8_for_file(&clean, tier.skills_cap(), "skills/index");
+                let section = format!("## Available Skills & Connectors\n{capped}");
+                append_capped_plain(&mut prefix, max_prefix_bytes, &section, "skills/index");
+            }
         }
 
         // 6. Fenced user/memory/preferences/relationship/alignment data files
@@ -867,6 +886,37 @@ mod tests {
         assert_eq!(
             combined, expected,
             "MainChat snapshot drifted; inspect diff or regenerate intentionally"
+        );
+    }
+
+    #[test]
+    fn auto_skills_inventory_populates_when_enabled_and_omitted_when_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let paths = MuseRuntimePaths::shared(&storage);
+        bootstrap_shared_runtime_files(&paths).unwrap();
+
+        let enabled_cfg = MuseConfig::default();
+        let input_on = PromptInput::new(PromptSurface::MainChat, &paths, &enabled_cfg, "grok-4");
+        let rendered_on = MusePromptBuilder::build(&input_on).unwrap();
+        assert!(
+            rendered_on.messages[0]
+                .content
+                .contains("## Available Skills & Connectors")
+        );
+        assert!(rendered_on.messages[0].content.contains("`goals`"));
+        assert!(rendered_on.messages[0].content.contains("`forget`"));
+
+        let disabled_cfg = MuseConfig {
+            enable_skills: false,
+            ..Default::default()
+        };
+        let input_off = PromptInput::new(PromptSurface::MainChat, &paths, &disabled_cfg, "grok-4");
+        let rendered_off = MusePromptBuilder::build(&input_off).unwrap();
+        assert!(
+            !rendered_off.messages[0]
+                .content
+                .contains("## Available Skills & Connectors")
         );
     }
 }
