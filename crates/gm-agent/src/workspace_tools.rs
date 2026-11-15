@@ -677,7 +677,28 @@ impl BotWorkspaceSandbox {
                 }
                 let previous = handle.read_to_string(&relative).ok();
                 let diff = compute_unified_diff_preview(path, previous.as_deref(), content, 200);
-                {
+                if let ResolvedWorkspacePath::Muse(ref resolved) = target {
+                    if std::fs::symlink_metadata(&resolved.mount_root)
+                        .is_ok_and(|meta| meta.file_type().is_symlink())
+                    {
+                        return Err(GmError::SafetyViolation(format!(
+                            "RULE-PATH-002: Refused symlink mount root '{}'",
+                            resolved.mount_root.display()
+                        )));
+                    }
+                    let next = content.clone();
+                    let outcome = gm_muse::shared_files::SharedFileStore::global()
+                        .update(&resolved.absolute, None, move |_| Ok(next))
+                        .await?;
+                    if !matches!(
+                        outcome,
+                        gm_muse::shared_files::SharedUpdateOutcome::Updated { .. }
+                    ) {
+                        return Err(GmError::Config(format!(
+                            "Unexpected conflict writing shared Muse file '{path}'"
+                        )));
+                    }
+                } else {
                     use std::io::Write;
                     let mut options = cap_std::fs::OpenOptions::new();
                     options.write(true).create(true).truncate(true);
@@ -1020,6 +1041,7 @@ mod tests {
             .unwrap();
         assert!(mem_write.summary.contains("bytes written"));
         assert!(shared.memory_md().exists());
+        assert!(shared.storage_dir().join(".muse.lock").exists());
 
         // 3. Reading ~/MEMORY.md returns content
         let mem_read = sandbox

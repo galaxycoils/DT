@@ -3,7 +3,7 @@
 
 use gm_core::error::{GmError, Result};
 use gm_core::muse_paths::MuseRuntimePaths;
-use gm_core::storage::{atomic_write_private, ensure_private_dir};
+use gm_core::storage::ensure_private_dir;
 use gm_safety::SecretScrubber;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -547,8 +547,9 @@ impl SkillRegistry {
         let dir = self.paths.custom_skills_dir().join(&manifest.name);
         ensure_private_dir(&self.paths.custom_skills_dir())?;
         ensure_private_dir(&dir)?;
-        atomic_write_private(&dir.join("skill.yaml"), yaml_text.as_bytes())?;
-        atomic_write_private(&dir.join("SKILL.md"), body_markdown.as_bytes())?;
+        let store = crate::shared_files::SharedFileStore::global();
+        store.write_exact_sync(dir.join("skill.yaml"), None, &yaml_text)?;
+        store.write_exact_sync(dir.join("SKILL.md"), None, body_markdown)?;
 
         self.refresh()?;
         Ok(dir)
@@ -582,8 +583,9 @@ impl SkillRegistry {
         let dir = self.paths.custom_connectors_dir().join(&manifest.id);
         ensure_private_dir(&self.paths.custom_connectors_dir())?;
         ensure_private_dir(&dir)?;
-        atomic_write_private(&dir.join("connector.yaml"), yaml_text.as_bytes())?;
-        atomic_write_private(&dir.join("CONNECTOR.md"), body_markdown.as_bytes())?;
+        let store = crate::shared_files::SharedFileStore::global();
+        store.write_exact_sync(dir.join("connector.yaml"), None, &yaml_text)?;
+        store.write_exact_sync(dir.join("CONNECTOR.md"), None, body_markdown)?;
 
         self.refresh()?;
         Ok(dir)
@@ -614,25 +616,33 @@ impl SkillRegistry {
         };
         ensure_private_dir(&dir)?;
         let file = dir.join(format!("{target}.md"));
+        let trimmed_owned = trimmed.to_string();
+        let scrubber = self.scrubber.clone();
 
-        let existing = if file_exists_no_follow(&file)? {
-            read_capped_text(&file, MAX_SKILL_DOC_BYTES, true)?
-        } else {
-            String::new()
-        };
-        let next = if existing.trim().is_empty() {
-            format!("{trimmed}\n")
-        } else {
-            format!("{}\n\n{trimmed}\n", existing.trim_end())
-        };
-        if next.len() > MAX_SKILL_DOC_BYTES {
-            return Err(GmError::Config(format!(
-                "Amendment file exceeds 256 KiB limit ({} bytes)",
-                next.len()
-            )));
-        }
+        crate::shared_files::SharedFileStore::global().update_sync(&file, None, |existing| {
+            if !existing.trim().is_empty() {
+                if existing.len() > MAX_SKILL_DOC_BYTES {
+                    return Err(GmError::Config(format!(
+                        "Amendment file exceeds 256 KiB limit ({} bytes)",
+                        existing.len()
+                    )));
+                }
+                ensure_no_plaintext_secrets(existing, &scrubber)?;
+            }
+            let next = if existing.trim().is_empty() {
+                format!("{trimmed_owned}\n")
+            } else {
+                format!("{}\n\n{trimmed_owned}\n", existing.trim_end())
+            };
+            if next.len() > MAX_SKILL_DOC_BYTES {
+                return Err(GmError::Config(format!(
+                    "Amendment file exceeds 256 KiB limit ({} bytes)",
+                    next.len()
+                )));
+            }
+            Ok(next)
+        })?;
 
-        atomic_write_private(&file, next.as_bytes())?;
         Ok(file)
     }
 
