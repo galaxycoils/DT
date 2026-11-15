@@ -2667,6 +2667,7 @@ dependencies = [
 name = "gm-goals"
 version = "0.3.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "chrono-tz",
  "gm-core",

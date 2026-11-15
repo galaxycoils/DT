@@ -1,4 +1,5 @@
 //! Shared native desktop UI. All execution goes through the authenticated local daemon IPC.
+use crate::muse_render::{RenderedPart, parse_message_bubbles, sandbox_uri_to_bot_relpath};
 use eframe::egui;
 mod session;
 use gm_core::{

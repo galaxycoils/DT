@@ -871,7 +871,7 @@ impl OpenBotSupervisor {
         let mut res = ForgetResources::new(paths, memory, self.provenance.clone());
         res.audit_logger = Some(Arc::clone(&self.audit));
         res.forget_redact_audit = self.config.muse.forget_redact_audit;
-        ForgetPlanner::plan(&res, request)
+        ForgetPlanner::plan(request, &res)
     }
 
     pub fn confirm_forget(
@@ -1143,7 +1143,7 @@ impl MuseWorkflowDelegate for OpenBotWorkflowDelegate {
             } else {
                 "Added external bridge discretion user rule"
             },
-            &format!("Updated DISCRETION.md for chat '{chat_id}'"),
+            format!("Updated DISCRETION.md for chat '{chat_id}'"),
             serde_json::json!({ "chat_id": chat_id, "loosens": loosens }),
         );
         Ok(serde_json::to_string_pretty(&serde_json::json!({
@@ -1262,7 +1262,7 @@ mod tests {
             .queue_response(r#"{"action":"Done","params":{"summary":"Researcher handled limit"}}"#);
 
         let llm = Arc::new(HybridLlmClient::new(
-            Arc::clone(&backend),
+            backend,
             Arc::new(gm_llm::BudgetManager::new(
                 gm_core::config::BudgetConfig::default(),
             )),

@@ -1645,7 +1645,7 @@ impl DaemonControlServerState {
                             gm_safety::AuditCategory::Permitted,
                             "RULE-POLICY-001",
                             "Updated bridge discretion user rules via IPC",
-                            &format!("Updated DISCRETION.md for chat '{chat_id}'"),
+                            format!("Updated DISCRETION.md for chat '{chat_id}'"),
                             serde_json::json!({ "chat_id": chat_id }),
                         );
                         Ok::<_, GmError>(serde_json::to_value(policy)?)

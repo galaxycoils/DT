@@ -293,6 +293,7 @@ pub async fn run_nightly_review_with_llm<P: Platform>(
 /// Runs nightly review synthesis and, when `muse.enable_dreams` is true,
 /// executes `SelfImprovementJob` to produce daily dreams, `ALIGNMENT_SYNTHESIS.md`,
 /// relationship pages, quiet moments, and skill-amendment proposals.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_nightly_review_and_dreams<P: Platform>(
     platform: Option<&P>,
     audit: &AuditLogger,

@@ -193,6 +193,7 @@ impl SelfImprovementJob {
             let note = format!(
                 "- [{date}] Proposed clarification after {failed_count} refused/failed governance events.\n"
             );
+            let date_marker = format!("[{date}]");
             SharedFileStore::global().update_sync(&prop_path, None, move |existing| {
                 let mut s = if existing.trim().is_empty() {
                     "# Proposed Skill Amendments (self-awareness)\n\n".to_string()
@@ -203,7 +204,7 @@ impl SelfImprovementJob {
                     }
                     cur
                 };
-                if !existing.contains(&format!("[{date}]")) {
+                if !existing.contains(&date_marker) {
                     s.push_str(&note);
                 }
                 Ok(s)

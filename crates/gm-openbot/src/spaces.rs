@@ -376,7 +376,7 @@ impl SpacesManager {
                 AuditCategory::Refused,
                 "RULE-TIER-003",
                 "Publishing or sharing a Space is an Irreversible action requiring confirmation",
-                &format!("Refused unconfirmed publish for Space '{slug}'"),
+                format!("Refused unconfirmed publish for Space '{slug}'"),
                 serde_json::json!({ "slug": slug }),
             );
             return Err(GmError::SafetyViolation(format!(
@@ -397,7 +397,7 @@ impl SpacesManager {
             AuditCategory::Permitted,
             "RULE-TIER-003",
             "Confirmed Irreversible publish of static Space",
-            &format!("Published Space '{slug}'"),
+            format!("Published Space '{slug}'"),
             serde_json::json!({ "slug": slug }),
         );
         Ok(meta)
@@ -424,7 +424,7 @@ impl SpacesManager {
                 AuditCategory::Refused,
                 "RULE-TIER-003",
                 "Deleting a Space is Irreversible",
-                &format!("Refused unconfirmed delete for Space '{slug}'"),
+                format!("Refused unconfirmed delete for Space '{slug}'"),
                 serde_json::json!({ "slug": slug }),
             );
             return Err(GmError::SafetyViolation(format!(
@@ -448,7 +448,7 @@ impl SpacesManager {
             AuditCategory::Permitted,
             "RULE-TIER-003",
             "Confirmed deletion of Space",
-            &format!("Deleted Space '{slug}'"),
+            format!("Deleted Space '{slug}'"),
             serde_json::json!({ "slug": slug }),
         );
         Ok(true)

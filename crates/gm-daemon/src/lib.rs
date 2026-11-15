@@ -357,7 +357,7 @@ pub enum Commands {
         #[arg(long)]
         file: Option<PathBuf>,
         /// Inline memory notes text
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         input: Option<String>,
         /// Commit extracted facts (requires --report-sha256 from dry run)
         #[arg(long)]
@@ -467,7 +467,7 @@ pub enum SpacesSubcommand {
         title: Option<String>,
         #[arg(long, default_value = "static")]
         kind: String,
-        #[arg(long)]
+        #[arg(long, allow_hyphen_values = true)]
         html: Option<String>,
     },
     /// Mint a fresh 15-minute signed URL for an existing Space
@@ -1691,7 +1691,7 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
             let hb_paths = sup.shared_paths();
             let hb_muse_cfg = config.muse.clone();
             let hb_quiet_gate = sup.quiet_gate().clone();
-            let hb_feed = (*sup.feed_store()).clone();
+            let hb_feed = sup.feed_store().as_ref().clone();
             let hb_queue = sup.queue().clone();
             let hb_budget = Arc::clone(&budget);
             let hb_ks = kill_switch.clone();
@@ -4312,6 +4312,10 @@ mod tests {
             storage_dir: storage.clone(),
             openbot: gm_core::config::OpenBotConfig {
                 bots_dir: storage.join("bots"),
+                ..Default::default()
+            },
+            muse: gm_core::config::MuseConfig {
+                enable_dreams: true,
                 ..Default::default()
             },
             ..Default::default()

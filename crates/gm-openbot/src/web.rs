@@ -1971,7 +1971,7 @@ async fn put_side_chat_discretion_route(
         } else {
             "Operator added bridge discretion user rule"
         },
-        &format!("Updated DISCRETION.md for chat '{chat_id}'"),
+        format!("Updated DISCRETION.md for chat '{chat_id}'"),
         serde_json::json!({ "chat_id": chat_id, "loosens": body.loosens }),
     );
     Ok(Json(policy))

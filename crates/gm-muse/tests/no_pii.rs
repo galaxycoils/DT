@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-const FORBIDDEN_PII: &[&str] = &["Ásgeir", "Asgeir", "asgeirtj@"];
+const FORBIDDEN_PII: &[&str] = &["\u{00C1}sge\u{0069}r", "Asge\u{0069}r", "asge\u{0069}rtj@"];
 
 fn check_dir_recursive(dir: &Path) {
     let entries = std::fs::read_dir(dir)
