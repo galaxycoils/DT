@@ -40,13 +40,13 @@ impl SecretScrubber {
         }
     }
 
-    /// Scrub all registered secret values from a string.
+    /// Scrub all registered secret values and `hsurr:` surrogate tokens from a string.
     pub fn scrub_str(&self, input: &str) -> String {
+        let mut out = scrub_surrogates(input);
         let map = self.active_secrets.lock();
         if map.is_empty() {
-            return input.to_string();
+            return out;
         }
-        let mut out = input.to_string();
         for (secret_val, secret_ref) in map.iter() {
             if !secret_val.is_empty() && out.contains(secret_val) {
                 let replacement = format!("[REDACTED:{secret_ref}]");
@@ -78,6 +78,39 @@ impl SecretScrubber {
     pub fn clear(&self) {
         self.active_secrets.lock().clear();
     }
+}
+
+/// Scrub Muse surrogate secret handles (`hsurr:[A-Za-z0-9_-]{8,}`) to `[SURROGATE]`.
+pub fn scrub_surrogates(input: &str) -> String {
+    const PREFIX: &str = "hsurr:";
+    if !input.contains(PREFIX) {
+        return input.to_string();
+    }
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if input[i..].starts_with(PREFIX) {
+            let start_tok = i + PREFIX.len();
+            let mut end_tok = start_tok;
+            while end_tok < bytes.len()
+                && (bytes[end_tok].is_ascii_alphanumeric()
+                    || bytes[end_tok] == b'_'
+                    || bytes[end_tok] == b'-')
+            {
+                end_tok += 1;
+            }
+            if end_tok - start_tok >= 8 {
+                out.push_str("[SURROGATE]");
+                i = end_tok;
+                continue;
+            }
+        }
+        let ch = input[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 #[cfg(test)]
@@ -130,5 +163,14 @@ mod tests {
         let serialized = scrubbed_json.to_string();
         assert!(!serialized.contains("ghp_SuperSecretToken999"));
         assert!(serialized.contains("[REDACTED:secret://keychain/github_pat]"));
+    }
+
+    #[test]
+    fn test_scrubs_muse_hsurr_surrogates() {
+        let scrubber = SecretScrubber::new();
+        let line = "Authorization: Bearer hsurr:AbC123_xYz-9900 done; short=hsurr:12345";
+        let scrubbed = scrubber.scrub_str(line);
+        assert!(!scrubbed.contains("hsurr:AbC123_xYz-9900"));
+        assert!(scrubbed.contains("Bearer [SURROGATE] done; short=hsurr:12345"));
     }
 }
