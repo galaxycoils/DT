@@ -62,6 +62,8 @@ pub struct GmConfig {
     pub budget: BudgetConfig,
     pub openbot: OpenBotConfig,
     pub workspace_vm: WorkspaceVmConfig,
+    #[serde(default)]
+    pub muse: MuseConfig,
 }
 
 impl GmConfig {
@@ -118,6 +120,26 @@ impl GmConfig {
         {
             return Err(crate::error::GmError::Config(
                 "Idle threshold must be finite and nonnegative".into(),
+            ));
+        }
+        if self.muse.nightly_dream_hour > 23 {
+            return Err(crate::error::GmError::Config(
+                "muse.nightly_dream_hour must be between 0 and 23".into(),
+            ));
+        }
+        if self.muse.heartbeat_interval_secs < 60 {
+            return Err(crate::error::GmError::Config(
+                "muse.heartbeat_interval_secs must be at least 60".into(),
+            ));
+        }
+        if self.muse.subagent_fanout_depth > 2 {
+            return Err(crate::error::GmError::Config(
+                "muse.subagent_fanout_depth must be at most 2".into(),
+            ));
+        }
+        if self.muse.context_tokens < 8_000 {
+            return Err(crate::error::GmError::Config(
+                "muse.context_tokens must be at least 8000".into(),
             ));
         }
         Ok(())
@@ -194,6 +216,7 @@ impl Default for GmConfig {
             budget: BudgetConfig::default(),
             openbot,
             workspace_vm: WorkspaceVmConfig::default(),
+            muse: MuseConfig::default(),
         }
     }
 }
@@ -452,6 +475,100 @@ mod tests {
         assert!(!cfg.openbot.bridges.telegram_enabled);
         assert!(!cfg.openbot.bridges.slack_enabled);
         assert!(!cfg.openbot.bridges.discord_enabled);
+    }
+
+    #[test]
+    fn test_muse_config_roundtrip_and_backwards_compat() {
+        let cfg = GmConfig::default();
+        assert!(cfg.muse.enable_muse_prompt);
+        assert!(cfg.muse.enable_skills);
+        assert!(!cfg.muse.enable_heartbeat);
+        assert!(!cfg.muse.enable_dreams);
+        assert!(cfg.muse.enable_spaces);
+        assert!(cfg.muse.enable_bridge_discretion);
+        assert!(cfg.muse.forget_redact_audit);
+        assert_eq!(cfg.muse.heartbeat_interval_secs, 300);
+        assert_eq!(cfg.muse.heartbeat_daily_token_cap, 200_000);
+        assert_eq!(cfg.muse.nightly_dream_hour, 3);
+        assert_eq!(cfg.muse.default_timezone, "UTC");
+        assert_eq!(cfg.muse.context_tokens, 128_000);
+        assert_eq!(cfg.muse.subagent_fanout_depth, 1);
+        assert_eq!(cfg.muse.spaces_port, None);
+        assert!(cfg.muse.artifact_require_publish_confirmation);
+        assert!(cfg.validate().is_ok());
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: GmConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.muse.context_tokens, 128_000);
+        assert_eq!(
+            parsed.muse.forget_redact_audit,
+            cfg.muse.forget_redact_audit
+        );
+
+        // Old config JSON missing the `muse` key must parse seamlessly with defaults.
+        let legacy_json = r#"{"storage_dir": "/tmp/legacy"}"#;
+        let legacy: GmConfig = serde_json::from_str(legacy_json).unwrap();
+        assert!(legacy.muse.enable_muse_prompt);
+        assert_eq!(legacy.muse.heartbeat_interval_secs, 300);
+        assert!(legacy.validate().is_ok());
+
+        let mut bad_hour = GmConfig::default();
+        bad_hour.muse.nightly_dream_hour = 24;
+        assert!(bad_hour.validate().is_err());
+
+        let mut bad_hb = GmConfig::default();
+        bad_hb.muse.heartbeat_interval_secs = 59;
+        assert!(bad_hb.validate().is_err());
+
+        let mut bad_fanout = GmConfig::default();
+        bad_fanout.muse.subagent_fanout_depth = 3;
+        assert!(bad_fanout.validate().is_err());
+
+        let mut bad_ctx = GmConfig::default();
+        bad_ctx.muse.context_tokens = 7_999;
+        assert!(bad_ctx.validate().is_err());
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MuseConfig {
+    pub enable_muse_prompt: bool,
+    pub enable_skills: bool,
+    pub enable_heartbeat: bool,
+    pub enable_dreams: bool,
+    pub enable_spaces: bool,
+    pub enable_bridge_discretion: bool,
+    pub forget_redact_audit: bool,
+    pub heartbeat_interval_secs: u64,
+    pub heartbeat_daily_token_cap: u64,
+    pub nightly_dream_hour: u32,
+    pub default_timezone: String,
+    pub context_tokens: usize,
+    pub subagent_fanout_depth: u8,
+    pub spaces_port: Option<u16>,
+    pub artifact_require_publish_confirmation: bool,
+}
+
+impl Default for MuseConfig {
+    fn default() -> Self {
+        Self {
+            enable_muse_prompt: true,
+            enable_skills: true,
+            enable_heartbeat: false,
+            enable_dreams: false,
+            enable_spaces: true,
+            enable_bridge_discretion: true,
+            forget_redact_audit: true,
+            heartbeat_interval_secs: 300,
+            heartbeat_daily_token_cap: 200_000,
+            nightly_dream_hour: 3,
+            default_timezone: "UTC".into(),
+            context_tokens: 128_000,
+            subagent_fanout_depth: 1,
+            spaces_port: None,
+            artifact_require_publish_confirmation: true,
+        }
     }
 }
 
