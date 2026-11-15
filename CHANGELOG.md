@@ -22,8 +22,14 @@ All notable changes to **Grok-Muse** are documented in this file.
   - `VaultSecretResolver` (`secret://keychain/<account>` and `secret://1password/<vault>/<item>/<field>`) + `SecretScrubber` ensuring zero plaintext secret leaks.
 - **Loopback Companion Web / AG-UI SSE Server & Chat Bridges**:
   - Built-in `axum` server (`gm serve`, default `127.0.0.1:7433`) serving the Companion Web UI (`/`), Governance Audit Dashboard (`/admin/audit`), A2A Agent Card (`/.well-known/agent.json`), AG-UI SSE stream (`/ag-ui/events`), and HMAC-SHA256 verified Slack / Telegram / Discord webhook bridges.
-- **`v0.3.0` OpenBot Evaluation Suite (`crates/gm-eval/src/openbot_suite.rs`)**:
-  - 5-scenario automated verification suite (`ob_queue_01`, `ob_sandbox_02`, `ob_wheel_03`, `ob_a2a_04`, `ob_agui_05`) integrated into `xtask eval` and `xtask test-all`.
+- **`v0.3.0` OpenBot + Muse Evaluation Suite (`crates/gm-eval/src/openbot_suite.rs`)**:
+  - 10-scenario automated verification suite (`ob_queue_01`–`ob_agui_05` + `muse_bridge_phishing_06`–`muse_legacy_prompt_10`) integrated into `xtask eval` and `xtask test-all`.
+- **Muse Agent Integration (`crates/gm-muse`, `crates/gm-memory`, `crates/gm-goals`, `crates/gm-openbot`, `crates/gm-daemon`, `crates/gm-ui`)**:
+  - Verbatim upstream `Meta/muse-agent` reference prompt, workspace templates, docs, and 9 bundled skills (`crates/gm-muse/assets/upstream/`) with SHA-256 integrity checks (`UPSTREAM.md`) and automated zero-PII tests.
+  - Two-message cache-friendly `MusePromptBuilder` (`[stable_prefix, dynamic_tail]`), `SharedFileStore` with `O_NOFOLLOW` + SHA-256 compare-and-swap + `SecretScrubber`, progressive-disclosure `SkillRegistry`, and rich/plain response directive parser (`<options>`, `<message_break/>`, `【source:...】`, `sandbox://`).
+  - SQLite `ProvenanceStore`, two-phase redacted `ForgetPlanner`/`ForgetExecutor` (`.forget-pending.json` with zero raw request text and `ActionTier::Irreversible` confirmation), and fenced portable `MemoryImporter` (`migration/`).
+  - `GoalWorkspaceManager` (`goals/<slug>/GOAL.md`), `ProactivePrefsStore`, `HeartbeatWorker`, `FeedStore`, `MemoryUpkeepJob`, and `SelfImprovementJob`.
+  - Per-chat Bridge `DiscretionStore` (`side-chats/<chat-id>/DISCRETION.md`, `RULE-PRIVACY-DISCRETION`), two-port Static `SpacesManager` (`127.0.0.1:<spaces_port>`), new CLI commands (`gm skills`, `gm goals`, `gm spaces`, `gm forget`, `gm import-memory`, `gm dream`), Companion Web UI tabs, and native `egui` Muse management windows.
 
 ---
 

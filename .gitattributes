@@ -1,0 +1,3 @@
+* text=auto eol=lf
+crates/gm-muse/assets/** -text
+crates/gm-muse/tests/snapshots/** -text

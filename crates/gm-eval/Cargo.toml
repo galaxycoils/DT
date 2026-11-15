@@ -10,6 +10,8 @@ gm-platform = { workspace = true }
 gm-agent = { workspace = true }
 gm-llm = { workspace = true }
 gm-safety = { workspace = true }
+gm-memory = { workspace = true }
+gm-muse = { workspace = true }
 gm-openbot = { workspace = true }
 darius-tools = { workspace = true }
 serde = { workspace = true }

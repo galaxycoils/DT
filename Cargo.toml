@@ -5,6 +5,7 @@ members = [
     "crates/gm-platform",
     "crates/gm-cu-helper",
     "crates/gm-llm",
+    "crates/gm-muse",
     "crates/gm-safety",
     "crates/gm-memory",
     "crates/gm-goals",
@@ -32,6 +33,7 @@ gm-platform = { path = "crates/gm-platform" }
 gm-safety = { path = "crates/gm-safety" }
 gm-memory = { path = "crates/gm-memory" }
 gm-llm = { path = "crates/gm-llm" }
+gm-muse = { path = "crates/gm-muse" }
 gm-goals = { path = "crates/gm-goals" }
 gm-agent = { path = "crates/gm-agent" }
 gm-vlm-candle = { path = "crates/gm-vlm-candle" }
@@ -52,17 +54,25 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 axum = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yaml_ng = "0.10"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 uuid = { version = "1", features = ["v4", "serde"] }
 clap = { version = "4", features = ["derive"] }
 parking_lot = "0.12"
 futures = "0.3"
 rusqlite = { version = "0.31", features = ["bundled"] }
 libc = "0.2"
+sha2 = "0.10"
+hex = "0.4"
+hmac = "0.12"
+include_dir = "0.7"
+tempfile = "3"
+regex = "1"
 
 [profile.release]
 lto = "thin"

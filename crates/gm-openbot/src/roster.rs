@@ -1,7 +1,9 @@
 use chrono::Utc;
 use gm_agent::BotWorkspaceSandbox;
 use gm_core::error::{GmError, Result};
+use gm_core::muse_paths::MuseRuntimePaths;
 use gm_memory::PersonalMemoryStore;
+use gm_muse::templates::{BotSeed, bootstrap_bot_runtime_files, run_migrations};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -26,6 +28,7 @@ pub struct BotProfile {
 /// Persistent roster of OpenBot AI teammates with isolated workspace folders and per-bot memory.
 #[derive(Clone)]
 pub struct BotRoster {
+    storage_dir: PathBuf,
     bots_dir: PathBuf,
     roster_file: PathBuf,
     bots: Arc<Mutex<BTreeMap<String, BotProfile>>>,
@@ -34,6 +37,20 @@ pub struct BotRoster {
 impl BotRoster {
     pub fn open(bots_dir: impl AsRef<Path>) -> Result<Self> {
         let dir = bots_dir.as_ref().to_path_buf();
+        let storage_dir = if dir.file_name().and_then(|s| s.to_str()) == Some("bots") {
+            dir.parent().unwrap_or(&dir).to_path_buf()
+        } else {
+            dir.clone()
+        };
+        Self::open_with_storage(dir, storage_dir)
+    }
+
+    pub fn open_with_storage(
+        bots_dir: impl AsRef<Path>,
+        storage_dir: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let dir = bots_dir.as_ref().to_path_buf();
+        let storage = storage_dir.as_ref().to_path_buf();
         gm_core::storage::ensure_private_dir(&dir)?;
         let _lease = Self::lock_directory(&dir)?;
         let roster_file = dir.join("roster.json");
@@ -67,6 +84,7 @@ impl BotRoster {
         }
 
         let roster = Self {
+            storage_dir: storage,
             bots_dir: dir,
             roster_file,
             bots: Arc::new(Mutex::new(loaded)),
@@ -146,6 +164,7 @@ impl BotRoster {
         file.lock()?;
         Ok(file)
     }
+
     pub fn refresh(&self) -> Result<()> {
         let raw = std::fs::read_to_string(&self.roster_file)?;
         let map: BTreeMap<String, BotProfile> = serde_json::from_str(&raw)?;
@@ -171,16 +190,36 @@ impl BotRoster {
         Ok(())
     }
 
+    pub fn storage_dir(&self) -> &Path {
+        &self.storage_dir
+    }
+
+    pub fn runtime_paths_for_bot(&self, bot_id: &str) -> MuseRuntimePaths {
+        MuseRuntimePaths::for_bot(&self.storage_dir, self.bot_root(bot_id), bot_id)
+    }
+
+    fn bootstrap_bot_profile(&self, profile: &BotProfile) -> Result<()> {
+        let paths = self.runtime_paths_for_bot(&profile.id);
+        let seed = BotSeed {
+            id: &profile.id,
+            display_name: &profile.display_name,
+            role_title: &profile.role_title,
+            legacy_system_prompt: &profile.system_prompt,
+        };
+        bootstrap_bot_runtime_files(&paths, &seed)?;
+        Ok(())
+    }
+
     fn provision_all_workspaces(&self) -> Result<()> {
-        let ids: Vec<(String, bool)> = self
-            .bots
-            .lock()
-            .values()
-            .map(|b| (b.id.clone(), b.allow_network))
-            .collect();
-        for (id, allow_net) in ids {
-            let bot_root = self.bot_root(&id);
-            let _ = BotWorkspaceSandbox::new(&id, &bot_root)?.with_network(allow_net);
+        run_migrations(&MuseRuntimePaths::shared(&self.storage_dir))?;
+        let profiles: Vec<BotProfile> = self.bots.lock().values().cloned().collect();
+        for profile in profiles {
+            let bot_root = self.bot_root(&profile.id);
+            let paths = self.runtime_paths_for_bot(&profile.id);
+            let _ = BotWorkspaceSandbox::new(&profile.id, &bot_root)?
+                .with_network(profile.allow_network)
+                .with_shared_runtime_paths(paths);
+            self.bootstrap_bot_profile(&profile)?;
         }
         Ok(())
     }
@@ -198,7 +237,8 @@ impl BotRoster {
             .get_bot(bot_id)
             .ok_or_else(|| GmError::Config(format!("Unknown bot '{bot_id}'")))?;
         let sandbox = BotWorkspaceSandbox::new(&profile.id, self.bot_root(&profile.id))?
-            .with_network(profile.allow_network);
+            .with_network(profile.allow_network)
+            .with_shared_runtime_paths(self.runtime_paths_for_bot(&profile.id));
         Ok(sandbox)
     }
 
@@ -260,8 +300,11 @@ impl BotRoster {
         }
         let mut normalized = profile;
         normalized.id = id.clone();
+        let paths = self.runtime_paths_for_bot(&id);
         let _ = BotWorkspaceSandbox::new(&id, self.bot_root(&id))?
-            .with_network(normalized.allow_network);
+            .with_network(normalized.allow_network)
+            .with_shared_runtime_paths(paths);
+        self.bootstrap_bot_profile(&normalized)?;
         let mut updated = self.bots.lock().clone();
         updated.insert(id.clone(), normalized.clone());
         gm_core::storage::atomic_write_private(
@@ -285,5 +328,67 @@ impl BotRoster {
             self.persist()?;
         }
         Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gm_agent::{InteractionHandler, NonInteractiveHandler, WorkspaceToolCall};
+    use gm_safety::KillSwitch;
+
+    #[tokio::test]
+    async fn roster_provisions_muse_runtime_and_attaches_shared_paths_to_sandbox() {
+        let base = std::env::temp_dir().join(format!("ob_roster_muse_{}", uuid::Uuid::new_v4()));
+        let bots_dir = base.join("bots");
+        let roster = BotRoster::open_with_storage(&bots_dir, &base).unwrap();
+
+        assert!(base.join("USER.md").exists());
+        assert!(base.join("skills/goals/SKILL.md").exists());
+        assert!(bots_dir.join("muse/SOUL.md").exists());
+        assert!(bots_dir.join("coder/IDENTITY.md").exists());
+
+        let sandbox = roster.workspace_sandbox("muse").unwrap();
+        assert!(sandbox.shared_runtime_paths().is_some());
+
+        let handler: Arc<dyn InteractionHandler> = Arc::new(NonInteractiveHandler);
+        let ks = KillSwitch::new();
+        let err = sandbox
+            .execute_tool(
+                "t",
+                1,
+                &WorkspaceToolCall::WriteFile {
+                    path: "~/skills/x".into(),
+                    content: "bad".into(),
+                },
+                &handler,
+                &ks,
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("RULE-PATH-002"));
+
+        sandbox
+            .execute_tool(
+                "t",
+                2,
+                &WorkspaceToolCall::WriteFile {
+                    path: "~/MEMORY.md".into(),
+                    content: "# MEMORY.md\nSaved from sandbox.\n".into(),
+                },
+                &handler,
+                &ks,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            std::fs::read_to_string(base.join("MEMORY.md"))
+                .unwrap()
+                .contains("Saved from sandbox.")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

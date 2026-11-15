@@ -1,0 +1,29 @@
+[package]
+name = "gm-muse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Muse runtime: persona templates, prompt builder, skills/connectors, directives, shared files"
+
+[dependencies]
+gm-core = { workspace = true }
+gm-safety = { workspace = true }
+gm-llm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml_ng = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
+include_dir = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -107,6 +107,28 @@ impl AuditLogger {
         self.in_memory.lock().clone()
     }
 
+    pub fn redact_in_memory(&self, needle: &str, replacement: &str) {
+        let trimmed = needle.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let lower = trimmed.to_lowercase();
+        let mut guard = self.in_memory.lock();
+        for entry in guard.iter_mut() {
+            let serialized = serde_json::to_string(entry).unwrap_or_default();
+            if serialized.to_lowercase().contains(&lower) {
+                if let Some(ref mut summary) = entry.action_summary
+                    && summary.to_lowercase().contains(&lower)
+                {
+                    *summary = replacement.to_string();
+                }
+                if entry.details.to_string().to_lowercase().contains(&lower) {
+                    entry.details = serde_json::json!({ "redacted": replacement });
+                }
+            }
+        }
+    }
+
     pub fn generate_report(&self, period: AuditPeriod, now: chrono::DateTime<Utc>) -> AuditReport {
         synthesize_audit_report(&self.entries(), period, now)
     }

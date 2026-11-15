@@ -8,6 +8,7 @@
   :root {
     --bg: #0b0f17;
     --panel: #131b2e;
+    --panel-alt: #0f1627;
     --border: #23304d;
     --text: #e6edf7;
     --muted: #8ea0c0;
@@ -30,6 +31,30 @@
     padding: 14px 22px;
     border-bottom: 1px solid var(--border);
     background: #0e1525;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  nav.tabs {
+    display: flex;
+    gap: 6px;
+    padding: 10px 22px;
+    border-bottom: 1px solid var(--border);
+    background: #0c1220;
+    flex-wrap: wrap;
+  }
+  .tab-btn {
+    background: #1a243d;
+    color: var(--muted);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .tab-btn[aria-selected="true"] {
+    background: var(--accent);
+    color: #fff;
   }
   .badge {
     display: inline-block;
@@ -45,20 +70,31 @@
   .badge.failed { background: rgba(255,176,32,0.16); color: var(--warn); }
   main {
     display: grid;
-    grid-template-columns: 280px 1fr 420px;
+    grid-template-columns: 280px 1fr 400px;
     gap: 16px;
     padding: 16px;
-    max-width: 1600px;
+    max-width: 1700px;
     margin: 0 auto;
+    align-items: start;
   }
-  @media (max-width: 1100px) {
-    main { grid-template-columns: 1fr; }
+  main.audit-focus {
+    grid-template-columns: 280px 1fr;
+  }
+  @media (max-width: 1180px) {
+    main, main.audit-focus { grid-template-columns: 1fr; }
   }
   .card {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 14px;
+  }
+  .subcard {
+    background: var(--panel-alt);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 14px;
   }
   h2 {
     margin: 0 0 10px 0;
@@ -67,12 +103,34 @@
     letter-spacing: 0.05em;
     color: var(--muted);
   }
+  h3 {
+    margin: 0 0 8px 0;
+    font-size: 13px;
+    color: var(--text);
+  }
   .item {
     padding: 10px;
     border: 1px solid var(--border);
     border-radius: 8px;
     margin-bottom: 8px;
     background: rgba(255,255,255,0.02);
+  }
+  .bubble {
+    padding: 8px 10px;
+    border: 1px solid #29385b;
+    border-radius: 8px;
+    margin: 6px 0;
+    background: rgba(79,140,255,0.06);
+  }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0; }
+  .chip {
+    display: inline-block;
+    padding: 3px 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    background: #1c2845;
+    border: 1px solid #2e406d;
+    color: var(--text);
   }
   button {
     background: var(--accent);
@@ -85,6 +143,7 @@
     font-weight: 600;
   }
   button.secondary { background: #243252; }
+  button.danger { background: #a83232; }
   input, select, textarea {
     background: #0b1120;
     border: 1px solid var(--border);
@@ -93,35 +152,75 @@
     border-radius: 6px;
     width: 100%;
     margin-bottom: 8px;
+    font-family: inherit;
   }
+  input[type="checkbox"] { width: auto; margin: 0; }
+  textarea.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   button:disabled { opacity: .55; cursor: default; }
-  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
   .muted { color: var(--muted); font-size: 12px; }
+  .warn-text { color: var(--warn); font-size: 12px; }
+  .err-text { color: var(--err); font-size: 12px; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .row input { flex: 1; min-width: 180px; }
+  .row input, .row select { flex: 1; min-width: 150px; margin-bottom: 0; }
   .channel-button { display: block; width: 100%; text-align: left; margin-bottom: 8px; background: #243252; }
   .channel-button[aria-pressed="true"] { outline: 2px solid var(--accent); }
   .content { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0; }
-  #messages-list { max-height: 420px; overflow-y: auto; margin: 12px 0; }
+  #messages-list { max-height: 440px; overflow-y: auto; margin: 12px 0; }
   #notice { margin: 12px 16px 0; color: var(--warn); overflow-wrap: anywhere; }
   #notice:empty { display: none; }
   form, details { margin-bottom: 14px; }
-  summary { cursor: pointer; margin-bottom: 10px; }
-  label { display: block; font-size: 12px; color: var(--muted); }
-  header { gap: 12px; flex-wrap: wrap; }
+  summary { cursor: pointer; margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; }
+  .tab-panel[hidden] { display: none; }
+  #space-iframe {
+    width: 100%;
+    height: 460px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    margin-top: 8px;
+  }
+  pre.codebox {
+    background: #080c15;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 12px;
+    max-height: 280px;
+    overflow-y: auto;
+  }
 </style>
 </head>
 <body>
 <header>
   <div>
     <strong>⚡ Grok-Muse OpenBot</strong>
-    <span class="badge">v0.3.0 AG-UI + A2A</span>
+    <span class="badge">v0.3.0 AG-UI + A2A + Muse</span>
   </div>
   <div id="status-pill" class="badge" role="status">Connecting…</div>
 </header>
+
+<nav class="tabs" role="tablist" aria-label="Muse Workspace Navigation">
+  <button type="button" class="tab-btn" role="tab" data-tab="chat" aria-selected="true">Chat &amp; Tasks</button>
+  <button type="button" class="tab-btn" role="tab" data-tab="feed" aria-selected="false">Feed</button>
+  <button type="button" class="tab-btn" role="tab" data-tab="ideas" aria-selected="false">Ideas</button>
+  <button type="button" class="tab-btn" role="tab" data-tab="goals" aria-selected="false">Goals</button>
+  <button type="button" class="tab-btn" role="tab" data-tab="spaces" aria-selected="false">Library / Spaces</button>
+  <button type="button" class="tab-btn" role="tab" data-tab="identity" aria-selected="false">Identity &amp; Memory</button>
+  <button type="button" class="tab-btn" role="tab" data-tab="skills" aria-selected="false">Skills &amp; Connectors</button>
+  <button type="button" class="tab-btn" role="tab" data-tab="audit" aria-selected="false">Governance Audit</button>
+</nav>
+
 <p id="notice" role="alert"></p>
-<main>
-  <section class="card">
+
+<main id="workspace-grid">
+  <section class="card" id="sidebar-panel">
     <h2>AI Coworker Roster</h2>
     <form id="connection-form">
       <label for="api-token">Server token (if configured)</label>
@@ -148,10 +247,10 @@
     </details>
   </section>
 
-  <section class="card">
+  <section class="card tab-panel" id="panel-chat">
     <h2 id="channel-heading">Channel conversation</h2>
     <p id="channel-description" class="muted"></p>
-    <p class="muted">Messages are saved and can queue bot work.</p>
+    <p class="muted">Messages are saved and can queue bot work. Supports &lt;message_break/&gt;, sandbox:// attachments, 【citations】, &lt;options&gt;, and reactions.</p>
     <div id="messages-list" role="log" aria-label="Channel messages"></div>
     <form id="message-form">
       <label for="message-input">Message · mention @bot to choose responders</label>
@@ -161,15 +260,248 @@
     <h2>Task queue &amp; Take the Wheel</h2>
     <p id="runtime-status" class="muted">Checking task runtime…</p>
     <form id="task-form" class="row">
-      <label for="task-bot">Bot</label>
-      <select id="task-bot" style="width:140px;margin:0;"></select>
-      <input id="task-input" aria-label="Task instruction" required placeholder="Queue a task…" style="margin:0;" />
+      <label for="task-bot" style="margin:0;">Bot</label>
+      <select id="task-bot" style="width:140px;flex:0 0 140px;"></select>
+      <input id="task-input" aria-label="Task instruction" required placeholder="Queue a task…" />
       <button type="submit">Enqueue</button>
     </form>
     <div id="queue-list"></div>
   </section>
 
-  <section class="card">
+  <section class="card tab-panel" id="panel-feed" hidden>
+    <h2>Proactive Activity Feed</h2>
+    <div class="subcard">
+      <h3>Brief Steering Prompt</h3>
+      <form id="feed-prompt-form" class="row">
+        <input id="feed-brief-prompt" placeholder="Steer what appears in your proactive briefs…" />
+        <button type="submit">Save Prompt</button>
+      </form>
+      <details>
+        <summary>Create manual editorial post</summary>
+        <form id="feed-create-form">
+          <label for="feed-post-kicker">Kicker</label>
+          <input id="feed-post-kicker" placeholder="Editorial" />
+          <label for="feed-post-title">Title</label>
+          <input id="feed-post-title" required placeholder="Headline…" />
+          <label for="feed-post-body">Body</label>
+          <textarea id="feed-post-body" rows="3" required placeholder="Summary…"></textarea>
+          <button type="submit">Publish to Feed</button>
+        </form>
+      </details>
+    </div>
+    <div id="feed-list"></div>
+  </section>
+
+  <section class="card tab-panel" id="panel-ideas" hidden>
+    <div class="row" style="justify-content:space-between;margin-bottom:10px;">
+      <h2 style="margin:0;">Proactive Ideas</h2>
+      <button type="button" id="ideas-refresh-btn" class="secondary">Generate / Refresh</button>
+    </div>
+    <details>
+      <summary>Add custom idea</summary>
+      <form id="ideas-create-form">
+        <label for="idea-title">Title</label>
+        <input id="idea-title" required placeholder="Prepare weekly kickoff brief" />
+        <label for="idea-desc">Description</label>
+        <input id="idea-desc" placeholder="Summarize due milestones and calendar blockers" />
+        <label for="idea-prompt">Action Prompt</label>
+        <input id="idea-prompt" placeholder="Task instruction to enqueue when clicked Run" />
+        <button type="submit">Add Idea</button>
+      </form>
+    </details>
+    <div id="ideas-list"></div>
+  </section>
+
+  <section class="card tab-panel" id="panel-goals" hidden>
+    <h2>Goals &amp; Deliverables (1-Level Subgoals)</h2>
+    <div class="subcard">
+      <h3>New Top-Level Goal or Subgoal</h3>
+      <form id="goal-create-form">
+        <label for="goal-parent">Parent Goal (leave blank for top-level goal; subgoals cannot nest further)</label>
+        <select id="goal-parent"></select>
+        <label for="goal-title">Title</label>
+        <input id="goal-title" required placeholder="Ship Q4 reliability checklist" />
+        <label for="goal-desc">Description</label>
+        <textarea id="goal-desc" rows="2" placeholder="Concrete scope and deliverables…"></textarea>
+        <label for="goal-stops">Stop Conditions (comma-separated)</label>
+        <input id="goal-stops" placeholder="All checks green, Review published" />
+        <button type="submit">Create Goal</button>
+      </form>
+    </div>
+    <div id="goals-list"></div>
+    <div id="goal-file-viewer" class="subcard" hidden>
+      <h3 id="goal-file-title">Deliverable Preview</h3>
+      <pre id="goal-file-content" class="codebox"></pre>
+    </div>
+  </section>
+
+  <section class="card tab-panel" id="panel-spaces" hidden>
+    <h2>Library &amp; Static Spaces (Isolated Second Port)</h2>
+    <div class="subcard">
+      <h3>Create Static Space</h3>
+      <form id="space-create-form">
+        <label for="space-slug">Slug ([a-z0-9-])</label>
+        <input id="space-slug" required pattern="[a-z0-9][a-z0-9-]{0,63}" placeholder="my-dashboard" />
+        <label for="space-title">Title</label>
+        <input id="space-title" placeholder="Interactive Local App" />
+        <label for="space-html">Custom index.html (optional)</label>
+        <textarea id="space-html" class="mono" rows="4" placeholder="Leave blank to use default dark/light themed Space scaffold"></textarea>
+        <button type="submit">Create Static Space</button>
+      </form>
+    </div>
+    <div id="spaces-list"></div>
+    <div id="space-stage" class="subcard" hidden>
+      <div class="row" style="justify-content:space-between;">
+        <strong id="space-active-label">Space Preview</strong>
+        <div class="row">
+          <button type="button" id="space-theme-light" class="secondary">Theme: Light</button>
+          <button type="button" id="space-theme-dark" class="secondary">Theme: Dark</button>
+          <button type="button" id="space-publish-btn">Publish (Requires Confirmation)</button>
+        </div>
+      </div>
+      <p id="space-active-origin" class="muted"></p>
+      <div id="space-publish-confirm" class="subcard" hidden>
+        <p class="warn-text">Irreversible Action (RULE-TIER-003): Confirm publishing this static Space for sharing?</p>
+        <div class="row">
+          <button type="button" id="space-publish-confirm-yes" class="danger">Confirm Publish</button>
+          <button type="button" id="space-publish-confirm-cancel" class="secondary">Cancel</button>
+        </div>
+      </div>
+      <iframe id="space-iframe" title="Sandboxed Static Space" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+    </div>
+  </section>
+
+  <section class="card tab-panel" id="panel-identity" hidden>
+    <h2>Identity, Memory, Proactive Preferences &amp; Forget</h2>
+
+    <div class="subcard">
+      <h3>Identity &amp; Runtime Markdown Files (Optimistic Concurrency SHA-256)</h3>
+      <div class="row" style="margin-bottom:8px;">
+        <select id="identity-bot"></select>
+        <select id="identity-file">
+          <option value="SOUL.md">SOUL.md</option>
+          <option value="IDENTITY.md">IDENTITY.md</option>
+          <option value="USER.md">USER.md</option>
+          <option value="MEMORY.md">MEMORY.md</option>
+          <option value="PROACTIVE_PREFERENCES.md">PROACTIVE_PREFERENCES.md</option>
+        </select>
+        <button type="button" id="identity-load-btn" class="secondary">Load File</button>
+      </div>
+      <p id="identity-sha" class="muted">No file loaded.</p>
+      <p id="identity-conflict" class="err-text" hidden></p>
+      <textarea id="identity-editor" class="mono" rows="8" placeholder="Select a file and click Load File…"></textarea>
+      <button type="button" id="identity-save-btn">Save File (CAS Checked)</button>
+    </div>
+
+    <div class="subcard">
+      <h3>Proactive Preferences, Quiet Hours &amp; Dual Timezones</h3>
+      <form id="prefs-form">
+        <div class="row" style="margin-bottom:8px;">
+          <input id="prefs-tell" placeholder="Add 'Tell me about' topic…" />
+          <input id="prefs-opt-out" placeholder="Add permanent opt-out topic…" />
+        </div>
+        <div class="row" style="margin-bottom:8px;">
+          <input id="prefs-quiet-start" type="number" min="0" max="23" placeholder="Quiet start hour (0-23)" />
+          <input id="prefs-quiet-end" type="number" min="0" max="23" placeholder="Quiet end hour (0-23)" />
+        </div>
+        <div class="row" style="margin-bottom:8px;">
+          <input id="prefs-home-tz" placeholder="Home TZ (e.g. America/Los_Angeles)" />
+          <input id="prefs-work-tz" placeholder="Work TZ (e.g. UTC)" />
+        </div>
+        <input id="prefs-feedback-note" placeholder="Feedback note (optional)" />
+        <button type="submit">Update Proactive Preferences</button>
+      </form>
+      <pre id="prefs-summary" class="codebox"></pre>
+    </div>
+
+    <div class="subcard">
+      <h3>Portable Memory Import (Two-Step Dry Run &amp; Apply)</h3>
+      <textarea id="import-input" rows="4" placeholder="Paste exported facts (- Uses Rust, Prefers local models…)"></textarea>
+      <div class="row">
+        <button type="button" id="import-preview-btn" class="secondary">1. Preview Import (Dry Run)</button>
+        <button type="button" id="import-apply-btn" disabled>2. Confirm &amp; Apply</button>
+      </div>
+      <pre id="import-report" class="codebox"></pre>
+    </div>
+
+    <div class="subcard">
+      <h3>Memory Provenance Explain</h3>
+      <form id="explain-form" class="row">
+        <input id="explain-target" required placeholder="Query or claim/record ID…" />
+        <button type="submit">Explain Origin</button>
+      </form>
+      <pre id="explain-output" class="codebox"></pre>
+    </div>
+
+    <div class="subcard">
+      <h3>Two-Phase Discretionary Forget Wizard</h3>
+      <form id="forget-plan-form" class="row" style="margin-bottom:8px;">
+        <input id="forget-request" required placeholder="Keyword or topic to forget across local stores…" />
+        <button type="submit" class="secondary">1. Build Erasure Plan</button>
+      </form>
+      <pre id="forget-plan-output" class="codebox"></pre>
+      <div id="forget-confirm-box" hidden>
+        <label class="row" style="margin:8px 0;">
+          <input id="forget-confirm-check" type="checkbox" />
+          <span>I confirm this irreversible erasure across local memory, markdown lines, DB indices, and Feed signals.</span>
+        </label>
+        <div class="row">
+          <input id="forget-verify-query" placeholder="Re-search verification term (optional)" />
+          <button type="button" id="forget-execute-btn" class="danger" disabled>2. Confirm &amp; Forget</button>
+        </div>
+      </div>
+      <pre id="forget-report-output" class="codebox"></pre>
+    </div>
+
+    <div class="subcard">
+      <h3>Side-Chat Bridge Discretion (DISCRETION.md)</h3>
+      <form id="discretion-load-form" class="row" style="margin-bottom:8px;">
+        <input id="discretion-chat-id" value="slack-general" placeholder="Bridge chat ID (e.g. slack-general)" />
+        <button type="submit" class="secondary">Load Rules</button>
+      </form>
+      <p id="discretion-sha" class="muted"></p>
+      <pre id="discretion-defaults" class="codebox"></pre>
+      <label for="discretion-rules">User Rules (one per line; appended/preserved cleanly)</label>
+      <textarea id="discretion-rules" rows="4" placeholder="Never mention salary numbers in public threads."></textarea>
+      <label class="row" style="margin-bottom:8px;">
+        <input id="discretion-loosens" type="checkbox" />
+        <span>This change loosens discretion constraints (logged with elevated audit rule)</span>
+      </label>
+      <button type="button" id="discretion-save-btn">Save Bridge Rules</button>
+    </div>
+  </section>
+
+  <section class="card tab-panel" id="panel-skills" hidden>
+    <h2>Skills &amp; Connectors Catalog</h2>
+    <form id="skill-search-form" class="row">
+      <input id="skill-search-q" placeholder="Filter skills or connectors…" />
+      <button type="submit" class="secondary">Search</button>
+    </form>
+    <div id="skill-detail-box" class="subcard" hidden>
+      <h3 id="skill-detail-title">Loaded Skill / Connector</h3>
+      <pre id="skill-detail-body" class="codebox"></pre>
+    </div>
+    <h3>Skills</h3>
+    <div id="skills-list"></div>
+    <h3>Connectors</h3>
+    <div id="connectors-list"></div>
+    <details>
+      <summary>Create custom skill (validated by SecretScrubber; use secret://vault references)</summary>
+      <form id="custom-skill-form">
+        <label for="custom-skill-name">Slug ([a-z0-9-])</label>
+        <input id="custom-skill-name" required pattern="[a-z0-9][a-z0-9-]{0,63}" placeholder="release-checklist" />
+        <label for="custom-skill-title">Title</label>
+        <input id="custom-skill-title" required placeholder="Release Checklist" />
+        <label for="custom-skill-desc">Description</label>
+        <input id="custom-skill-desc" required placeholder="Verify changelog, CI, and signing notes." />
+        <label for="custom-skill-body">Markdown Instructions (SKILL.md body)</label>
+        <textarea id="custom-skill-body" rows="4" required placeholder="# Release Checklist&#10;1. Run all OS CI checks."></textarea>
+        <button type="submit">Scaffold Custom Skill</button>
+      </form>
+    </details>
+  </section>
+
+  <section class="card" id="audit-panel">
     <h2>Governance Audit (/admin/audit)</h2>
     <div style="display:flex; gap:6px; margin-bottom:10px;">
       <button class="secondary" data-audit="">All</button>

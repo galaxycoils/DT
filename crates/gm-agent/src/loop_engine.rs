@@ -2,11 +2,16 @@ use crate::approval::{ApprovalRequest, InteractionHandler, NonInteractiveHandler
 use crate::mcp_bridge::{McpToolBridge, try_parse_mcp_tool_call};
 use crate::som::{annotate_frame_with_geometry, is_interactive_element, resolve_som_badge};
 use crate::trajectory::TrajectoryRecorder;
-use crate::wheel::{OpenBotStepAction, WheelHandoffRequest, try_parse_openbot_step_action};
+use crate::wheel::{
+    DirectiveKind, GoalOpKind, OpenBotStepAction, SpaceOpKind, WheelHandoffRequest,
+    classify_openbot_step_tier, try_parse_openbot_step_action,
+};
 use crate::workspace_tools::BotWorkspaceSandbox;
+use async_trait::async_trait;
 use gm_core::error::{GmError, Result};
 use gm_core::types::{AxSnapshot, ComputerAction, compute_ax_diff};
 use gm_llm::{ChatMessage, HybridLlmClient, LlmRouter, TaskType, VaultSecretResolver};
+use gm_muse::skills::{SkillRegistry, SkillYaml};
 use gm_platform::Platform;
 use gm_safety::{
     ActionTier, AuditCategory, AuditLogger, BlocklistManager, KillSwitch, SecretScrubber,
@@ -18,6 +23,30 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
+
+/// Runtime delegate implemented by higher layers (`gm-openbot`) to execute durable
+/// Muse memory, forget, goal, space, bridge discretion, and directive step actions.
+#[async_trait]
+pub trait MuseWorkflowDelegate: Send + Sync {
+    async fn memory_search(&self, query: &str, limit: Option<u32>) -> Result<String>;
+    async fn memory_explain(&self, target: &str) -> Result<String>;
+    async fn forget_plan(&self, request: &str) -> Result<String>;
+    async fn forget_confirm(&self, plan_id: &str) -> Result<String>;
+    async fn goal_op(
+        &self,
+        op: GoalOpKind,
+        slug: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> Result<String>;
+    async fn space_op(
+        &self,
+        op: SpaceOpKind,
+        slug: &str,
+        payload: &serde_json::Value,
+    ) -> Result<String>;
+    async fn update_discretion(&self, chat_id: &str, rules: &str, loosens: bool) -> Result<String>;
+    async fn emit_directive(&self, directive: &DirectiveKind) -> Result<String>;
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StepRecord {
@@ -154,9 +183,13 @@ pub struct AgentLoop<P: Platform> {
     vault_resolver: Option<VaultSecretResolver>,
     secret_scrubber: SecretScrubber,
     delegation_callback: Option<DelegationCallback>,
+    workflow_delegate: Option<Arc<dyn MuseWorkflowDelegate>>,
+    fanout_depth: u8,
+    max_fanout_depth: u8,
     capabilities: AgentCapabilities,
     secret_injection_enabled: bool,
     system_prompt: String,
+    system_messages: Vec<ChatMessage>,
     mutation_callback: Option<MutationCallback>,
     checkpoint_callback: Option<CheckpointCallback>,
     initial_history: Vec<StepRecord>,
@@ -175,6 +208,109 @@ fn action_type_name(action: &ComputerAction) -> &'static str {
         ComputerAction::Wait { .. } => "Wait",
         ComputerAction::Done { .. } => "Done",
         ComputerAction::AskUser { .. } => "AskUser",
+    }
+}
+
+fn openbot_action_type_name(action: &OpenBotStepAction) -> &'static str {
+    match action {
+        OpenBotStepAction::TakeTheWheel { .. } => "TakeTheWheel",
+        OpenBotStepAction::FillSecret { .. } => "FillSecret",
+        OpenBotStepAction::WorkspaceTool(crate::workspace_tools::WorkspaceToolCall::ReadFile {
+            ..
+        }) => "WorkspaceReadFile",
+        OpenBotStepAction::WorkspaceTool(
+            crate::workspace_tools::WorkspaceToolCall::WriteFile { .. },
+        ) => "WorkspaceWriteFile",
+        OpenBotStepAction::WorkspaceTool(
+            crate::workspace_tools::WorkspaceToolCall::ListFiles { .. },
+        ) => "WorkspaceListFiles",
+        OpenBotStepAction::WorkspaceTool(crate::workspace_tools::WorkspaceToolCall::Shell {
+            ..
+        }) => "WorkspaceShell",
+        OpenBotStepAction::DelegateToBot { .. } => "DelegateToBot",
+        OpenBotStepAction::SkillSearch { .. } => "SkillSearch",
+        OpenBotStepAction::LoadSkill { .. } => "LoadSkill",
+        OpenBotStepAction::ConnectorSearch { .. } => "ConnectorSearch",
+        OpenBotStepAction::LoadConnector { .. } => "LoadConnector",
+        OpenBotStepAction::MemorySearch { .. } => "MemorySearch",
+        OpenBotStepAction::MemoryExplain { .. } => "MemoryExplain",
+        OpenBotStepAction::ForgetPlan { .. } => "ForgetPlan",
+        OpenBotStepAction::ForgetConfirm { .. } => "ForgetConfirm",
+        OpenBotStepAction::CreateCustomSkill { .. } => "CreateCustomSkill",
+        OpenBotStepAction::GoalOp { .. } => "GoalOp",
+        OpenBotStepAction::SpaceOp { .. } => "SpaceOp",
+        OpenBotStepAction::UpdateDiscretion { .. } => "UpdateDiscretion",
+        OpenBotStepAction::EmitDirective { .. } => "EmitDirective",
+    }
+}
+
+fn build_openbot_approval_request(
+    task_id: &str,
+    step: u32,
+    action: &OpenBotStepAction,
+    scrubber: &SecretScrubber,
+) -> ApprovalRequest {
+    match action {
+        OpenBotStepAction::FillSecret { token, secret_ref } => ApprovalRequest {
+            task_id: task_id.into(),
+            step,
+            action: ComputerAction::Type {
+                text: format!("[credential: {secret_ref}]"),
+            },
+            target_label: token.clone(),
+            reason: "Inject this credential into the selected desktop field".into(),
+        },
+        OpenBotStepAction::ForgetConfirm { plan_id } => ApprovalRequest {
+            task_id: task_id.into(),
+            step,
+            action: ComputerAction::Type {
+                text: format!("ForgetConfirm({plan_id})"),
+            },
+            target_label: Some(format!("ForgetPlan:{plan_id}")),
+            reason:
+                "Irreversible memory deletion (ForgetConfirm) requires explicit user confirmation"
+                    .into(),
+        },
+        OpenBotStepAction::GoalOp { op, slug, .. } => ApprovalRequest {
+            task_id: task_id.into(),
+            step,
+            action: ComputerAction::Type {
+                text: format!("GoalOp({op:?}, {})", slug.as_deref().unwrap_or("")),
+            },
+            target_label: slug.clone(),
+            reason: format!(
+                "Irreversible goal operation ({op:?}) requires explicit user confirmation"
+            ),
+        },
+        OpenBotStepAction::SpaceOp { op, slug, .. } => ApprovalRequest {
+            task_id: task_id.into(),
+            step,
+            action: ComputerAction::Type {
+                text: format!("SpaceOp({op:?}, {slug})"),
+            },
+            target_label: Some(slug.clone()),
+            reason: format!(
+                "Irreversible Space operation ({op:?}) for '{slug}' requires explicit user confirmation"
+            ),
+        },
+        OpenBotStepAction::UpdateDiscretion { chat_id, rules, .. } => ApprovalRequest {
+            task_id: task_id.into(),
+            step,
+            action: ComputerAction::Type {
+                text: format!("UpdateDiscretion({chat_id}): {}", scrubber.scrub_str(rules)),
+            },
+            target_label: Some(format!("Discretion:{chat_id}")),
+            reason: "Loosening bridge discretion rules requires explicit user confirmation".into(),
+        },
+        other => ApprovalRequest {
+            task_id: task_id.into(),
+            step,
+            action: ComputerAction::Type {
+                text: openbot_action_type_name(other).to_string(),
+            },
+            target_label: None,
+            reason: "Irreversible OpenBot action requires explicit user confirmation".into(),
+        },
     }
 }
 
@@ -202,9 +338,13 @@ impl<P: Platform> AgentLoop<P> {
             vault_resolver: None,
             secret_scrubber: SecretScrubber::new(),
             delegation_callback: None,
+            workflow_delegate: None,
+            fanout_depth: 0,
+            max_fanout_depth: 1,
             capabilities: AgentCapabilities::default(),
             secret_injection_enabled: false,
             system_prompt: String::new(),
+            system_messages: Vec::new(),
             mutation_callback: None,
             checkpoint_callback: None,
             initial_history: Vec::new(),
@@ -238,6 +378,11 @@ impl<P: Platform> AgentLoop<P> {
 
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         self.system_prompt = prompt;
+        self
+    }
+
+    pub fn with_system_messages(mut self, messages: Vec<ChatMessage>) -> Self {
+        self.system_messages = messages;
         self
     }
 
@@ -284,6 +429,17 @@ impl<P: Platform> AgentLoop<P> {
         self
     }
 
+    pub fn with_workflow_delegate(mut self, delegate: Arc<dyn MuseWorkflowDelegate>) -> Self {
+        self.workflow_delegate = Some(delegate);
+        self
+    }
+
+    pub fn with_fanout_depth(mut self, fanout_depth: u8, max_fanout_depth: u8) -> Self {
+        self.fanout_depth = fanout_depth;
+        self.max_fanout_depth = max_fanout_depth;
+        self
+    }
+
     pub fn with_audit(mut self, audit: Arc<AuditLogger>) -> Self {
         self.audit = Some(audit);
         self
@@ -300,6 +456,78 @@ impl<P: Platform> AgentLoop<P> {
     {
         self.progress_callback = Some(Arc::new(cb));
         self
+    }
+
+    /// Assemble step messages by preserving any configured Muse `[prefix, dynamic_tail]`
+    /// system messages (or legacy `system_prompt`) first and appending the Computer-Use
+    /// JSON & Set-of-Marks step contract afterward.
+    pub fn assemble_step_messages(
+        &self,
+        prompt_text: String,
+        som_jpeg: Option<&[u8]>,
+    ) -> Vec<ChatMessage> {
+        let cu_header = if som_jpeg.is_some() {
+            "## Computer-Use & Workspace Step Contract\nYou are an autonomous computer-use agent with vision. Output JSON with fields 'action' and 'params'. You can reference interactive elements by their Set-of-Marks badge (#1, #2, ...) or accessibility token. For pixel coordinates read from this image, add top-level coordinate_space: image. Accessibility coordinates and legend centers are desktop coordinates. Never guess coordinates outside the shared image."
+        } else {
+            "## Computer-Use & Workspace Step Contract\nYou are an autonomous computer-use agent. Output JSON with fields 'action' and 'params'."
+        };
+        let tool_contract = format!(
+            "{cu_header}\nCapabilities: GUI={}, shell={}, network={}.\n\
+Workspace calls use {{\"action\":\"WorkspaceReadFile\",\"params\":{{\"path\":\"relative/path\"}}}}; also WorkspaceWriteFile (path, content), WorkspaceListFiles (path), WorkspaceShell (command, timeout_ms).\n\
+Muse & coworker step action JSON examples:\n\
+- {{\"action\":\"WorkspaceReadFile\",\"params\":{{\"path\":\"relative/path\"}}}}\n\
+- {{\"action\":\"WorkspaceWriteFile\",\"params\":{{\"path\":\"notes.md\",\"content\":\"text\"}}}}\n\
+- {{\"action\":\"WorkspaceListFiles\",\"params\":{{\"path\":\".\"}}}}\n\
+- {{\"action\":\"WorkspaceShell\",\"params\":{{\"command\":\"ls -la\",\"timeout_ms\":10000}}}}\n\
+- {{\"action\":\"FillSecret\",\"params\":{{\"token\":\"pwd_box\",\"secret_ref\":\"secret://keychain/service\"}}}}\n\
+- {{\"action\":\"TakeTheWheel\",\"params\":{{\"blocker\":\"SSO MFA\",\"instructions\":\"Approve Duo push\"}}}}\n\
+- {{\"action\":\"DelegateToBot\",\"params\":{{\"target_bot_id\":\"researcher\",\"goal\":\"Research topic\",\"artifacts\":[\"notes.md\"]}}}}\n\
+- {{\"action\":\"SkillSearch\",\"params\":{{\"query\":\"goals\"}}}}\n\
+- {{\"action\":\"LoadSkill\",\"params\":{{\"name\":\"goals\"}}}}\n\
+- {{\"action\":\"ConnectorSearch\",\"params\":{{\"query\":\"linear\"}}}}\n\
+- {{\"action\":\"LoadConnector\",\"params\":{{\"id\":\"custom.linear\"}}}}\n\
+- {{\"action\":\"MemorySearch\",\"params\":{{\"query\":\"coffee preference\",\"limit\":5}}}}\n\
+- {{\"action\":\"MemoryExplain\",\"params\":{{\"target\":\"claim-id\"}}}}\n\
+- {{\"action\":\"ForgetPlan\",\"params\":{{\"request\":\"forget old project\"}}}}\n\
+- {{\"action\":\"ForgetConfirm\",\"params\":{{\"plan_id\":\"forget-plan-id\"}}}}\n\
+- {{\"action\":\"CreateCustomSkill\",\"params\":{{\"name\":\"daily-brief\",\"title\":\"Daily Brief\",\"description\":\"Morning summary\",\"body_markdown\":\"# Steps\\n1. Read goals\\n\"}}}}\n\
+- {{\"action\":\"GoalOp\",\"params\":{{\"op\":\"create\",\"slug\":\"learn-rust\",\"payload\":{{\"title\":\"Learn Rust\"}}}}}}\n\
+- {{\"action\":\"SpaceOp\",\"params\":{{\"op\":\"create\",\"slug\":\"reading-list\",\"payload\":{{\"title\":\"Reading List\"}}}}}}\n\
+- {{\"action\":\"UpdateDiscretion\",\"params\":{{\"chat_id\":\"whatsapp:123\",\"rules\":\"Never disclose home address\",\"loosens\":false}}}}\n\
+- {{\"action\":\"EmitDirective\",\"params\":{{\"directive\":{{\"options\":{{\"labels\":[\"Continue\",\"Cancel\"]}}}}}}}}\n\
+Completion must use {{\"action\":\"Done\",\"params\":{{\"summary\":\"result and evidence\"}}}}. Never claim an action succeeded without its observed result.",
+            self.capabilities.allow_gui,
+            self.capabilities.allow_shell,
+            self.capabilities.allow_network,
+        );
+
+        let mut messages = if !self.system_messages.is_empty() {
+            let mut msgs = self.system_messages.clone();
+            if let Some(first) = msgs.first_mut() {
+                if !first.content.is_empty() && !first.content.ends_with('\n') {
+                    first.content.push('\n');
+                }
+                if !first.content.is_empty() {
+                    first.content.push('\n');
+                }
+                first.content.push_str(&tool_contract);
+            }
+            msgs
+        } else if self.system_prompt.trim().is_empty() {
+            vec![ChatMessage::text("system", tool_contract)]
+        } else {
+            vec![ChatMessage::text(
+                "system",
+                format!("{}\n\n{tool_contract}", self.system_prompt),
+            )]
+        };
+
+        let user_msg = match som_jpeg {
+            Some(jpeg) => ChatMessage::with_jpeg("user", prompt_text, jpeg),
+            None => ChatMessage::text("user", prompt_text),
+        };
+        messages.push(user_msg);
+        messages
     }
 
     pub async fn run_task(&self, task_id: &str, instruction: &str) -> Result<String> {
@@ -559,31 +787,10 @@ impl<P: Platform> AgentLoop<P> {
                 "Goal: {instruction}\n\nCurrent window state:\n{untrusted_block}{history_block}{feedback_block}{stagnation_block}{som_legend_block}{mcp_tools_block}\n\nPick the next action in JSON format."
             );
 
-            let mut messages = match &som_annotation {
-                Some(som) => vec![
-                    ChatMessage::text(
-                        "system",
-                        "You are an autonomous computer-use agent with vision. Output JSON with fields 'action' and 'params'. You can reference interactive elements by their Set-of-Marks badge (#1, #2, ...) or accessibility token. For pixel coordinates read from this image, add top-level coordinate_space: image. Accessibility coordinates and legend centers are desktop coordinates. Never guess coordinates outside the shared image.",
-                    ),
-                    ChatMessage::with_jpeg("user", prompt_text, &som.jpeg_bytes),
-                ],
-                None => vec![
-                    ChatMessage::text(
-                        "system",
-                        "You are an autonomous computer-use agent. Output JSON with fields 'action' and 'params'.",
-                    ),
-                    ChatMessage::text("user", prompt_text),
-                ],
-            };
-
-            let tool_contract = format!(
-                "{}\nCapabilities: GUI={}, shell={}, network={}. Workspace calls use {{\"action\":\"WorkspaceReadFile\",\"params\":{{\"path\":\"relative/path\"}}}}; also WorkspaceWriteFile (path, content), WorkspaceListFiles (path), WorkspaceShell (command, timeout_ms). Completion must use {{\"action\":\"Done\",\"params\":{{\"summary\":\"result and evidence\"}}}}. Never claim an action succeeded without its observed result.",
-                self.system_prompt,
-                self.capabilities.allow_gui,
-                self.capabilities.allow_shell,
-                self.capabilities.allow_network
+            let messages = self.assemble_step_messages(
+                prompt_text,
+                som_annotation.as_ref().map(|s| s.jpeg_bytes.as_slice()),
             );
-            messages[0].content.push_str(&format!("\n{tool_contract}"));
 
             // 11. Route and execute LLM step
             let (primary, fallback) = self.router.route(task_type);
@@ -649,20 +856,85 @@ impl<P: Platform> AgentLoop<P> {
                 continue;
             }
 
-            // 12a-openbot. Check for OpenBot step actions (WorkspaceTool, FillSecret, TakeTheWheel, DelegateToBot)
+            // 12a-openbot. Check for OpenBot step actions
             if let Some(ob_action) = try_parse_openbot_step_action(&response.content) {
+                match &ob_action {
+                    OpenBotStepAction::WorkspaceTool(
+                        crate::workspace_tools::WorkspaceToolCall::Shell { .. },
+                    ) if !self.capabilities.allow_shell => {
+                        return Err(GmError::PermissionDenied(
+                            "Shell execution is disabled for this bot".into(),
+                        ));
+                    }
+                    OpenBotStepAction::FillSecret { .. } if !self.capabilities.allow_gui => {
+                        return Err(GmError::PermissionDenied(
+                            "Secret injection requires desktop access".into(),
+                        ));
+                    }
+                    OpenBotStepAction::FillSecret { .. } if !self.secret_injection_enabled => {
+                        return Err(GmError::PermissionDenied(
+                            "Credential injection is disabled; use human handoff to enter credentials".into(),
+                        ));
+                    }
+                    _ => {}
+                }
+
+                let ob_tier = classify_openbot_step_tier(&ob_action);
+                if ob_tier.requires_confirmation() {
+                    let action_name = openbot_action_type_name(&ob_action);
+                    let approval = build_openbot_approval_request(
+                        task_id,
+                        step,
+                        &ob_action,
+                        &self.secret_scrubber,
+                    );
+                    let approved = self.interaction_handler.request_approval(&approval).await?;
+                    if approved {
+                        if let Some(ref logger) = self.audit {
+                            logger.log(
+                                "action_approved",
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(format!("User approved OpenBot action {action_name}")),
+                                serde_json::json!({
+                                    "task_id": task_id,
+                                    "step": step,
+                                    "action_type": action_name,
+                                    "tier": "Irreversible",
+                                }),
+                            );
+                        }
+                    } else {
+                        if let Some(ref logger) = self.audit {
+                            logger.log(
+                                "action_denied",
+                                None,
+                                None,
+                                None,
+                                None,
+                                Some(format!(
+                                    "Irreversible OpenBot action '{action_name}' requires user confirmation"
+                                )),
+                                serde_json::json!({
+                                    "task_id": task_id,
+                                    "step": step,
+                                    "action_type": action_name,
+                                    "tier": "Irreversible",
+                                    "blocklist": false,
+                                }),
+                            );
+                        }
+                        return Err(GmError::SafetyViolation(format!(
+                            "Irreversible action '{action_name}' requires user confirmation and was denied"
+                        )));
+                    }
+                }
+
                 match ob_action {
                     OpenBotStepAction::WorkspaceTool(ref ws_call) => {
-                        if matches!(
-                            ws_call,
-                            crate::workspace_tools::WorkspaceToolCall::Shell { .. }
-                        ) && !self.capabilities.allow_shell
-                        {
-                            return Err(GmError::PermissionDenied(
-                                "Shell execution is disabled for this bot".into(),
-                            ));
-                        }
-                        if let Some(ref sandbox) = self.workspace_sandbox {
+                        let (summary, outcome) = if let Some(ref sandbox) = self.workspace_sandbox {
                             let mutating = matches!(
                                 ws_call,
                                 crate::workspace_tools::WorkspaceToolCall::WriteFile { .. }
@@ -706,51 +978,40 @@ impl<P: Platform> AgentLoop<P> {
                                     &self.kill_switch,
                                     self.audit.as_ref(),
                                 )
-                                .await?;
+                                .await;
                             if mutating {
                                 self.mark_mutation(false)?;
                             }
-                            step_history.push(StepRecord {
-                                step,
-                                action_summary: ws_outcome.summary,
-                                outcome: ws_outcome.output,
-                                ax_digest: current_ax_digest,
-                            });
-                            if step_history.len() > self.config.max_history_steps {
-                                step_history.remove(0);
+                            let ws_outcome = ws_outcome?;
+                            (ws_outcome.summary, ws_outcome.output)
+                        } else {
+                            let ws_summary = openbot_action_type_name(&ob_action).to_string();
+                            if let Some(ref cb) = self.progress_callback {
+                                cb(step, &ws_summary);
                             }
-                            self.checkpoint(&step_history)?;
-                            prev_action_was_mutating = false;
-                            last_action_feedback = None;
-                            continue;
+                            (
+                                ws_summary,
+                                "Workspace sandbox is unavailable in this session.".to_string(),
+                            )
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
                         }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
                     }
                     OpenBotStepAction::FillSecret {
                         ref token,
                         ref secret_ref,
                     } => {
-                        if !self.capabilities.allow_gui {
-                            return Err(GmError::PermissionDenied(
-                                "Secret injection requires desktop access".into(),
-                            ));
-                        }
-                        if !self.secret_injection_enabled {
-                            return Err(GmError::PermissionDenied("Credential injection is disabled; use human handoff to enter credentials".into()));
-                        }
-                        let approval = ApprovalRequest {
-                            task_id: task_id.into(),
-                            step,
-                            action: ComputerAction::Type {
-                                text: format!("[credential: {secret_ref}]"),
-                            },
-                            target_label: token.clone(),
-                            reason: "Inject this credential into the selected desktop field".into(),
-                        };
-                        if !self.interaction_handler.request_approval(&approval).await? {
-                            return Err(GmError::PermissionDenied(
-                                "Credential injection was not approved".into(),
-                            ));
-                        }
                         self.mark_mutation(true)?;
                         let resolver = self.vault_resolver.clone().unwrap_or_default();
                         let lease_start = Instant::now();
@@ -872,6 +1133,7 @@ impl<P: Platform> AgentLoop<P> {
                                 if step_history.len() > self.config.max_history_steps {
                                     step_history.remove(0);
                                 }
+                                self.checkpoint(&step_history)?;
                                 prev_action_was_mutating = false;
                                 last_action_feedback = None;
                                 continue;
@@ -892,13 +1154,36 @@ impl<P: Platform> AgentLoop<P> {
                         if let Some(ref cb) = self.progress_callback {
                             cb(step, &summary);
                         }
-                        self.mark_mutation(true)?;
-                        let outcome = if let Some(ref del_cb) = self.delegation_callback {
-                            del_cb(target_bot_id, goal, artifacts)?
+                        let outcome = if self.fanout_depth >= self.max_fanout_depth {
+                            if let Some(ref logger) = self.audit {
+                                logger.log_governance(
+                                    "subagent_fanout_refused",
+                                    self.workspace_sandbox.as_ref().map(|s| s.bot_id()),
+                                    AuditCategory::Refused,
+                                    "RULE-BOT-DEPTH",
+                                    "Subagent fan-out depth limit reached",
+                                    summary.clone(),
+                                    serde_json::json!({
+                                        "task_id": task_id,
+                                        "step": step,
+                                        "fanout_depth": self.fanout_depth,
+                                        "max_fanout_depth": self.max_fanout_depth,
+                                        "target_bot_id": target_bot_id,
+                                    }),
+                                );
+                            }
+                            "Subagents cannot spawn further subagents.".to_string()
                         } else {
-                            return Err(GmError::Config(
-                                "Delegation is unavailable in this session".into(),
-                            ));
+                            self.mark_mutation(true)?;
+                            let res = if let Some(ref del_cb) = self.delegation_callback {
+                                del_cb(target_bot_id, goal, artifacts)
+                            } else {
+                                Err(GmError::Config(
+                                    "Delegation is unavailable in this session".into(),
+                                ))
+                            };
+                            self.mark_mutation(false)?;
+                            res?
                         };
                         step_history.push(StepRecord {
                             step,
@@ -906,8 +1191,511 @@ impl<P: Platform> AgentLoop<P> {
                             outcome,
                             ax_digest: current_ax_digest,
                         });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
                         self.checkpoint(&step_history)?;
-                        self.mark_mutation(false)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::SkillSearch { ref query } => {
+                        let summary = format!("SkillSearch(\"{query}\")");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(paths) = self
+                            .workspace_sandbox
+                            .as_ref()
+                            .and_then(|s| s.shared_runtime_paths())
+                        {
+                            let reg =
+                                SkillRegistry::open_resilient(paths, self.secret_scrubber.clone());
+                            let hits = reg.search_skills(query);
+                            if hits.is_empty() {
+                                "No matching skills found.".to_string()
+                            } else {
+                                let lines: Vec<String> = hits
+                                    .into_iter()
+                                    .map(|s| {
+                                        let kind = if s.bundled { "system" } else { "custom" };
+                                        format!(
+                                            "- {} ({}, category={}, {}): {}",
+                                            s.manifest.name,
+                                            s.manifest.title,
+                                            s.manifest.category,
+                                            kind,
+                                            s.manifest.description
+                                        )
+                                    })
+                                    .collect();
+                                self.secret_scrubber.scrub_str(&lines.join("\n"))
+                            }
+                        } else {
+                            "Skill registry is unavailable without shared runtime paths."
+                                .to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::LoadSkill { ref name } => {
+                        let summary = format!("LoadSkill({name})");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(paths) = self
+                            .workspace_sandbox
+                            .as_ref()
+                            .and_then(|s| s.shared_runtime_paths())
+                        {
+                            let reg =
+                                SkillRegistry::open_resilient(paths, self.secret_scrubber.clone());
+                            match reg.load_skill(name) {
+                                Ok(loaded) => {
+                                    let mut doc = format!(
+                                        "# {} ({})\n{}\n",
+                                        loaded.manifest.title,
+                                        loaded.manifest.name,
+                                        loaded.skill_markdown
+                                    );
+                                    if let Some(amendment) = loaded.amendment_markdown {
+                                        doc.push_str("\n## Amendments\n");
+                                        doc.push_str(&amendment);
+                                        doc.push('\n');
+                                    }
+                                    if !loaded.references.is_empty() {
+                                        doc.push_str("\n## References\n");
+                                        for r in loaded.references {
+                                            doc.push_str(&format!("- {r}\n"));
+                                        }
+                                    }
+                                    self.secret_scrubber.scrub_str(&doc)
+                                }
+                                Err(GmError::SafetyViolation(msg)) => {
+                                    return Err(GmError::SafetyViolation(msg));
+                                }
+                                Err(err) => format!("Failed to load skill '{name}': {err}"),
+                            }
+                        } else {
+                            "Skill registry is unavailable without shared runtime paths."
+                                .to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::ConnectorSearch { ref query } => {
+                        let summary = format!("ConnectorSearch(\"{query}\")");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(paths) = self
+                            .workspace_sandbox
+                            .as_ref()
+                            .and_then(|s| s.shared_runtime_paths())
+                        {
+                            let reg =
+                                SkillRegistry::open_resilient(paths, self.secret_scrubber.clone());
+                            let hits = reg.search_connectors(query);
+                            if hits.is_empty() {
+                                "No matching connectors found.".to_string()
+                            } else {
+                                let lines: Vec<String> = hits
+                                    .into_iter()
+                                    .map(|c| {
+                                        format!(
+                                            "- {} ({}, require_auth={}): {}",
+                                            c.manifest.id,
+                                            c.manifest.title,
+                                            c.manifest.require_auth,
+                                            c.manifest.description
+                                        )
+                                    })
+                                    .collect();
+                                self.secret_scrubber.scrub_str(&lines.join("\n"))
+                            }
+                        } else {
+                            "Connector registry is unavailable without shared runtime paths."
+                                .to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::LoadConnector { ref id } => {
+                        let summary = format!("LoadConnector({id})");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(paths) = self
+                            .workspace_sandbox
+                            .as_ref()
+                            .and_then(|s| s.shared_runtime_paths())
+                        {
+                            let reg =
+                                SkillRegistry::open_resilient(paths, self.secret_scrubber.clone());
+                            match reg.load_connector(id) {
+                                Ok(loaded) => {
+                                    let mut doc = format!(
+                                        "# {} ({})\n{}\n",
+                                        loaded.manifest.title,
+                                        loaded.manifest.id,
+                                        loaded.connector_markdown
+                                    );
+                                    if let Some(amendment) = loaded.amendment_markdown {
+                                        doc.push_str("\n## Amendments\n");
+                                        doc.push_str(&amendment);
+                                        doc.push('\n');
+                                    }
+                                    if !loaded.references.is_empty() {
+                                        doc.push_str("\n## References\n");
+                                        for r in loaded.references {
+                                            doc.push_str(&format!("- {r}\n"));
+                                        }
+                                    }
+                                    self.secret_scrubber.scrub_str(&doc)
+                                }
+                                Err(GmError::SafetyViolation(msg)) => {
+                                    return Err(GmError::SafetyViolation(msg));
+                                }
+                                Err(err) => format!("Failed to load connector '{id}': {err}"),
+                            }
+                        } else {
+                            "Connector registry is unavailable without shared runtime paths."
+                                .to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::CreateCustomSkill {
+                        ref name,
+                        ref title,
+                        ref description,
+                        ref body_markdown,
+                    } => {
+                        let summary = format!("CreateCustomSkill({name})");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(paths) = self
+                            .workspace_sandbox
+                            .as_ref()
+                            .and_then(|s| s.shared_runtime_paths())
+                        {
+                            self.mark_mutation(true)?;
+                            let mut reg =
+                                SkillRegistry::open_resilient(paths, self.secret_scrubber.clone());
+                            let manifest = SkillYaml {
+                                name: name.clone(),
+                                title: title.clone(),
+                                description: description.clone(),
+                                category: "custom".to_string(),
+                                include_in_prompt: true,
+                                skill_improvement: None,
+                                amends: None,
+                            };
+                            let created = reg.scaffold_custom_skill(manifest, body_markdown);
+                            self.mark_mutation(false)?;
+                            match created {
+                                Ok(_) => {
+                                    if let Some(ref logger) = self.audit {
+                                        logger.log_governance(
+                                            "custom_skill_created",
+                                            self.workspace_sandbox.as_ref().map(|s| s.bot_id()),
+                                            AuditCategory::Permitted,
+                                            "RULE-STD-000",
+                                            "User-scoped custom skill created",
+                                            summary.clone(),
+                                            serde_json::json!({
+                                                "task_id": task_id,
+                                                "step": step,
+                                                "skill": name,
+                                            }),
+                                        );
+                                    }
+                                    format!(
+                                        "Created custom skill '{name}' at ~/custom-skills/{name}/"
+                                    )
+                                }
+                                Err(GmError::SafetyViolation(msg)) => {
+                                    return Err(GmError::SafetyViolation(msg));
+                                }
+                                Err(err) => {
+                                    format!("Refused to create custom skill '{name}': {err}")
+                                }
+                            }
+                        } else {
+                            "Custom skills are unavailable without shared runtime paths."
+                                .to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::MemorySearch { ref query, limit } => {
+                        let summary = format!("MemorySearch(\"{query}\")");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.secret_scrubber
+                                .scrub_str(&delegate.memory_search(query, limit).await?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::MemoryExplain { ref target } => {
+                        let summary = format!("MemoryExplain(\"{target}\")");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.secret_scrubber
+                                .scrub_str(&delegate.memory_explain(target).await?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::ForgetPlan { ref request } => {
+                        let summary = format!("ForgetPlan([{} chars])", request.len());
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.secret_scrubber
+                                .scrub_str(&delegate.forget_plan(request).await?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::ForgetConfirm { ref plan_id } => {
+                        let summary = format!("ForgetConfirm({plan_id})");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.mark_mutation(true)?;
+                            let res = delegate.forget_confirm(plan_id).await;
+                            self.mark_mutation(false)?;
+                            self.secret_scrubber.scrub_str(&res?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::GoalOp {
+                        op,
+                        ref slug,
+                        ref payload,
+                    } => {
+                        let summary = format!("GoalOp({op:?}, {})", slug.as_deref().unwrap_or("-"));
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.mark_mutation(true)?;
+                            let res = delegate.goal_op(op, slug.as_deref(), payload).await;
+                            self.mark_mutation(false)?;
+                            self.secret_scrubber.scrub_str(&res?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::SpaceOp {
+                        op,
+                        ref slug,
+                        ref payload,
+                    } => {
+                        let summary = format!("SpaceOp({op:?}, {slug})");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.mark_mutation(true)?;
+                            let res = delegate.space_op(op, slug, payload).await;
+                            self.mark_mutation(false)?;
+                            self.secret_scrubber.scrub_str(&res?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::UpdateDiscretion {
+                        ref chat_id,
+                        ref rules,
+                        loosens,
+                    } => {
+                        let summary = format!("UpdateDiscretion({chat_id}, loosens={loosens})");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.mark_mutation(true)?;
+                            let res = delegate.update_discretion(chat_id, rules, loosens).await;
+                            self.mark_mutation(false)?;
+                            self.secret_scrubber.scrub_str(&res?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
+                        if step_history.len() > self.config.max_history_steps {
+                            step_history.remove(0);
+                        }
+                        self.checkpoint(&step_history)?;
+                        prev_action_was_mutating = false;
+                        last_action_feedback = None;
+                        continue;
+                    }
+                    OpenBotStepAction::EmitDirective { ref directive } => {
+                        let summary = format!("EmitDirective({directive:?})");
+                        if let Some(ref cb) = self.progress_callback {
+                            cb(step, &summary);
+                        }
+                        let outcome = if let Some(ref delegate) = self.workflow_delegate {
+                            self.secret_scrubber
+                                .scrub_str(&delegate.emit_directive(directive).await?)
+                        } else {
+                            "Muse workflows are not enabled in this runtime.".to_string()
+                        };
+                        step_history.push(StepRecord {
+                            step,
+                            action_summary: summary,
+                            outcome,
+                            ax_digest: current_ax_digest,
+                        });
                         if step_history.len() > self.config.max_history_steps {
                             step_history.remove(0);
                         }
@@ -2054,6 +2842,457 @@ mod tests {
         unsafe {
             std::env::remove_var("OB_LOOP_SECRET_TEST");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn assemble_step_messages_preserves_muse_prefix_and_appends_cu_contract() {
+        let platform = Arc::new(MockPlatform::new());
+        let budget = Arc::new(BudgetManager::new(BudgetConfig::default()));
+        let llm = Arc::new(HybridLlmClient::new(
+            Arc::new(MockLlmBackend::new()),
+            budget,
+        ));
+        let router = LlmRouter::new(ProvidersConfig::default());
+
+        let muse_agent = AgentLoop::new(
+            Arc::clone(&platform),
+            Arc::clone(&llm),
+            router.clone(),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_capabilities(AgentCapabilities {
+            allow_gui: false,
+            allow_shell: true,
+            allow_network: false,
+        })
+        .with_system_messages(vec![
+            ChatMessage::text("system", "## Who You Are\nMuse baseline prefix"),
+            ChatMessage::text("system", "[Sat 2026-11-14] [model=muse-spark]"),
+        ]);
+
+        let msgs =
+            muse_agent.assemble_step_messages("Goal: check repo".into(), Some(&[0xFF, 0xD8]));
+        assert_eq!(msgs.len(), 3);
+        assert!(
+            msgs[0]
+                .content
+                .starts_with("## Who You Are\nMuse baseline prefix")
+        );
+        let contract_idx = msgs[0]
+            .content
+            .find("## Computer-Use & Workspace Step Contract")
+            .expect("CU step contract appended");
+        assert!(contract_idx > 0);
+        assert!(msgs[0].content.contains("Set-of-Marks badge"));
+        assert!(
+            msgs[0]
+                .content
+                .contains("Capabilities: GUI=false, shell=true, network=false.")
+        );
+        assert_eq!(msgs[1].content, "[Sat 2026-11-14] [model=muse-spark]");
+        assert_eq!(msgs[2].role, "user");
+        assert_eq!(msgs[2].images.len(), 1);
+        for action_name in [
+            "WorkspaceReadFile",
+            "WorkspaceWriteFile",
+            "WorkspaceListFiles",
+            "WorkspaceShell",
+            "FillSecret",
+            "TakeTheWheel",
+            "DelegateToBot",
+            "SkillSearch",
+            "LoadSkill",
+            "ConnectorSearch",
+            "LoadConnector",
+            "MemorySearch",
+            "MemoryExplain",
+            "ForgetPlan",
+            "ForgetConfirm",
+            "CreateCustomSkill",
+            "GoalOp",
+            "SpaceOp",
+            "UpdateDiscretion",
+            "EmitDirective",
+        ] {
+            assert!(
+                msgs[0].content.contains(action_name),
+                "Expected step contract example for {action_name}"
+            );
+        }
+
+        let legacy_agent = AgentLoop::new(
+            platform,
+            llm,
+            router,
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_system_prompt("Legacy persona".into());
+        let legacy_msgs = legacy_agent.assemble_step_messages("Goal: test".into(), None);
+        assert_eq!(legacy_msgs.len(), 2);
+        assert!(legacy_msgs[0].content.starts_with("Legacy persona"));
+        assert!(legacy_msgs[0].content.contains("Capabilities: GUI=false"));
+    }
+
+    struct RecordingWorkflowDelegate {
+        calls: parking_lot::Mutex<Vec<String>>,
+    }
+
+    impl RecordingWorkflowDelegate {
+        fn new() -> Self {
+            Self {
+                calls: parking_lot::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl MuseWorkflowDelegate for RecordingWorkflowDelegate {
+        async fn memory_search(&self, query: &str, limit: Option<u32>) -> Result<String> {
+            self.calls
+                .lock()
+                .push(format!("memory_search:{query}:{limit:?}"));
+            Ok(format!("Memory hits for '{query}'"))
+        }
+
+        async fn memory_explain(&self, target: &str) -> Result<String> {
+            self.calls.lock().push(format!("memory_explain:{target}"));
+            Ok(format!("Provenance for '{target}'"))
+        }
+
+        async fn forget_plan(&self, request: &str) -> Result<String> {
+            self.calls.lock().push(format!("forget_plan:{request}"));
+            Ok("plan-123".to_string())
+        }
+
+        async fn forget_confirm(&self, plan_id: &str) -> Result<String> {
+            self.calls.lock().push(format!("forget_confirm:{plan_id}"));
+            Ok(format!("forgotten:{plan_id}"))
+        }
+
+        async fn goal_op(
+            &self,
+            op: GoalOpKind,
+            slug: Option<&str>,
+            _payload: &serde_json::Value,
+        ) -> Result<String> {
+            self.calls.lock().push(format!("goal_op:{op:?}:{slug:?}"));
+            Ok(format!("goal:{op:?}"))
+        }
+
+        async fn space_op(
+            &self,
+            op: SpaceOpKind,
+            slug: &str,
+            _payload: &serde_json::Value,
+        ) -> Result<String> {
+            self.calls.lock().push(format!("space_op:{op:?}:{slug}"));
+            Ok(format!("space:{op:?}:{slug}"))
+        }
+
+        async fn update_discretion(
+            &self,
+            chat_id: &str,
+            _rules: &str,
+            loosens: bool,
+        ) -> Result<String> {
+            self.calls
+                .lock()
+                .push(format!("update_discretion:{chat_id}:{loosens}"));
+            Ok(format!("discretion:{chat_id}"))
+        }
+
+        async fn emit_directive(&self, directive: &DirectiveKind) -> Result<String> {
+            self.calls
+                .lock()
+                .push(format!("emit_directive:{directive:?}"));
+            Ok("directive_emitted".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn forget_confirm_without_approval_does_not_execute_delegate() {
+        let platform = Arc::new(MockPlatform::new());
+        let mock_backend = Arc::new(MockLlmBackend::new());
+        mock_backend
+            .set_response(r#"{"action":"ForgetConfirm","params":{"plan_id":"plan-secret-42"}}"#);
+
+        let delegate = Arc::new(RecordingWorkflowDelegate::new());
+        let budget = Arc::new(BudgetManager::new(BudgetConfig::default()));
+        let llm = Arc::new(HybridLlmClient::new(mock_backend, budget));
+        let router = LlmRouter::new(ProvidersConfig::default());
+        let audit = Arc::new(AuditLogger::in_memory());
+
+        // NonInteractiveHandler denies all Irreversible actions.
+        let agent = AgentLoop::new(
+            platform,
+            llm,
+            router,
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_workflow_delegate(Arc::clone(&delegate) as Arc<dyn MuseWorkflowDelegate>)
+        .with_audit(Arc::clone(&audit));
+
+        let err = agent
+            .run_task("forget_deny", "Confirm forget plan")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, GmError::SafetyViolation(_)));
+        assert!(
+            delegate.calls.lock().is_empty(),
+            "Delegate must not run without explicit approval"
+        );
+        assert!(
+            audit
+                .entries()
+                .iter()
+                .any(|e| e.event_type == "action_denied")
+        );
+
+        // Now repeat with explicit approval and confirm delegate runs.
+        let platform2 = Arc::new(MockPlatform::new());
+        let mock_backend2 = Arc::new(MockLlmBackend::new());
+        mock_backend2
+            .queue_response(r#"{"action":"ForgetConfirm","params":{"plan_id":"plan-secret-42"}}"#);
+        mock_backend2
+            .queue_response(r#"{"action":"Done","params":{"summary":"Forget completed"}}"#);
+        let delegate2 = Arc::new(RecordingWorkflowDelegate::new());
+        let agent2 = AgentLoop::new(
+            platform2,
+            Arc::new(HybridLlmClient::new(
+                mock_backend2,
+                Arc::new(BudgetManager::new(BudgetConfig::default())),
+            )),
+            LlmRouter::new(ProvidersConfig::default()),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_interaction_handler(Arc::new(CallbackInteractionHandler::with_approval_always(
+            true,
+        )))
+        .with_workflow_delegate(Arc::clone(&delegate2) as Arc<dyn MuseWorkflowDelegate>);
+
+        let summary = agent2
+            .run_task("forget_ok", "Confirm forget plan")
+            .await
+            .unwrap();
+        assert_eq!(summary, "Forget completed");
+        assert_eq!(
+            delegate2.calls.lock().as_slice(),
+            &["forget_confirm:plan-secret-42".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_workflow_delegate_returns_not_enabled_tool_result() {
+        let recorded_history = Arc::new(parking_lot::Mutex::new(Vec::<StepRecord>::new()));
+        let recorded_clone = Arc::clone(&recorded_history);
+
+        let platform = Arc::new(MockPlatform::new());
+        let mock_backend = Arc::new(MockLlmBackend::new());
+        mock_backend
+            .queue_response(r#"{"action":"MemorySearch","params":{"query":"favorite tea"}}"#);
+        mock_backend.queue_response(r#"{"action":"Done","params":{"summary":"Checked"}}"#);
+
+        let agent = AgentLoop::new(
+            platform,
+            Arc::new(HybridLlmClient::new(
+                mock_backend,
+                Arc::new(BudgetManager::new(BudgetConfig::default())),
+            )),
+            LlmRouter::new(ProvidersConfig::default()),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_checkpoint(Vec::new(), move |steps| {
+            *recorded_clone.lock() = steps.to_vec();
+            Ok(())
+        });
+
+        let summary = agent
+            .run_task("missing_delegate", "Search memory")
+            .await
+            .unwrap();
+        assert_eq!(summary, "Checked");
+        let steps = recorded_history.lock();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(
+            steps[0].outcome,
+            "Muse workflows are not enabled in this runtime."
+        );
+    }
+
+    #[tokio::test]
+    async fn fanout_depth_allows_depth_0_to_1_and_refuses_depth_1_to_2() {
+        // Depth 0 -> 1 allowed when max_fanout_depth = 1.
+        let delegated_calls = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let calls_clone = Arc::clone(&delegated_calls);
+        let history_0 = Arc::new(parking_lot::Mutex::new(Vec::<StepRecord>::new()));
+        let history_0_clone = Arc::clone(&history_0);
+
+        let backend_0 = Arc::new(MockLlmBackend::new());
+        backend_0.queue_response(
+            r#"{"action":"DelegateToBot","params":{"target_bot_id":"researcher","goal":"Look up docs"}}"#,
+        );
+        backend_0.queue_response(r#"{"action":"Done","params":{"summary":"Delegated ok"}}"#);
+
+        let agent_depth_0 = AgentLoop::new(
+            Arc::new(MockPlatform::new()),
+            Arc::new(HybridLlmClient::new(
+                backend_0,
+                Arc::new(BudgetManager::new(BudgetConfig::default())),
+            )),
+            LlmRouter::new(ProvidersConfig::default()),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_fanout_depth(0, 1)
+        .with_delegation_callback(move |target, goal, _artifacts| {
+            calls_clone.lock().push(format!("{target}:{goal}"));
+            Ok(format!("Delegated to @{target}"))
+        })
+        .with_checkpoint(Vec::new(), move |steps| {
+            *history_0_clone.lock() = steps.to_vec();
+            Ok(())
+        });
+
+        let res_0 = agent_depth_0
+            .run_task("fanout_0", "Delegate")
+            .await
+            .unwrap();
+        assert_eq!(res_0, "Delegated ok");
+        assert_eq!(delegated_calls.lock().len(), 1);
+        assert_eq!(history_0.lock()[0].outcome, "Delegated to @researcher");
+
+        // Depth 1 -> 2 refused when max_fanout_depth = 1.
+        let delegated_calls_1 = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        let calls_clone_1 = Arc::clone(&delegated_calls_1);
+        let history_1 = Arc::new(parking_lot::Mutex::new(Vec::<StepRecord>::new()));
+        let history_1_clone = Arc::clone(&history_1);
+        let audit = Arc::new(AuditLogger::in_memory());
+
+        let backend_1 = Arc::new(MockLlmBackend::new());
+        backend_1.queue_response(
+            r#"{"action":"DelegateToBot","params":{"target_bot_id":"coder","goal":"Nested spawn"}}"#,
+        );
+        backend_1.queue_response(r#"{"action":"Done","params":{"summary":"Handled refusal"}}"#);
+
+        let agent_depth_1 = AgentLoop::new(
+            Arc::new(MockPlatform::new()),
+            Arc::new(HybridLlmClient::new(
+                backend_1,
+                Arc::new(BudgetManager::new(BudgetConfig::default())),
+            )),
+            LlmRouter::new(ProvidersConfig::default()),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_fanout_depth(1, 1)
+        .with_audit(Arc::clone(&audit))
+        .with_delegation_callback(move |target, goal, _artifacts| {
+            calls_clone_1.lock().push(format!("{target}:{goal}"));
+            Ok("should_not_run".into())
+        })
+        .with_checkpoint(Vec::new(), move |steps| {
+            *history_1_clone.lock() = steps.to_vec();
+            Ok(())
+        });
+
+        let res_1 = agent_depth_1.run_task("fanout_1", "Nested").await.unwrap();
+        assert_eq!(res_1, "Handled refusal");
+        assert!(delegated_calls_1.lock().is_empty());
+        assert_eq!(
+            history_1.lock()[0].outcome,
+            "Subagents cannot spawn further subagents."
+        );
+        assert!(
+            audit
+                .entries()
+                .iter()
+                .any(|e| e.event_type == "subagent_fanout_refused")
+        );
+    }
+
+    #[tokio::test]
+    async fn skill_search_load_and_create_custom_skill_in_agent_loop() {
+        let dir = std::env::temp_dir().join(format!("agent_skills_test_{}", uuid::Uuid::new_v4()));
+        let storage = dir.join("storage");
+        let bot_root = storage.join("bots").join("muse");
+        let paths = gm_core::muse_paths::MuseRuntimePaths::for_bot(&storage, &bot_root, "muse");
+        gm_muse::templates::bootstrap_shared_runtime_files(&paths).unwrap();
+        gm_muse::templates::bootstrap_bot_runtime_files(
+            &paths,
+            &gm_muse::templates::BotSeed {
+                id: "muse",
+                display_name: "Muse",
+                role_title: "Generalist",
+                legacy_system_prompt: "",
+            },
+        )
+        .unwrap();
+
+        let sandbox = BotWorkspaceSandbox::new("muse", &bot_root)
+            .unwrap()
+            .with_shared_runtime_paths(paths.clone());
+
+        let history = Arc::new(parking_lot::Mutex::new(Vec::<StepRecord>::new()));
+        let history_clone = Arc::clone(&history);
+
+        let backend = Arc::new(MockLlmBackend::new());
+        backend.queue_response(r#"{"action":"SkillSearch","params":{"query":"forget"}}"#);
+        backend.queue_response(r#"{"action":"LoadSkill","params":{"name":"forget"}}"#);
+        backend.queue_response(
+            r##"{"action":"CreateCustomSkill","params":{"name":"morning-brief","title":"Morning Brief","description":"Summarize schedule","body_markdown":"# Steps\n1. Review goals\n"}}"##,
+        );
+        backend.queue_response(r#"{"action":"Done","params":{"summary":"Skills verified"}}"#);
+
+        let agent = AgentLoop::new(
+            Arc::new(MockPlatform::new()),
+            Arc::new(HybridLlmClient::new(
+                backend,
+                Arc::new(BudgetManager::new(BudgetConfig::default())),
+            )),
+            LlmRouter::new(ProvidersConfig::default()),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig::default(),
+        )
+        .with_workspace_sandbox(sandbox)
+        .with_checkpoint(Vec::new(), move |steps| {
+            *history_clone.lock() = steps.to_vec();
+            Ok(())
+        });
+
+        let summary = agent.run_task("skills_task", "Use skills").await.unwrap();
+        assert_eq!(summary, "Skills verified");
+
+        let steps = history.lock();
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].outcome.contains("forget"));
+        assert!(steps[1].outcome.contains("forget"));
+        assert!(
+            steps[2]
+                .outcome
+                .contains("Created custom skill 'morning-brief'")
+        );
+        assert!(
+            paths
+                .custom_skills_dir()
+                .join("morning-brief")
+                .join("SKILL.md")
+                .exists()
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

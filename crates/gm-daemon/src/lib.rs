@@ -327,6 +327,157 @@ pub enum Commands {
         #[arg(long, default_value = "127.0.0.1:7433")]
         bind: String,
     },
+    /// Search and inspect Muse skills and connectors
+    Skills {
+        #[command(subcommand)]
+        action: Option<SkillsSubcommand>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage durable personal Goals and 1-level subgoals
+    Goals {
+        #[command(subcommand)]
+        action: Option<GoalsSubcommand>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Two-phase discretionary Forget across memory, files, and databases
+    Forget {
+        #[command(subcommand)]
+        action: ForgetSubcommand,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Import portable memory notes with untrusted-data fencing and SHA-256 dry-run gating
+    ImportMemory {
+        /// Path to markdown/text file containing memory notes
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Inline memory notes text
+        #[arg(long, allow_hyphen_values = true)]
+        input: Option<String>,
+        /// Commit extracted facts (requires --report-sha256 from dry run)
+        #[arg(long)]
+        apply: bool,
+        /// Dry-run report SHA-256 confirmation token
+        #[arg(long)]
+        report_sha256: Option<String>,
+        /// Target bot ID (defaults to default_bot_id)
+        #[arg(long)]
+        bot: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run nightly dream, relationship synthesis, and skill-amendment proposal job
+    Dream {
+        /// Optional target date YYYY-MM-DD (defaults to today UTC)
+        #[arg(long)]
+        date: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Manage Static Spaces served on the isolated loopback Spaces origin
+    Spaces {
+        #[command(subcommand)]
+        action: Option<SpacesSubcommand>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SkillsSubcommand {
+    /// List indexed skills and connectors
+    List,
+    /// Search skills and connectors by keyword
+    Search { query: String },
+    /// Load and display a skill or connector by name
+    Show { name: String },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum GoalsSubcommand {
+    /// List all goals and deliverables
+    List,
+    /// Create a top-level goal
+    Create {
+        title: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        #[arg(long)]
+        category: Option<String>,
+        #[arg(long)]
+        stop_condition: Vec<String>,
+    },
+    /// Create a child subgoal under an existing top-level goal
+    Subgoal {
+        parent: String,
+        title: String,
+        #[arg(long, default_value = "")]
+        description: String,
+    },
+    /// Mark a goal completed
+    Complete {
+        slug: String,
+        /// Mark completion without independent verification
+        #[arg(long)]
+        unverified: bool,
+    },
+    /// Mark a goal abandoned
+    Abandon { slug: String },
+    /// Delete a goal and any child subgoals
+    Delete { slug: String },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ForgetSubcommand {
+    /// Phase 1: Scan memory, files, and databases and emit a blinded ForgetPlan
+    Plan {
+        request: String,
+        #[arg(long)]
+        bot: Option<String>,
+    },
+    /// Phase 2: Execute a pending ForgetPlan after explicit confirmation (--yes)
+    Confirm {
+        plan_id: String,
+        #[arg(long)]
+        verification_query: Option<String>,
+        #[arg(long)]
+        bot: Option<String>,
+        /// Explicitly confirm irreversible erasure
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum SpacesSubcommand {
+    /// List configured Spaces
+    List,
+    /// Scaffold a new Space (static only; ts is rejected)
+    Create {
+        slug: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long, default_value = "static")]
+        kind: String,
+        #[arg(long, allow_hyphen_values = true)]
+        html: Option<String>,
+    },
+    /// Mint a fresh 15-minute signed URL for an existing Space
+    Url { slug: String },
+    /// Publish an existing Space (Irreversible; requires --yes)
+    Publish {
+        slug: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -990,6 +1141,40 @@ pub async fn run_kill_with_config(_config: &GmConfig) -> Result<()> {
     Ok(())
 }
 
+pub const LEGACY_REPL_SYSTEM: &str = "You are Grok-Muse, a fast computer-use personal assistant for macOS. \
+You have direct access to local memory, system permissions, and desktop automation tools. \
+Respond concisely, accurately, and politely.";
+
+pub fn build_repl_system_messages(
+    config: &GmConfig,
+    system_override: Option<String>,
+    model_display_name: &str,
+) -> Vec<ChatMessage> {
+    if let Some(override_prompt) = system_override {
+        return vec![ChatMessage::text("system", override_prompt)];
+    }
+    if !config.muse.enable_muse_prompt {
+        return vec![ChatMessage::text("system", LEGACY_REPL_SYSTEM)];
+    }
+    let paths = gm_core::muse_paths::MuseRuntimePaths::from_config(config, Some("muse"));
+    let mut input = gm_muse::prompt::PromptInput::new(
+        gm_muse::prompt::PromptSurface::MainChat,
+        &paths,
+        &config.muse,
+        model_display_name,
+    );
+    input.allow_host_desktop = config.safety.allow_host_desktop;
+    input.workspace_vm_enabled = config.workspace_vm.enabled;
+    match gm_muse::prompt::MusePromptBuilder::build_messages(&input) {
+        Ok(msgs) if !msgs.is_empty() => msgs,
+        Ok(_) => vec![ChatMessage::text("system", LEGACY_REPL_SYSTEM)],
+        Err(err) => {
+            warn!("Failed to build Muse REPL prompt; using legacy fallback: {err}");
+            vec![ChatMessage::text("system", LEGACY_REPL_SYSTEM)]
+        }
+    }
+}
+
 pub async fn run_chat(system_override: Option<String>, config_path: Option<PathBuf>) -> Result<()> {
     let stdin = std::io::stdin();
     let reader = stdin.lock();
@@ -1028,14 +1213,9 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
     );
     let audit_log = AuditLogger::default_logger().unwrap_or_else(|_| AuditLogger::in_memory());
 
-    let system_prompt = system_override.unwrap_or_else(|| {
-        "You are Grok-Muse, a fast computer-use personal assistant for macOS. \
-        You have direct access to local memory, system permissions, and desktop automation tools. \
-        Respond concisely, accurately, and politely."
-            .into()
-    });
-
-    let mut history: Vec<ChatMessage> = vec![ChatMessage::text("system", system_prompt)];
+    let (chat_primary, _) = router.route(TaskType::Planning);
+    let mut history: Vec<ChatMessage> =
+        build_repl_system_messages(&config, system_override, &chat_primary.model);
 
     writeln!(
         writer,
@@ -1129,11 +1309,12 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
         }
 
         if input == "/clear" {
-            let sys = history.first().cloned();
-            history.clear();
-            if let Some(s) = sys {
-                history.push(s);
-            }
+            let leading_system: Vec<ChatMessage> = history
+                .iter()
+                .take_while(|m| m.role == "system")
+                .cloned()
+                .collect();
+            history = leading_system;
             writeln!(writer, "✔ Conversation history cleared.\n")?;
             writer.flush()?;
             continue;
@@ -1149,10 +1330,8 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
                 user_msgs,
                 asst_msgs
             )?;
-            for (idx, msg) in history.iter().enumerate() {
-                if idx == 0 && msg.role == "system" {
-                    continue;
-                }
+            for (turn_idx, msg) in history.iter().filter(|m| m.role != "system").enumerate() {
+                let idx = turn_idx + 1;
                 let preview: String = msg.content.chars().take(80).collect();
                 let ellipsis = if msg.content.chars().count() > 80 {
                     "..."
@@ -1348,7 +1527,18 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
             .await
         {
             Ok(resp) => {
-                writeln!(writer, "\n{}\n", resp.content.trim())?;
+                let raw_reply = resp.content.trim();
+                let parts = gm_muse::directives::parse_directives(raw_reply);
+                let rendered = gm_muse::directives::render_plain(
+                    &parts,
+                    &gm_muse::directives::RenderSurface::Terminal,
+                );
+                let display_reply = if rendered.is_empty() {
+                    raw_reply.to_string()
+                } else {
+                    rendered.join("\n---\n")
+                };
+                writeln!(writer, "\n{}\n", display_reply)?;
                 history.push(ChatMessage::text("assistant", resp.content.clone()));
                 audit_log.log(
                     "chat_message",
@@ -1423,22 +1613,193 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
         Arc::clone(&platform),
     );
 
-    let runtime_task = control_server.start_runtime()?;
+    if config.muse.enable_muse_prompt {
+        let muse_paths = gm_core::muse_paths::MuseRuntimePaths::from_config(&config, Some("muse"));
+        if let Err(e) = gm_muse::templates::run_migrations(&muse_paths) {
+            warn!("Failed to run Muse runtime migrations: {e}");
+        }
+        let (chat_primary, _) = router.route(TaskType::Planning);
+        if let Err(e) = gm_muse::prompt::write_main_chat_system_prompt(
+            &muse_paths,
+            &config.muse,
+            &chat_primary.model,
+            config.safety.allow_host_desktop,
+            config.workspace_vm.enabled,
+            None,
+        ) {
+            warn!("Failed to write rendered workspace/system/system_prompt.md: {e}");
+        }
+    }
 
-    let companion_task = if config.openbot.enabled && config.openbot.companion_enabled {
-        if let Some(sup) = control_server.openbot().cloned() {
+    let runtime_task = control_server.start_runtime()?;
+    let event_tx = control_server.event_sender();
+    let sup_opt = control_server.openbot().cloned();
+
+    let (companion_task, spaces_task) = if config.openbot.enabled
+        && config.openbot.companion_enabled
+    {
+        if let Some(sup) = sup_opt.clone() {
             let bind_addr = config.openbot.companion_bind_addr.clone();
             let bridges_cfg = config.openbot.bridges.clone();
             let (token, slack_secret) = companion_web_credentials(&config)?;
+            let bridge = gm_openbot::BridgeRouter::new(sup.clone(), bridges_cfg);
+            let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret);
+            match web.bind_and_serve(&bind_addr).await {
+                Ok((comp_addr, comp_handle)) => {
+                    let sp_handle = if config.muse.enable_spaces {
+                        let target_sp_port = config
+                            .muse
+                            .spaces_port
+                            .unwrap_or_else(|| comp_addr.port().saturating_add(1));
+                        sup.set_ports(comp_addr.port(), target_sp_port);
+                        let sp_bind = format!("127.0.0.1:{target_sp_port}");
+                        let spaces_srv = gm_openbot::SpacesWebServer::new(sup.spaces().clone());
+                        match spaces_srv.bind_and_serve(&sp_bind).await {
+                            Ok((sp_addr, sp_task)) => {
+                                sup.set_ports(comp_addr.port(), sp_addr.port());
+                                info!(
+                                    "OpenBot Companion listening on http://{}; Static Spaces on http://{}",
+                                    comp_addr, sp_addr
+                                );
+                                Some(sp_task)
+                            }
+                            Err(e) => {
+                                warn!("SpacesWebServer failed to bind on {sp_bind}: {e}");
+                                None
+                            }
+                        }
+                    } else {
+                        sup.set_companion_port(comp_addr.port());
+                        None
+                    };
+                    (Some(comp_handle), sp_handle)
+                }
+                Err(e) => {
+                    warn!("OpenBot CompanionWebServer failed to bind on {bind_addr}: {e}");
+                    (None, None)
+                }
+            }
+        } else {
+            (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    let heartbeat_task = if config.muse.enable_heartbeat {
+        if let Some(sup) = sup_opt.clone() {
+            let hb_paths = sup.shared_paths();
+            let hb_muse_cfg = config.muse.clone();
+            let hb_quiet_gate = sup.quiet_gate().clone();
+            let hb_feed = sup.feed_store().as_ref().clone();
+            let hb_queue = sup.queue().clone();
+            let hb_budget = Arc::clone(&budget);
+            let hb_ks = kill_switch.clone();
+            let hb_llm = Arc::clone(&llm_client);
+            let hb_router = router.clone();
+            let hb_control = control_server.clone();
+            let hb_events = event_tx.clone();
+            let interval_secs = config.muse.heartbeat_interval_secs.max(60);
             Some(tokio::spawn(async move {
-                let bridge = gm_openbot::BridgeRouter::new(sup.clone(), bridges_cfg);
-                let web = gm_openbot::CompanionWebServer::new(sup, bridge, token, slack_secret);
-                match web.bind_and_serve(&bind_addr).await {
-                    Ok((_addr, handle)) => {
-                        let _ = handle.await;
+                let worker = gm_goals::HeartbeatWorker::new(
+                    hb_paths,
+                    hb_muse_cfg,
+                    hb_quiet_gate,
+                    hb_budget,
+                    hb_ks,
+                )
+                .with_feed_store(hb_feed)
+                .with_llm(hb_llm, hb_router);
+                let mut interval =
+                    tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    worker.set_paused(hb_control.is_paused());
+                    let now = chrono::Utc::now();
+                    let due_routines: Vec<String> = hb_queue
+                        .list_routines()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|r| {
+                            r.routine.enabled
+                                && chrono::DateTime::parse_from_rfc3339(&r.next_run_utc)
+                                    .map(|dt| dt.with_timezone(&chrono::Utc) <= now)
+                                    .unwrap_or(false)
+                        })
+                        .map(|r| r.routine.id)
+                        .collect();
+                    match worker.tick(now, &due_routines).await {
+                        Ok(gm_goals::HeartbeatOutcome::Dispatched { .. }) => {
+                            let _ = hb_events.send(gm_core::ipc::DaemonEvent::ActivityUpdated {
+                                reason: "heartbeat".into(),
+                            });
+                        }
+                        Ok(_) => {}
+                        Err(e) => warn!("HeartbeatWorker tick failed: {e}"),
                     }
-                    Err(e) => {
-                        warn!("OpenBot CompanionWebServer failed to bind on {bind_addr}: {e}");
+                }
+            }))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let dream_task = if config.muse.enable_dreams {
+        if let Some(sup) = sup_opt.clone() {
+            let dr_paths = sup.shared_paths();
+            let dr_muse_cfg = config.muse.clone();
+            let dr_mem = sup
+                .roster()
+                .memory_store(&config.openbot.default_bot_id)
+                .unwrap_or_else(|_| (*memory).clone());
+            let dr_audit = audit_log.clone();
+            let dr_events = event_tx.clone();
+            let dr_goals = sup.goal_manager();
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    let now_utc = chrono::Utc::now();
+                    if chrono::Timelike::hour(&chrono::Local::now())
+                        == dr_muse_cfg.nightly_dream_hour
+                    {
+                        let today_str = now_utc.format("%Y-%m-%d").to_string();
+                        let daily_file =
+                            dr_paths.dreams_daily_dir().join(format!("{today_str}.md"));
+                        if !daily_file.exists() {
+                            let paths_c = dr_paths.clone();
+                            let cfg_c = dr_muse_cfg.clone();
+                            let mem_c = dr_mem.clone();
+                            let audit_c = dr_audit.clone();
+                            let goals_c = dr_goals.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                gm_goals::SelfImprovementJob::run(
+                                    &paths_c,
+                                    &cfg_c,
+                                    &mem_c,
+                                    &audit_c,
+                                    Some(&goals_c),
+                                    now_utc,
+                                )
+                            })
+                            .await
+                            {
+                                Ok(Ok(report)) if report.executed => {
+                                    let _ = dr_events.send(
+                                        gm_core::ipc::DaemonEvent::ActivityUpdated {
+                                            reason: "dream_completed".into(),
+                                        },
+                                    );
+                                }
+                                Ok(Err(e)) => warn!("Nightly dream job failed: {e}"),
+                                Err(e) => warn!("Nightly dream task failed: {e}"),
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }))
@@ -1469,8 +1830,17 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
             }
             Err(e) => {
                 eprintln!("Task failed: {e}");
+                if let Some(st) = spaces_task {
+                    st.abort();
+                }
                 if let Some(ct) = companion_task {
                     ct.abort();
+                }
+                if let Some(ht) = heartbeat_task {
+                    ht.abort();
+                }
+                if let Some(dt) = dream_task {
+                    dt.abort();
                 }
                 server_task.abort();
                 runtime_task.abort();
@@ -1483,8 +1853,17 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
         tokio::signal::ctrl_c().await.ok();
     }
 
+    if let Some(st) = spaces_task {
+        st.abort();
+    }
     if let Some(ct) = companion_task {
         ct.abort();
+    }
+    if let Some(ht) = heartbeat_task {
+        ht.abort();
+    }
+    if let Some(dt) = dream_task {
+        dt.abort();
     }
     server_task.abort();
     runtime_task.abort();
@@ -2316,16 +2695,596 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
     )?;
     let bridge = gm_openbot::BridgeRouter::new(sup.clone(), config.openbot.bridges.clone());
     let (token, slack_secret) = companion_web_credentials(&config)?;
-    let web = gm_openbot::CompanionWebServer::new(sup, bridge, token, slack_secret);
-    let (_addr, handle) = match web.bind_and_serve(bind).await {
+    let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret);
+    let (comp_addr, comp_handle) = match web.bind_and_serve(bind).await {
         Ok(server) => server,
         Err(error) => {
             runtime.abort();
             return Err(error);
         }
     };
-    tokio::select! { _ = handle => {}, _ = tokio::signal::ctrl_c() => {} }
+    let spaces_handle = if config.muse.enable_spaces {
+        let target_sp_port = config
+            .muse
+            .spaces_port
+            .unwrap_or_else(|| comp_addr.port().saturating_add(1));
+        sup.set_ports(comp_addr.port(), target_sp_port);
+        let sp_bind = format!("127.0.0.1:{target_sp_port}");
+        let spaces_srv = gm_openbot::SpacesWebServer::new(sup.spaces().clone());
+        match spaces_srv.bind_and_serve(&sp_bind).await {
+            Ok((sp_addr, handle)) => {
+                sup.set_ports(comp_addr.port(), sp_addr.port());
+                println!("==> Serving Static Spaces on http://{sp_addr} ...");
+                Some(handle)
+            }
+            Err(error) => {
+                comp_handle.abort();
+                runtime.abort();
+                return Err(error);
+            }
+        }
+    } else {
+        sup.set_companion_port(comp_addr.port());
+        None
+    };
+
+    let comp_abort = comp_handle.abort_handle();
+    if let Some(sp_handle) = spaces_handle {
+        let sp_abort = sp_handle.abort_handle();
+        tokio::select! {
+            _ = comp_handle => {}
+            _ = sp_handle => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        comp_abort.abort();
+        sp_abort.abort();
+    } else {
+        tokio::select! {
+            _ = comp_handle => {}
+            _ = tokio::signal::ctrl_c() => {}
+        }
+        comp_abort.abort();
+    }
     runtime.abort();
+    Ok(())
+}
+
+pub async fn run_skills(
+    action: Option<SkillsSubcommand>,
+    json: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let sup = open_default_openbot_supervisor(config_path)?;
+    let reg = sup.skill_registry()?;
+    match action.unwrap_or(SkillsSubcommand::List) {
+        SkillsSubcommand::List => {
+            let skills = reg.skills();
+            let connectors = reg.connectors();
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "skills": skills,
+                        "connectors": connectors,
+                    }))?
+                );
+            } else {
+                println!("Muse Skills ({}):", skills.len());
+                for s in skills {
+                    let scope = if s.bundled { "bundled" } else { "custom" };
+                    println!(
+                        "  • {:<28} [{} / {}] {} — {}",
+                        s.manifest.name,
+                        scope,
+                        s.manifest.category,
+                        s.manifest.title,
+                        s.manifest.description
+                    );
+                }
+                println!("Muse Connectors ({}):", connectors.len());
+                for c in connectors {
+                    let scope = if c.bundled { "bundled" } else { "custom" };
+                    println!(
+                        "  • {:<28} [{}] {} — {}",
+                        c.manifest.id, scope, c.manifest.title, c.manifest.description
+                    );
+                }
+            }
+        }
+        SkillsSubcommand::Search { query } => {
+            let skills = reg.search_skills(&query);
+            let connectors = reg.search_connectors(&query);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "query": query,
+                        "skills": skills,
+                        "connectors": connectors,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Matches for '{}' ({} skills, {} connectors):",
+                    query,
+                    skills.len(),
+                    connectors.len()
+                );
+                for s in skills {
+                    println!(
+                        "  • [skill] {}: {}",
+                        s.manifest.name, s.manifest.description
+                    );
+                }
+                for c in connectors {
+                    println!(
+                        "  • [connector] {}: {}",
+                        c.manifest.id, c.manifest.description
+                    );
+                }
+            }
+        }
+        SkillsSubcommand::Show { name } => {
+            if let Ok(loaded) = reg.load_skill(&name) {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&loaded)?);
+                } else {
+                    println!("{} ({})", loaded.manifest.title, loaded.manifest.name);
+                    println!(
+                        "Category: {} (bundled={})",
+                        loaded.manifest.category, loaded.bundled
+                    );
+                    if !loaded.references.is_empty() {
+                        println!("References: {}", loaded.references.join(", "));
+                    }
+                    println!("\n{}", loaded.skill_markdown);
+                    if let Some(amend) = &loaded.amendment_markdown {
+                        println!("\n--- Amendments ---\n{}", amend);
+                    }
+                }
+            } else if let Ok(conn) = reg.load_connector(&name) {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&conn)?);
+                } else {
+                    println!("{} ({})", conn.manifest.title, conn.manifest.id);
+                    println!(
+                        "Bundled: {} | Aliases: {:?}",
+                        conn.bundled, conn.manifest.aliases
+                    );
+                    if !conn.references.is_empty() {
+                        println!("References: {}", conn.references.join(", "));
+                    }
+                    println!("\n{}", conn.connector_markdown);
+                    if let Some(amend) = &conn.amendment_markdown {
+                        println!("\n--- Amendments ---\n{}", amend);
+                    }
+                }
+            } else {
+                return Err(GmError::Config(format!(
+                    "Skill or connector '{name}' not found"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_goals(
+    action: Option<GoalsSubcommand>,
+    json: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let sup = open_default_openbot_supervisor(config_path)?;
+    let mgr = sup.goal_manager();
+    match action.unwrap_or(GoalsSubcommand::List) {
+        GoalsSubcommand::List => {
+            let goals = mgr.list_goals()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&goals)?);
+            } else {
+                println!("Muse Goals ({}):", goals.len());
+                for g in goals {
+                    let parent = g
+                        .parent_goal_id
+                        .as_deref()
+                        .map(|p| format!(" (parent: {p})"))
+                        .unwrap_or_default();
+                    let cat = g
+                        .category
+                        .as_deref()
+                        .map(|c| format!(" [{c}]"))
+                        .unwrap_or_default();
+                    println!(
+                        "  • {:<32} [{:?}]{}{} — {}",
+                        g.slug, g.status, cat, parent, g.title
+                    );
+                }
+            }
+        }
+        GoalsSubcommand::Create {
+            title,
+            description,
+            category,
+            stop_condition,
+        } => {
+            let goal =
+                mgr.create_goal(&title, &description, category.as_deref(), stop_condition)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&goal)?);
+            } else {
+                println!("✔ Created goal '{}' (slug: {})", goal.title, goal.slug);
+            }
+        }
+        GoalsSubcommand::Subgoal {
+            parent,
+            title,
+            description,
+        } => {
+            let sub = mgr.create_subgoal(&parent, &title, &description, Vec::new())?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&sub)?);
+            } else {
+                println!(
+                    "✔ Created subgoal '{}' (slug: {}, parent: {})",
+                    sub.title, sub.slug, parent
+                );
+            }
+        }
+        GoalsSubcommand::Complete { slug, unverified } => {
+            let goal = mgr.complete_goal(&slug, !unverified)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&goal)?);
+            } else {
+                println!(
+                    "✔ Completed goal '{}' (verified={})",
+                    goal.slug, goal.verified_close
+                );
+            }
+        }
+        GoalsSubcommand::Abandon { slug } => {
+            let goal = mgr.abandon_goal(&slug)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&goal)?);
+            } else {
+                println!("✔ Abandoned goal '{}'", goal.slug);
+            }
+        }
+        GoalsSubcommand::Delete { slug } => {
+            let deleted_slugs = mgr.delete_goal(&slug)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "deleted_slugs": deleted_slugs,
+                    }))?
+                );
+            } else {
+                println!("✔ Deleted goal(s): {}", deleted_slugs.join(", "));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_forget(
+    action: ForgetSubcommand,
+    json: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let sup = open_default_openbot_supervisor(config_path)?;
+    match action {
+        ForgetSubcommand::Plan { request, bot } => {
+            let plan = sup.plan_forget(bot.as_deref(), &request)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else {
+                println!("Forget Plan: {}", plan.plan_id);
+                println!("  Fingerprint: {}", plan.request_fingerprint);
+                println!("  Total targets: {}", plan.targets.len());
+                for (category, count) in &plan.summary_counts {
+                    println!("    - {}: {}", category, count);
+                }
+                if !plan.excluded_disclosures.is_empty() {
+                    println!("  Excluded stores:");
+                    for note in &plan.excluded_disclosures {
+                        println!("    * {note}");
+                    }
+                }
+                println!("Run `gm forget confirm {} --yes` to execute.", plan.plan_id);
+            }
+        }
+        ForgetSubcommand::Confirm {
+            plan_id,
+            verification_query,
+            bot,
+            yes,
+        } => {
+            let report =
+                sup.confirm_forget(bot.as_deref(), &plan_id, verification_query.as_deref(), yes)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("Forget Status: {}", report.status.label());
+                println!("  Message: {}", report.message);
+                println!(
+                    "  Removed lines: {} | Deleted files: {} | Deleted DB records: {} | Retracted claims: {} | Redacted audit lines: {}",
+                    report.removed_lines,
+                    report.deleted_files,
+                    report.deleted_darius_records,
+                    report.retracted_claims.len(),
+                    report.redacted_audit_entries
+                );
+                if !report.remaining.is_empty() {
+                    println!("  Remaining hits: {}", report.remaining.len());
+                }
+                for note in &report.excluded_disclosures {
+                    println!("  * {note}");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_import_memory(
+    file: Option<PathBuf>,
+    input: Option<String>,
+    apply: bool,
+    report_sha256: Option<String>,
+    bot: Option<String>,
+    json: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let raw = match (file, input) {
+        (Some(path), None) => {
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.file_type().is_symlink() {
+                return Err(GmError::SafetyViolation(
+                    "RULE-PATH-004: Refusing symlink input file for memory import".into(),
+                ));
+            }
+            if !meta.is_file() {
+                return Err(GmError::Config(format!(
+                    "Import path '{}' is not a regular file",
+                    path.display()
+                )));
+            }
+            if meta.len() as usize > gm_memory::MAX_IMPORT_BYTES {
+                return Err(GmError::Config(format!(
+                    "Import file exceeds {} byte limit",
+                    gm_memory::MAX_IMPORT_BYTES
+                )));
+            }
+            std::fs::read_to_string(&path)?
+        }
+        (None, Some(text)) => text,
+        (Some(_), Some(_)) => {
+            return Err(GmError::Config(
+                "Specify either --file or --input, not both".into(),
+            ));
+        }
+        (None, None) => {
+            return Err(GmError::Config(
+                "Provide either --file <path> or --input <text>".into(),
+            ));
+        }
+    };
+    if raw.len() > gm_memory::MAX_IMPORT_BYTES {
+        return Err(GmError::Config(format!(
+            "Import payload exceeds {} byte limit",
+            gm_memory::MAX_IMPORT_BYTES
+        )));
+    }
+    let sup = open_default_openbot_supervisor(config_path)?;
+    let target_bot = bot
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&sup.config().openbot.default_bot_id);
+    if sup.roster().get_bot(target_bot).is_none() {
+        return Err(GmError::Config(format!("Unknown bot '{target_bot}'")));
+    }
+    let memory = sup.roster().memory_store(target_bot)?;
+    let report = gm_memory::import_memory_portable_with_stores(
+        &raw,
+        &sup.shared_paths(),
+        Some(sup.provenance()),
+        Some(&memory),
+        apply,
+        report_sha256.as_deref(),
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Memory Import ({}):",
+            if report.applied { "APPLIED" } else { "DRY RUN" }
+        );
+        println!("  Report SHA-256:    {}", report.report_sha256);
+        println!("  Provenance prefix: {}", report.provenance_prefix);
+        println!(
+            "  Additions: {} | Rejected lines: {} | Claims recorded: {}",
+            report.additions.len(),
+            report.rejected.len(),
+            report.claim_ids.len()
+        );
+        if !report.applied {
+            println!(
+                "Re-run with `--apply --report-sha256 {}` to commit extracted facts.",
+                report.report_sha256
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_dream(
+    date: Option<String>,
+    json: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let sup = open_default_openbot_supervisor(config_path)?;
+    let now = match date.as_deref() {
+        Some(d) => {
+            let parsed = chrono::NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d").map_err(|e| {
+                GmError::Config(format!("Invalid --date '{d}' (expected YYYY-MM-DD): {e}"))
+            })?;
+            parsed
+                .and_hms_opt(3, 0, 0)
+                .ok_or_else(|| GmError::Config("Invalid dream timestamp".into()))?
+                .and_utc()
+        }
+        None => chrono::Utc::now(),
+    };
+    let memory = sup
+        .roster()
+        .memory_store(&sup.config().openbot.default_bot_id)?;
+    let mgr = sup.goal_manager();
+    let report = gm_goals::SelfImprovementJob::run(
+        &sup.shared_paths(),
+        &sup.config().muse,
+        &memory,
+        sup.audit(),
+        Some(&mgr),
+        now,
+    )?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if !report.executed {
+        println!(
+            "Dream job skipped for {} (muse.enable_dreams is disabled in configuration).",
+            report.date
+        );
+    } else {
+        println!("✔ Dream & Self-Improvement completed for {}:", report.date);
+        if let Some(p) = &report.dream_path {
+            println!("  Dream reflection:  {}", p.display());
+        }
+        if let Some(p) = &report.alignment_synthesis_path {
+            println!("  Alignment file:    {}", p.display());
+        }
+        println!(
+            "  Relationships updated: {} | Amendment proposals: {} | Quiet candidates: {}",
+            report.relationship_files_updated.len(),
+            report.amendment_proposals.len(),
+            report.quiet_moment_candidates.len()
+        );
+    }
+    Ok(())
+}
+
+pub async fn run_spaces(
+    action: Option<SpacesSubcommand>,
+    json: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let sup = open_default_openbot_supervisor(config_path)?;
+    let sp_port = sup.spaces_port();
+    match action.unwrap_or(SpacesSubcommand::List) {
+        SpacesSubcommand::List => {
+            let spaces = sup.spaces().list_spaces()?;
+            if json {
+                let mut urls = serde_json::Map::new();
+                if sup.config().muse.enable_spaces {
+                    for sp in &spaces {
+                        if let Ok(url) = sup.spaces().mint_url_for_slug(&sp.slug, sp_port) {
+                            urls.insert(sp.slug.clone(), serde_json::Value::String(url));
+                        }
+                    }
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "spaces": spaces,
+                        "urls": urls,
+                        "spaces_port": sp_port,
+                        "enable_spaces": sup.config().muse.enable_spaces,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Static Spaces ({}, enabled={}):",
+                    spaces.len(),
+                    sup.config().muse.enable_spaces
+                );
+                for sp in spaces {
+                    println!(
+                        "  • {:<28} [{:?}] published={} — {}",
+                        sp.slug, sp.kind, sp.published, sp.title
+                    );
+                }
+            }
+        }
+        SpacesSubcommand::Create {
+            slug,
+            title,
+            kind,
+            html,
+        } => {
+            if !sup.config().muse.enable_spaces {
+                return Err(GmError::Config(
+                    "Spaces feature is disabled in MuseConfig".into(),
+                ));
+            }
+            let kind_enum = match kind.trim().to_ascii_lowercase().as_str() {
+                "static" => gm_openbot::SpaceKind::Static,
+                "ts" | "typescript" => gm_openbot::SpaceKind::Ts,
+                other => return Err(GmError::Config(format!("Unknown Space kind '{other}'"))),
+            };
+            let meta =
+                sup.spaces()
+                    .create_space(&slug, title.as_deref(), kind_enum, html.as_deref())?;
+            let url = sup.spaces().mint_url_for_slug(&meta.slug, sp_port)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "space": meta,
+                        "url": url,
+                        "spaces_port": sp_port,
+                    }))?
+                );
+            } else {
+                println!("✔ Created static Space '{}' -> {}", meta.slug, url);
+            }
+        }
+        SpacesSubcommand::Url { slug } => {
+            if !sup.config().muse.enable_spaces {
+                return Err(GmError::Config(
+                    "Spaces feature is disabled in MuseConfig".into(),
+                ));
+            }
+            let url = sup.spaces().mint_url_for_slug(&slug, sp_port)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "slug": slug,
+                        "url": url,
+                        "spaces_port": sp_port,
+                    }))?
+                );
+            } else {
+                println!("{url}");
+            }
+        }
+        SpacesSubcommand::Publish { slug, yes } => {
+            if !sup.config().muse.enable_spaces {
+                return Err(GmError::Config(
+                    "Spaces feature is disabled in MuseConfig".into(),
+                ));
+            }
+            let meta = sup.spaces().publish_space(&slug, yes)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&meta)?);
+            } else {
+                println!(
+                    "✔ Published Space '{}' (published={})",
+                    meta.slug, meta.published
+                );
+            }
+        }
+    }
     Ok(())
 }
 
@@ -2553,6 +3512,43 @@ mod tests {
         assert!(out_str.contains("[1] user:"));
         assert!(out_str.contains("[2] assistant:"));
         assert!(out_str.contains("Exiting Grok-Muse chat. Goodbye!"));
+    }
+
+    #[test]
+    fn repl_system_messages_respect_override_and_flag() {
+        let dir = tempfile::tempdir().unwrap();
+        let muse_cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+
+        // Explicit --system override always wins even when Muse prompt is enabled.
+        let override_msgs = build_repl_system_messages(
+            &muse_cfg,
+            Some("Explicit override prompt".into()),
+            "muse-spark-1.3",
+        );
+        assert_eq!(override_msgs.len(), 1);
+        assert_eq!(override_msgs[0].content, "Explicit override prompt");
+
+        // Muse enabled with no override yields [stable_prefix, dynamic_tail].
+        let default_msgs = build_repl_system_messages(&muse_cfg, None, "muse-spark-1.3");
+        assert_eq!(default_msgs.len(), 2);
+        assert!(default_msgs[0].content.contains("## Who You Are"));
+        assert!(default_msgs[1].content.contains("[model=muse-spark-1.3]"));
+
+        // Muse disabled falls back cleanly to LEGACY_REPL_SYSTEM.
+        let legacy_cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            muse: gm_core::config::MuseConfig {
+                enable_muse_prompt: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let legacy_msgs = build_repl_system_messages(&legacy_cfg, None, "muse-spark-1.3");
+        assert_eq!(legacy_msgs.len(), 1);
+        assert_eq!(legacy_msgs[0].content, LEGACY_REPL_SYSTEM);
     }
 
     #[tokio::test]
@@ -3295,5 +4291,329 @@ mod tests {
 
         srv_handle.abort();
         let _ = std::fs::remove_file(&daemon_socket);
+    }
+
+    #[tokio::test]
+    async fn test_muse_cli_subcommands() {
+        // 1. Verify clap parses all new Muse subcommands cleanly.
+        assert!(Cli::try_parse_from(["gm", "skills", "search", "spaces"]).is_ok());
+        assert!(Cli::try_parse_from(["gm", "goals", "create", "Ship release"]).is_ok());
+        assert!(Cli::try_parse_from(["gm", "forget", "plan", "temp note"]).is_ok());
+        assert!(Cli::try_parse_from(["gm", "import-memory", "--input", "- Test fact"]).is_ok());
+        assert!(Cli::try_parse_from(["gm", "dream", "--date", "2026-06-01"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["gm", "spaces", "create", "my-space", "--kind", "static"]).is_ok()
+        );
+
+        // 2. Execute CLI handlers against an isolated config + temp storage dir.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = temp_dir.path().join("storage");
+        let config = GmConfig {
+            storage_dir: storage.clone(),
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: storage.join("bots"),
+                ..Default::default()
+            },
+            muse: gm_core::config::MuseConfig {
+                enable_dreams: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let config_path = temp_dir.path().join("config.json");
+        std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        // Skills list / search / show
+        run_skills(
+            Some(SkillsSubcommand::List),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        run_skills(
+            Some(SkillsSubcommand::Search {
+                query: "spaces".into(),
+            }),
+            false,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        run_skills(
+            Some(SkillsSubcommand::Show {
+                name: "spaces".into(),
+            }),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            run_skills(
+                Some(SkillsSubcommand::Show {
+                    name: "nonexistent-skill-xyz".into(),
+                }),
+                false,
+                Some(config_path.clone()),
+            )
+            .await
+            .is_err()
+        );
+
+        // Goals create / subgoal / depth-2 refusal / complete / list / delete
+        run_goals(
+            Some(GoalsSubcommand::Create {
+                title: "Ship Muse".into(),
+                description: "Complete integration".into(),
+                category: Some("engineering".into()),
+                stop_condition: vec!["Pass CI".into()],
+            }),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        run_goals(
+            Some(GoalsSubcommand::Subgoal {
+                parent: "ship-muse".into(),
+                title: "Sub Phase".into(),
+                description: "Child step".into(),
+            }),
+            false,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        let sub_slug = {
+            let sup = open_default_openbot_supervisor(Some(config_path.clone())).unwrap();
+            let list = sup.goal_manager().list_goals().unwrap();
+            list.into_iter()
+                .find(|g| g.parent_goal_id.is_some())
+                .expect("subgoal exists")
+                .slug
+        };
+        assert!(
+            run_goals(
+                Some(GoalsSubcommand::Subgoal {
+                    parent: sub_slug,
+                    title: "Depth Two".into(),
+                    description: "Should fail".into(),
+                }),
+                false,
+                Some(config_path.clone()),
+            )
+            .await
+            .is_err()
+        );
+        run_goals(
+            Some(GoalsSubcommand::Complete {
+                slug: "ship-muse".into(),
+                unverified: false,
+            }),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        run_goals(
+            Some(GoalsSubcommand::List),
+            false,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        run_goals(
+            Some(GoalsSubcommand::Delete {
+                slug: "ship-muse".into(),
+            }),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+
+        // Spaces create (static ok, ts rejected) / list / url / publish confirmation
+        run_spaces(
+            Some(SpacesSubcommand::Create {
+                slug: "alpha-space".into(),
+                title: Some("Alpha Space".into()),
+                kind: "static".into(),
+                html: None,
+            }),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        let ts_err = run_spaces(
+            Some(SpacesSubcommand::Create {
+                slug: "beta-space".into(),
+                title: None,
+                kind: "ts".into(),
+                html: None,
+            }),
+            false,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(ts_err.contains("TS Spaces are not supported yet"));
+        run_spaces(
+            Some(SpacesSubcommand::List),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        run_spaces(
+            Some(SpacesSubcommand::Url {
+                slug: "alpha-space".into(),
+            }),
+            false,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        assert!(
+            run_spaces(
+                Some(SpacesSubcommand::Publish {
+                    slug: "alpha-space".into(),
+                    yes: false,
+                }),
+                false,
+                Some(config_path.clone()),
+            )
+            .await
+            .is_err()
+        );
+        run_spaces(
+            Some(SpacesSubcommand::Publish {
+                slug: "alpha-space".into(),
+                yes: true,
+            }),
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+
+        // Import memory dry run -> apply with report_sha256 -> Forget plan & confirm
+        let import_note = "- User prefers cerulean widgets in winter";
+        let notes_path = temp_dir.path().join("notes.md");
+        std::fs::write(&notes_path, import_note).unwrap();
+        run_import_memory(
+            Some(notes_path.clone()),
+            None,
+            false,
+            None,
+            None,
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        let dry_sha = {
+            let sup = open_default_openbot_supervisor(Some(config_path.clone())).unwrap();
+            let mem = sup.roster().memory_store("muse").unwrap();
+            gm_memory::import_memory_portable_with_stores(
+                import_note,
+                &sup.shared_paths(),
+                Some(sup.provenance()),
+                Some(&mem),
+                false,
+                None,
+            )
+            .unwrap()
+            .report_sha256
+        };
+        run_import_memory(
+            Some(notes_path),
+            None,
+            true,
+            Some(dry_sha),
+            None,
+            false,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+
+        run_forget(
+            ForgetSubcommand::Plan {
+                request: "cerulean".into(),
+                bot: None,
+            },
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        let plan = {
+            let sup = open_default_openbot_supervisor(Some(config_path.clone())).unwrap();
+            sup.plan_forget(None, "cerulean").unwrap()
+        };
+        assert!(!plan.targets.is_empty());
+        assert!(
+            run_forget(
+                ForgetSubcommand::Confirm {
+                    plan_id: plan.plan_id.clone(),
+                    verification_query: Some("cerulean".into()),
+                    bot: None,
+                    yes: false,
+                },
+                false,
+                Some(config_path.clone()),
+            )
+            .await
+            .is_err()
+        );
+        run_forget(
+            ForgetSubcommand::Confirm {
+                plan_id: plan.plan_id,
+                verification_query: Some("cerulean".into()),
+                bot: None,
+                yes: true,
+            },
+            true,
+            Some(config_path.clone()),
+        )
+        .await
+        .unwrap();
+        let remaining_mem = {
+            let sup = open_default_openbot_supervisor(Some(config_path.clone())).unwrap();
+            std::fs::read_to_string(sup.shared_paths().memory_md()).unwrap_or_default()
+        };
+        assert!(!remaining_mem.contains("cerulean"));
+
+        // Dream enabled vs disabled + invalid date
+        run_dream(Some("2026-06-01".into()), true, Some(config_path.clone()))
+            .await
+            .unwrap();
+        let shared = gm_core::muse_paths::MuseRuntimePaths::shared(&storage);
+        assert!(shared.dreams_daily_dir().join("2026-06-01.md").exists());
+        assert!(
+            run_dream(
+                Some("invalid-date".into()),
+                false,
+                Some(config_path.clone())
+            )
+            .await
+            .is_err()
+        );
+
+        let mut disabled_cfg = config;
+        disabled_cfg.muse.enable_dreams = false;
+        let disabled_cfg_path = temp_dir.path().join("config-disabled.json");
+        std::fs::write(
+            &disabled_cfg_path,
+            serde_json::to_string_pretty(&disabled_cfg).unwrap(),
+        )
+        .unwrap();
+        run_dream(Some("2026-06-02".into()), false, Some(disabled_cfg_path))
+            .await
+            .unwrap();
+        assert!(!shared.dreams_daily_dir().join("2026-06-02.md").exists());
     }
 }

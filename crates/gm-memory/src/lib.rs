@@ -1,10 +1,16 @@
+pub mod forget;
+pub mod import;
+pub mod provenance;
 pub mod upkeep;
+pub use forget::*;
+pub use import::*;
+pub use provenance::*;
 pub use upkeep::*;
 
 pub use darius_memory::{MemoryEngine, NewRecord, Record, RecordKind, SearchQuery};
 use gm_core::error::{GmError, Result};
 use parking_lot::Mutex;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -13,6 +19,9 @@ pub struct PersonalMemoryStore {
 }
 
 impl PersonalMemoryStore {
+    pub fn db_path(&self) -> PathBuf {
+        self.engine.lock().db_path()
+    }
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
         let engine = MemoryEngine::open(db_path.as_ref())
             .map_err(|e| GmError::Platform(format!("Failed to open memory db: {e}")))?;

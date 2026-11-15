@@ -2,9 +2,10 @@ use clap::Parser;
 use gm_core::error::Result;
 use gm_daemon::{
     Cli, Commands, run_audit, run_bots, run_channels, run_chat, run_daemon, run_diagnostics,
-    run_do, run_dogfood, run_feed, run_ideas, run_kill, run_models, run_onboard, run_permissions,
-    run_queue, run_review, run_routines, run_serve, run_service, run_stats, run_status, run_team,
-    run_update, run_upkeep,
+    run_do, run_dogfood, run_dream, run_feed, run_forget, run_goals, run_ideas, run_import_memory,
+    run_kill, run_models, run_onboard, run_permissions, run_queue, run_review, run_routines,
+    run_serve, run_service, run_skills, run_spaces, run_stats, run_status, run_team, run_update,
+    run_upkeep,
 };
 
 #[tokio::main]
@@ -50,6 +51,19 @@ async fn main() -> Result<()> {
             run_diagnostics(action, json, cli.config).await
         }
         Some(Commands::Serve { bind }) => run_serve(&bind, cli.config).await,
+        Some(Commands::Skills { action, json }) => run_skills(action, json, cli.config).await,
+        Some(Commands::Goals { action, json }) => run_goals(action, json, cli.config).await,
+        Some(Commands::Forget { action, json }) => run_forget(action, json, cli.config).await,
+        Some(Commands::ImportMemory {
+            file,
+            input,
+            apply,
+            report_sha256,
+            bot,
+            json,
+        }) => run_import_memory(file, input, apply, report_sha256, bot, json, cli.config).await,
+        Some(Commands::Dream { date, json }) => run_dream(date, json, cli.config).await,
+        Some(Commands::Spaces { action, json }) => run_spaces(action, json, cli.config).await,
         None => {
             // Default behavior when invoked as gm-daemon: run daemon or one-shot task
             run_daemon(cli.config, cli.task).await

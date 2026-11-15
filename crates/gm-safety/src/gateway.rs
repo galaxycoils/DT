@@ -1,8 +1,9 @@
 use crate::blocklist::BlocklistManager;
 use crate::tiers::ActionTier;
+use gm_core::muse_paths::{MountAccess, ResolvedMusePath};
 use gm_core::types::ComputerAction;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -171,6 +172,124 @@ impl SecurityGateway {
         }
     }
 
+    /// Evaluate a resolved Muse virtual runtime path against mount confinement, symlink
+    /// restrictions, read-only mounts, and persona write approval gates.
+    pub fn evaluate_scoped_path(
+        &self,
+        resolved: &ResolvedMusePath,
+        is_write: bool,
+        persona_write_approved: bool,
+    ) -> PolicyDecision {
+        // 1. Canonical deepest existing ancestor must stay within canonical mount root.
+        let canon_root = canonicalize_with_tail(&resolved.mount_root);
+        let normalized_abs = normalize_lexical(&resolved.absolute);
+        let effective = canonicalize_with_tail(&normalized_abs);
+        if !effective.starts_with(&canon_root) {
+            return PolicyDecision {
+                outcome: PolicyOutcome::Refused,
+                tier: ActionTier::Irreversible,
+                rule_id: "RULE-PATH-002",
+                citation: format!(
+                    "Path '{}' escapes scoped mount '{}'",
+                    resolved.absolute.display(),
+                    resolved.mount_label
+                ),
+            };
+        }
+
+        // 2. Any symlink component from mount_root through relative path -> refuse RULE-PATH-002.
+        if let Ok(meta) = std::fs::symlink_metadata(&resolved.mount_root)
+            && meta.file_type().is_symlink()
+        {
+            return PolicyDecision {
+                outcome: PolicyOutcome::Refused,
+                tier: ActionTier::Irreversible,
+                rule_id: "RULE-PATH-002",
+                citation: format!(
+                    "Mount root '{}' is a symlink, which is prohibited by RULE-PATH-002",
+                    resolved.mount_label
+                ),
+            };
+        }
+        let mut cursor = resolved.mount_root.clone();
+        for comp in resolved.relative.components() {
+            match comp {
+                Component::CurDir => continue,
+                Component::Normal(seg) => {
+                    cursor.push(seg);
+                    if let Ok(meta) = std::fs::symlink_metadata(&cursor)
+                        && meta.file_type().is_symlink()
+                    {
+                        return PolicyDecision {
+                            outcome: PolicyOutcome::Refused,
+                            tier: ActionTier::Irreversible,
+                            rule_id: "RULE-PATH-002",
+                            citation: format!(
+                                "Symlink component '{}' inside mount '{}' is prohibited by RULE-PATH-002",
+                                cursor.display(),
+                                resolved.mount_label
+                            ),
+                        };
+                    }
+                }
+                other => {
+                    return PolicyDecision {
+                        outcome: PolicyOutcome::Refused,
+                        tier: ActionTier::Irreversible,
+                        rule_id: "RULE-PATH-002",
+                        citation: format!(
+                            "Invalid relative path component {:?} in mount '{}'",
+                            other, resolved.mount_label
+                        ),
+                    };
+                }
+            }
+        }
+
+        // 3. Writes to ReadOnly mounts are refused.
+        if is_write && resolved.access == MountAccess::ReadOnly {
+            return PolicyDecision {
+                outcome: PolicyOutcome::Refused,
+                tier: ActionTier::Irreversible,
+                rule_id: "RULE-PATH-002",
+                citation: format!(
+                    "RULE-PATH-002: Cannot modify read-only mount '{}'",
+                    resolved.mount_label
+                ),
+            };
+        }
+
+        // 4. Writes to PersonaApproval mounts require explicit Irreversible approval.
+        if is_write && resolved.access == MountAccess::PersonaApproval && !persona_write_approved {
+            return PolicyDecision {
+                outcome: PolicyOutcome::NeedsApproval,
+                tier: ActionTier::Irreversible,
+                rule_id: "RULE-PERSONA-007",
+                citation: format!(
+                    "Modifying persona file '{}' requires explicit Irreversible confirmation",
+                    resolved.mount_label
+                ),
+            };
+        }
+
+        // 5. Permitted otherwise.
+        PolicyDecision {
+            outcome: PolicyOutcome::Permitted,
+            tier: if !is_write {
+                ActionTier::Read
+            } else if resolved.access == MountAccess::PersonaApproval {
+                ActionTier::Irreversible
+            } else {
+                ActionTier::Reversible
+            },
+            rule_id: "RULE-STD-000",
+            citation: format!(
+                "Scoped mount '{}' file operation permitted",
+                resolved.mount_label
+            ),
+        }
+    }
+
     /// Evaluate a workspace shell command before execution.
     pub fn evaluate_shell_command(&self, command: &str) -> PolicyDecision {
         let lower = command.to_lowercase();
@@ -272,6 +391,41 @@ impl SecurityGateway {
     }
 }
 
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn canonicalize_with_tail(path: &Path) -> PathBuf {
+    let mut remainder: Vec<std::ffi::OsString> = Vec::new();
+    let mut cursor = path;
+    loop {
+        if let Ok(canon) = cursor.canonicalize() {
+            let mut full = canon;
+            for seg in remainder.into_iter().rev() {
+                full.push(seg);
+            }
+            return full;
+        }
+        match (cursor.parent(), cursor.file_name()) {
+            (Some(parent), Some(name)) => {
+                remainder.push(name.to_os_string());
+                cursor = parent;
+            }
+            _ => return normalize_lexical(path),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +476,96 @@ mod tests {
         let r3 = gw.evaluate_shell_command("cargo test --quiet");
         assert_eq!(r3.outcome, PolicyOutcome::Permitted);
         assert_eq!(r3.rule_id, "RULE-STD-000");
+    }
+
+    #[test]
+    fn test_scoped_path_confinement_readonly_and_persona_approval() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let bot_root = storage.join("bots/muse");
+        std::fs::create_dir_all(storage.join("skills")).unwrap();
+        std::fs::create_dir_all(bot_root.join("workspace")).unwrap();
+
+        let paths = gm_core::muse_paths::MuseRuntimePaths::for_bot(&storage, &bot_root, "muse");
+        let gw = SecurityGateway::new(BlocklistManager::new(&[]));
+
+        // 1. Escaping canonical mount root is refused
+        let escaped = ResolvedMusePath {
+            absolute: storage.join("skills/../MEMORY.md"),
+            mount_label: "skills".into(),
+            mount_root: storage.join("skills"),
+            relative: PathBuf::from("../MEMORY.md"),
+            access: MountAccess::ReadOnly,
+        };
+        let dec = gw.evaluate_scoped_path(&escaped, false, false);
+        assert_eq!(dec.outcome, PolicyOutcome::Refused);
+        assert_eq!(dec.rule_id, "RULE-PATH-002");
+
+        // 2. ReadOnly mount permits read, refuses write
+        let skill_path = paths.resolve_virtual_path("skills/goals/SKILL.md").unwrap();
+        let read_dec = gw.evaluate_scoped_path(&skill_path, false, false);
+        assert_eq!(read_dec.outcome, PolicyOutcome::Permitted);
+        assert_eq!(read_dec.tier, ActionTier::Read);
+
+        let write_ro = gw.evaluate_scoped_path(&skill_path, true, false);
+        assert_eq!(write_ro.outcome, PolicyOutcome::Refused);
+        assert_eq!(write_ro.rule_id, "RULE-PATH-002");
+        assert!(
+            write_ro
+                .citation
+                .contains("Cannot modify read-only mount 'skills'")
+        );
+
+        // 3. PersonaApproval mount permits read, asks approval on write unless approved
+        let soul = paths.resolve_virtual_path("SOUL.md").unwrap();
+        assert_eq!(
+            gw.evaluate_scoped_path(&soul, false, false).outcome,
+            PolicyOutcome::Permitted
+        );
+        let soul_unapproved = gw.evaluate_scoped_path(&soul, true, false);
+        assert_eq!(soul_unapproved.outcome, PolicyOutcome::NeedsApproval);
+        assert_eq!(soul_unapproved.tier, ActionTier::Irreversible);
+
+        let soul_approved = gw.evaluate_scoped_path(&soul, true, true);
+        assert_eq!(soul_approved.outcome, PolicyOutcome::Permitted);
+        assert_eq!(soul_approved.tier, ActionTier::Irreversible);
+
+        // 4. ReadWrite mount permits write as Reversible
+        let mem = paths.resolve_virtual_path("~/MEMORY.md").unwrap();
+        let mem_write = gw.evaluate_scoped_path(&mem, true, false);
+        assert_eq!(mem_write.outcome, PolicyOutcome::Permitted);
+        assert_eq!(mem_write.tier, ActionTier::Reversible);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scoped_path_refuses_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = tmp.path().join("storage");
+        let bot_root = storage.join("bots/muse");
+        std::fs::create_dir_all(&bot_root).unwrap();
+        std::fs::create_dir_all(bot_root.join("workspace")).unwrap();
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+
+        std::os::unix::fs::symlink(&outside, bot_root.join("workspace/link.txt")).unwrap();
+        let paths = gm_core::muse_paths::MuseRuntimePaths::for_bot(&storage, &bot_root, "muse");
+        let resolved = paths.resolve_virtual_path("link.txt").unwrap();
+
+        let gw = SecurityGateway::new(BlocklistManager::new(&[]));
+        let dec = gw.evaluate_scoped_path(&resolved, false, false);
+        assert_eq!(dec.outcome, PolicyOutcome::Refused);
+        assert_eq!(dec.rule_id, "RULE-PATH-002");
+
+        // Also catch an intra-mount broken symlink via symlink_metadata
+        std::os::unix::fs::symlink(
+            bot_root.join("workspace/missing_target.txt"),
+            bot_root.join("workspace/dangling.txt"),
+        )
+        .unwrap();
+        let dangling = paths.resolve_virtual_path("dangling.txt").unwrap();
+        let dec_dangling = gw.evaluate_scoped_path(&dangling, true, false);
+        assert_eq!(dec_dangling.outcome, PolicyOutcome::Refused);
+        assert_eq!(dec_dangling.rule_id, "RULE-PATH-002");
     }
 }

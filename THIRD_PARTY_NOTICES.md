@@ -22,8 +22,9 @@ Grok Muse incorporates open-source software distributed under various licenses. 
 | `ed25519-dalek`, `sha2`, `hex` | 2.x / 0.10.x / 0.4.x | Apache-2.0 / MIT | The Dalek Cryptography and RustCrypto Contributors |
 | `async-trait` | 0.1.x | MIT / Apache-2.0 | David Tolnay |
 | `keyring` | 3.6.x | MIT / Apache-2.0 | The Rust Keyring Project |
-| `egui`, `eframe` | 0.31.x | MIT / Apache-2.0 | Emil Ernerfeldt and egui contributors |
+| `egui`, `eframe` | 0.33.x | MIT / Apache-2.0 | Emil Ernerfeldt and egui contributors |
 | `accesskit` | 0.17.x | MIT / Apache-2.0 | Matt Campbell and AccessKit Contributors |
+| `serde_yml` | 0.0.12 | MIT / Apache-2.0 | David Tolnay and serde_yml contributors |
 
 ---
 
@@ -31,6 +32,16 @@ Grok Muse incorporates open-source software distributed under various licenses. 
 
 Darius is licensed under MIT / Apache-2.0 by the Darius Contributors.
 Portions copyright (c) 2025-2026 Darius Maintainers.
+
+---
+
+### Bundled Upstream Reference Texts (`crates/gm-muse/assets/upstream/`)
+
+Grok-Muse bundles the published `Meta/muse-agent` system prompt, workspace templates, documentation files, and core workflow skills verbatim (with the sole removal of the repository uploader's personal name from `USER.md`) under `crates/gm-muse/assets/upstream/` for local prompt fidelity and runtime bootstrapping.
+
+- Upstream directory: `Meta/muse-agent` (`system_prompts_leaks` archive)
+- Upstream commit SHA: `bb4c9c5a8bcbe281e2fbe3fd1fa961e514c0a93f` (fetched 2026-11-14)
+- Integrity manifest: see [`crates/gm-muse/assets/UPSTREAM.md`](crates/gm-muse/assets/UPSTREAM.md) and [`docs/MUSE.md`](docs/MUSE.md) for per-file SHA-256 checksums and runtime adaptation details.
 
 ---
 

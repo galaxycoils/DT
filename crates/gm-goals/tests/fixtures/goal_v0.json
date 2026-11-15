@@ -1,0 +1,22 @@
+[
+  {
+    "id": "goal-v0-001",
+    "title": "Run a Half Marathon",
+    "description": "Train four days a week toward a 21k race.",
+    "status": "Paused",
+    "stop_conditions": ["Complete 21.1 km race day"],
+    "created_at": "2026-01-15T08:00:00Z",
+    "next_check_at": "2026-01-16T08:00:00Z",
+    "verified_close": false
+  },
+  {
+    "id": "goal-v0-002",
+    "title": "Learn Conversational Japanese",
+    "description": "Practice 15 minutes daily and pass JLPT N4 practice check.",
+    "status": "Active",
+    "stop_conditions": ["Score 80%+ on N4 mock"],
+    "created_at": "2026-02-01T09:30:00Z",
+    "next_check_at": "2026-02-02T09:30:00Z",
+    "verified_close": false
+  }
+]

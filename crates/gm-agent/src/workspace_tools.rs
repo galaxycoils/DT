@@ -1,6 +1,7 @@
 use crate::approval::{ApprovalRequest, InteractionHandler};
 use cap_std::fs::Dir;
 use gm_core::error::{GmError, Result};
+use gm_core::muse_paths::{MountAccess, MuseRuntimePaths, ResolvedMusePath};
 use gm_core::types::ComputerAction;
 use gm_safety::{
     AuditCategory, AuditLogger, BlocklistManager, KillSwitch, PolicyOutcome, SecretScrubber,
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkspaceToolCall {
     ReadFile {
         path: String,
@@ -95,6 +96,17 @@ pub fn compute_unified_diff_preview(
     out.join("\n")
 }
 
+#[derive(Debug, Clone)]
+enum ResolvedWorkspacePath {
+    Legacy(PathBuf),
+    Muse(ResolvedMusePath),
+    NeedsPersonaApproval {
+        resolved: ResolvedMusePath,
+        rule_id: &'static str,
+        citation: String,
+    },
+}
+
 /// Per-bot isolated workspace & macOS Seatbelt (`sandbox-exec`) execution environment.
 #[derive(Debug, Clone)]
 pub struct BotWorkspaceSandbox {
@@ -106,6 +118,7 @@ pub struct BotWorkspaceSandbox {
     workspace_cap: Arc<Dir>,
     inbox_cap: Arc<Dir>,
     outbox_cap: Arc<Dir>,
+    muse_paths: Option<MuseRuntimePaths>,
     gateway: SecurityGateway,
     scrubber: SecretScrubber,
     allow_network: bool,
@@ -151,6 +164,7 @@ impl BotWorkspaceSandbox {
             workspace_cap,
             inbox_cap,
             outbox_cap,
+            muse_paths: None,
             bot_id,
             bot_root: canonical_root,
             workspace_dir,
@@ -161,6 +175,18 @@ impl BotWorkspaceSandbox {
             allow_network: true,
             vm_config: gm_core::config::WorkspaceVmConfig::default(),
         })
+    }
+
+    pub fn with_shared_runtime_paths(mut self, mut paths: MuseRuntimePaths) -> Self {
+        if paths.bot_root.is_none() {
+            paths = paths.with_bot(&self.bot_root, &self.bot_id);
+        }
+        self.muse_paths = Some(paths);
+        self
+    }
+
+    pub fn shared_runtime_paths(&self) -> Option<&MuseRuntimePaths> {
+        self.muse_paths.as_ref()
     }
 
     pub fn with_scrubber(mut self, scrubber: SecretScrubber) -> Self {
@@ -327,14 +353,81 @@ impl BotWorkspaceSandbox {
         &self.outbox_dir
     }
 
-    /// Generate the macOS Seatbelt SBPL profile confining all file writes strictly to this bot's
-    /// Resolve a relative path inside the bot root (`workspace/` by default unless prefixed with `inbox/` or `outbox/`).
+    /// Resolve a relative path inside the Muse runtime mounts (if attached and matched)
+    /// or inside the bot root (`workspace/` by default unless prefixed with `inbox/` or `outbox/`).
     fn resolve_confined_path(
         &self,
         rel_or_abs: &str,
         is_write: bool,
+        persona_write_approved: bool,
         audit: Option<&Arc<AuditLogger>>,
-    ) -> Result<PathBuf> {
+    ) -> Result<ResolvedWorkspacePath> {
+        if let Some(ref muse) = self.muse_paths
+            && muse.matches_explicit_mount(rel_or_abs)
+        {
+            let resolved = match muse.resolve_virtual_path(rel_or_abs) {
+                Ok(r) => r,
+                Err(err) => {
+                    if let Some(logger) = audit {
+                        logger.log_governance(
+                            if is_write {
+                                "workspace_write_refused"
+                            } else {
+                                "workspace_read_refused"
+                            },
+                            Some(&self.bot_id),
+                            AuditCategory::Refused,
+                            "RULE-PATH-002",
+                            &err.to_string(),
+                            format!("Refused virtual path '{rel_or_abs}'"),
+                            serde_json::json!({ "path": rel_or_abs }),
+                        );
+                    }
+                    return Err(err);
+                }
+            };
+
+            let decision =
+                self.gateway
+                    .evaluate_scoped_path(&resolved, is_write, persona_write_approved);
+
+            return match decision.outcome {
+                PolicyOutcome::Refused => {
+                    if let Some(logger) = audit {
+                        logger.log_governance(
+                            if is_write {
+                                "workspace_write_refused"
+                            } else {
+                                "workspace_read_refused"
+                            },
+                            Some(&self.bot_id),
+                            AuditCategory::Refused,
+                            decision.rule_id,
+                            &decision.citation,
+                            format!(
+                                "Refused scoped mount '{}' path '{}'",
+                                resolved.mount_label, rel_or_abs
+                            ),
+                            serde_json::json!({
+                                "path": rel_or_abs,
+                                "mount": resolved.mount_label,
+                            }),
+                        );
+                    }
+                    Err(GmError::SafetyViolation(format!(
+                        "[{}] {}",
+                        decision.rule_id, decision.citation
+                    )))
+                }
+                PolicyOutcome::NeedsApproval => Ok(ResolvedWorkspacePath::NeedsPersonaApproval {
+                    resolved,
+                    rule_id: decision.rule_id,
+                    citation: decision.citation,
+                }),
+                PolicyOutcome::Permitted => Ok(ResolvedWorkspacePath::Muse(resolved)),
+            };
+        }
+
         let candidate = Path::new(rel_or_abs);
         let mapped = if candidate.is_absolute() {
             candidate.to_path_buf()
@@ -396,17 +489,50 @@ impl BotWorkspaceSandbox {
             return Err(GmError::SafetyViolation(msg));
         }
 
-        Ok(mapped)
+        Ok(ResolvedWorkspacePath::Legacy(mapped))
     }
 
-    fn file_handle(&self, target: &Path) -> Result<(&Dir, PathBuf)> {
-        for (root, handle) in [
-            (&self.workspace_dir, &self.workspace_cap),
-            (&self.inbox_dir, &self.inbox_cap),
-            (&self.outbox_dir, &self.outbox_cap),
-        ] {
-            if let Ok(relative) = target.strip_prefix(root) {
-                if relative.components().any(|c| {
+    fn file_handle(
+        &self,
+        target: &ResolvedWorkspacePath,
+        is_write: bool,
+    ) -> Result<(Arc<Dir>, PathBuf)> {
+        match target {
+            ResolvedWorkspacePath::Legacy(path) => {
+                for (root, handle) in [
+                    (&self.workspace_dir, &self.workspace_cap),
+                    (&self.inbox_dir, &self.inbox_cap),
+                    (&self.outbox_dir, &self.outbox_cap),
+                ] {
+                    if let Ok(relative) = path.strip_prefix(root) {
+                        if relative.components().any(|c| {
+                            matches!(
+                                c,
+                                std::path::Component::ParentDir
+                                    | std::path::Component::RootDir
+                                    | std::path::Component::Prefix(_)
+                            )
+                        }) {
+                            return Err(GmError::SafetyViolation(
+                                "Parent traversal is not allowed in workspace paths".into(),
+                            ));
+                        }
+                        return Ok((
+                            handle.clone(),
+                            if relative.as_os_str().is_empty() {
+                                PathBuf::from(".")
+                            } else {
+                                relative.to_path_buf()
+                            },
+                        ));
+                    }
+                }
+                Err(GmError::SafetyViolation(
+                    "Path is outside workspace, inbox and outbox grants".into(),
+                ))
+            }
+            ResolvedWorkspacePath::Muse(resolved) => {
+                if resolved.relative.components().any(|c| {
                     matches!(
                         c,
                         std::path::Component::ParentDir
@@ -415,22 +541,29 @@ impl BotWorkspaceSandbox {
                     )
                 }) {
                     return Err(GmError::SafetyViolation(
-                        "Parent traversal is not allowed in workspace paths".into(),
+                        "Parent traversal is not allowed in scoped mount paths".into(),
                     ));
                 }
-                return Ok((
-                    handle.as_ref(),
-                    if relative.as_os_str().is_empty() {
-                        PathBuf::from(".")
-                    } else {
-                        relative.to_path_buf()
-                    },
-                ));
+                if is_write {
+                    gm_core::storage::ensure_private_dir(&resolved.mount_root)?;
+                }
+                let dir = Arc::new(Dir::open_ambient_dir(
+                    &resolved.mount_root,
+                    cap_std::ambient_authority(),
+                )?);
+                let relative = if resolved.relative.as_os_str().is_empty() {
+                    PathBuf::from(".")
+                } else {
+                    resolved.relative.clone()
+                };
+                Ok((dir, relative))
             }
+            ResolvedWorkspacePath::NeedsPersonaApproval {
+                rule_id, citation, ..
+            } => Err(GmError::SafetyViolation(format!(
+                "[{rule_id}] {citation} (needs confirmation)"
+            ))),
         }
-        Err(GmError::SafetyViolation(
-            "Path is outside workspace, inbox and outbox grants".into(),
-        ))
     }
 
     pub async fn execute_tool(
@@ -449,8 +582,8 @@ impl BotWorkspaceSandbox {
         }
         match call {
             WorkspaceToolCall::ReadFile { path } => {
-                let target = self.resolve_confined_path(path, false, audit)?;
-                let (handle, relative) = self.file_handle(&target)?;
+                let target = self.resolve_confined_path(path, false, false, audit)?;
+                let (handle, relative) = self.file_handle(&target, false)?;
                 if handle.metadata(&relative)?.len() > 1024 * 1024 {
                     return Err(GmError::Config("File exceeds the 1 MiB tool limit".into()));
                 }
@@ -485,25 +618,116 @@ impl BotWorkspaceSandbox {
             }
 
             WorkspaceToolCall::WriteFile { path, content } => {
-                let target = self.resolve_confined_path(path, true, audit)?;
                 if content.len() > 1024 * 1024 {
                     return Err(GmError::Config("File exceeds the 1 MiB tool limit".into()));
                 }
-                let (handle, relative) = self.file_handle(&target)?;
-                if let Some(parent) = relative.parent() {
+                let mut target = self.resolve_confined_path(path, true, false, audit)?;
+                if let ResolvedWorkspacePath::NeedsPersonaApproval {
+                    resolved,
+                    rule_id,
+                    citation,
+                } = target
+                {
+                    let req = ApprovalRequest {
+                        task_id: task_id.to_string(),
+                        step,
+                        action: ComputerAction::Type {
+                            text: format!("Write {} ({} bytes)", path, content.len()),
+                        },
+                        target_label: Some(format!(
+                            "PersonaFile (bot={}, mount={})",
+                            self.bot_id, resolved.mount_label
+                        )),
+                        reason: format!("[{rule_id}] {citation}"),
+                    };
+                    let approved = interaction_handler.request_approval(&req).await?;
+                    if !approved {
+                        if let Some(logger) = audit {
+                            logger.log_governance(
+                                "workspace_write_refused",
+                                Some(&self.bot_id),
+                                AuditCategory::Refused,
+                                rule_id,
+                                &citation,
+                                format!("Persona write needs confirmation for '{path}'"),
+                                serde_json::json!({
+                                    "task_id": task_id,
+                                    "step": step,
+                                    "path": path,
+                                    "mount": resolved.mount_label,
+                                }),
+                            );
+                        }
+                        return Err(GmError::SafetyViolation(format!(
+                            "[{rule_id}] {citation} (needs confirmation)"
+                        )));
+                    }
+                    target = self.resolve_confined_path(path, true, true, audit)?;
+                }
+
+                let is_persona = matches!(
+                    &target,
+                    ResolvedWorkspacePath::Muse(r) if r.access == MountAccess::PersonaApproval
+                );
+                let (handle, relative) = self.file_handle(&target, true)?;
+                if let Some(parent) = relative.parent()
+                    && !parent.as_os_str().is_empty()
+                {
                     handle.create_dir_all(parent)?;
                 }
                 let previous = handle.read_to_string(&relative).ok();
                 let diff = compute_unified_diff_preview(path, previous.as_deref(), content, 200);
-                handle.write(&relative, content)?;
+                if let ResolvedWorkspacePath::Muse(ref resolved) = target {
+                    if std::fs::symlink_metadata(&resolved.mount_root)
+                        .is_ok_and(|meta| meta.file_type().is_symlink())
+                    {
+                        return Err(GmError::SafetyViolation(format!(
+                            "RULE-PATH-002: Refused symlink mount root '{}'",
+                            resolved.mount_root.display()
+                        )));
+                    }
+                    let next = content.clone();
+                    let outcome = gm_muse::shared_files::SharedFileStore::global()
+                        .update(&resolved.absolute, None, move |_| Ok(next))
+                        .await?;
+                    if !matches!(
+                        outcome,
+                        gm_muse::shared_files::SharedUpdateOutcome::Updated { .. }
+                    ) {
+                        return Err(GmError::Config(format!(
+                            "Unexpected conflict writing shared Muse file '{path}'"
+                        )));
+                    }
+                } else {
+                    use std::io::Write;
+                    let mut options = cap_std::fs::OpenOptions::new();
+                    options.write(true).create(true).truncate(true);
+                    #[cfg(unix)]
+                    {
+                        use cap_std::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
+                    let mut file = handle.open_with(&relative, &options)?;
+                    file.write_all(content.as_bytes())?;
+                    file.sync_all()?;
+                }
                 let scrubbed_diff = self.scrubber.scrub_str(&diff);
                 if let Some(logger) = audit {
+                    let rule_id = if is_persona {
+                        "RULE-PERSONA-007"
+                    } else {
+                        "RULE-STD-000"
+                    };
                     logger.log_governance(
                         "workspace_write",
                         Some(&self.bot_id),
                         AuditCategory::Permitted,
-                        "RULE-STD-000",
-                        "Confined workspace file write permitted",
+                        rule_id,
+                        if is_persona {
+                            "Operator-confirmed persona file write permitted"
+                        } else {
+                            "Confined workspace file write permitted"
+                        },
                         format!("WriteFile({path})"),
                         serde_json::json!({
                             "task_id": task_id,
@@ -523,9 +747,9 @@ impl BotWorkspaceSandbox {
 
             WorkspaceToolCall::ListFiles { path } => {
                 let rel = path.as_deref().unwrap_or(".");
-                let target = self.resolve_confined_path(rel, false, audit)?;
+                let target = self.resolve_confined_path(rel, false, false, audit)?;
                 let mut names = Vec::new();
-                let (handle, relative) = self.file_handle(&target)?;
+                let (handle, relative) = self.file_handle(&target, false)?;
                 if handle.metadata(&relative)?.is_dir() {
                     for entry in handle.read_dir(&relative)?.take(1000) {
                         let entry = entry?;
@@ -763,5 +987,125 @@ mod tests {
         );
         drop(sandbox);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn muse_runtime_paths_enforce_readonly_shared_write_and_persona_approval() {
+        use crate::approval::CallbackInteractionHandler;
+
+        let base = std::env::temp_dir().join(format!("bot_muse_ws_{}", uuid::Uuid::new_v4()));
+        let storage = base.join("storage");
+        let bot_root = storage.join("bots/muse");
+        gm_core::storage::ensure_private_dir(&storage).unwrap();
+
+        let shared = MuseRuntimePaths::shared(&storage);
+        let sandbox = BotWorkspaceSandbox::new("muse", &bot_root)
+            .unwrap()
+            .with_shared_runtime_paths(shared.clone());
+
+        let non_interactive: Arc<dyn InteractionHandler> = Arc::new(NonInteractiveHandler);
+        let ks = KillSwitch::new();
+        let audit = Arc::new(AuditLogger::in_memory());
+
+        // 1. Writing to ReadOnly ~/skills/x is refused with RULE-PATH-002
+        let readonly_err = sandbox
+            .execute_tool(
+                "t-muse",
+                1,
+                &WorkspaceToolCall::WriteFile {
+                    path: "~/skills/x/SKILL.md".into(),
+                    content: "tampered".into(),
+                },
+                &non_interactive,
+                &ks,
+                Some(&audit),
+            )
+            .await
+            .unwrap_err();
+        assert!(readonly_err.to_string().contains("RULE-PATH-002"));
+
+        // 2. Writing to ~/MEMORY.md succeeds and targets shared storage
+        let mem_write = sandbox
+            .execute_tool(
+                "t-muse",
+                2,
+                &WorkspaceToolCall::WriteFile {
+                    path: "~/MEMORY.md".into(),
+                    content: "# MEMORY.md\nUser prefers Rust.\n".into(),
+                },
+                &non_interactive,
+                &ks,
+                Some(&audit),
+            )
+            .await
+            .unwrap();
+        assert!(mem_write.summary.contains("bytes written"));
+        assert!(shared.memory_md().exists());
+        assert!(shared.storage_dir().join(".muse.lock").exists());
+
+        // 3. Reading ~/MEMORY.md returns content
+        let mem_read = sandbox
+            .execute_tool(
+                "t-muse",
+                3,
+                &WorkspaceToolCall::ReadFile {
+                    path: "~/MEMORY.md".into(),
+                },
+                &non_interactive,
+                &ks,
+                Some(&audit),
+            )
+            .await
+            .unwrap();
+        assert!(mem_read.output.contains("User prefers Rust."));
+
+        // 4. Writing to SOUL.md without interactive approval returns needs confirmation
+        let soul_denied = sandbox
+            .execute_tool(
+                "t-muse",
+                4,
+                &WorkspaceToolCall::WriteFile {
+                    path: "SOUL.md".into(),
+                    content: "Edited soul".into(),
+                },
+                &non_interactive,
+                &ks,
+                Some(&audit),
+            )
+            .await
+            .unwrap_err();
+        let err_msg = soul_denied.to_string();
+        assert!(err_msg.contains("RULE-PERSONA-007"));
+        assert!(err_msg.contains("needs confirmation"));
+
+        // 5. Writing to SOUL.md with explicit approval prompts once and succeeds
+        let cb = Arc::new(CallbackInteractionHandler::with_approval_always(true));
+        let approved_handler: Arc<dyn InteractionHandler> = cb.clone();
+        let soul_ok = sandbox
+            .execute_tool(
+                "t-muse",
+                5,
+                &WorkspaceToolCall::WriteFile {
+                    path: "SOUL.md".into(),
+                    content: "Approved soul update\n".into(),
+                },
+                &approved_handler,
+                &ks,
+                Some(&audit),
+            )
+            .await
+            .unwrap();
+        assert!(soul_ok.summary.contains("bytes written"));
+        assert_eq!(cb.requested_approvals().len(), 1);
+        assert_eq!(
+            std::fs::read_to_string(bot_root.join("SOUL.md")).unwrap(),
+            "Approved soul update\n"
+        );
+
+        let refused =
+            audit.query_governance_entries(Some(AuditCategory::Refused), Some("muse"), 20);
+        assert_eq!(refused.len(), 2);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

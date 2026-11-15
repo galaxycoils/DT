@@ -20,6 +20,15 @@ pub struct ChannelInfo {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MessageReactionRecord {
+    pub id: String,
+    pub message_id: String,
+    pub emoji: String,
+    pub actor: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelMessageRecord {
     pub id: String,
@@ -29,6 +38,8 @@ pub struct ChannelMessageRecord {
     pub content: String,
     pub mentioned_bots: Vec<String>,
     pub timestamp: String,
+    #[serde(default)]
+    pub reactions: Vec<MessageReactionRecord>,
 }
 
 /// Extract `@bot_id` mentions from a channel message against known bot IDs.
@@ -95,6 +106,16 @@ impl ChannelStore {
             );
             CREATE INDEX IF NOT EXISTS idx_channel_msgs_chan
                 ON channel_messages(channel_id, timestamp ASC);
+            CREATE TABLE IF NOT EXISTS message_reactions_v1 (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                emoji TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(message_id, emoji, actor)
+            );
+            CREATE INDEX IF NOT EXISTS idx_msg_reactions_msg
+                ON message_reactions_v1(message_id);
             "#,
         )
         .map_err(|e| GmError::Platform(format!("Channel schema init failed: {e}")))?;
@@ -306,6 +327,7 @@ impl ChannelStore {
             content: content.to_string(),
             mentioned_bots: mentioned,
             timestamp: now,
+            reactions: Vec::new(),
         })
     }
 
@@ -316,36 +338,123 @@ impl ChannelStore {
     ) -> Result<Vec<ChannelMessageRecord>> {
         let clean_chan = normalize_channel_id(channel_id);
         let conn = self.conn.lock();
+        let mut out = Vec::new();
+        {
+            let mut stmt = conn
+                .prepare(
+                    r#"SELECT id, channel_id, author, bot_id, content, mentioned_bots_json, timestamp
+                       FROM channel_messages
+                       WHERE channel_id = ?1
+                       ORDER BY timestamp DESC, rowid DESC
+                       LIMIT ?2"#,
+                )
+                .map_err(|e| GmError::Platform(e.to_string()))?;
+            let rows = stmt
+                .query_map(params![clean_chan, limit as i64], |row| {
+                    let m_json: String = row.get(5)?;
+                    let mentioned: Vec<String> = serde_json::from_str(&m_json).unwrap_or_default();
+                    Ok(ChannelMessageRecord {
+                        id: row.get(0)?,
+                        channel_id: row.get(1)?,
+                        author: row.get(2)?,
+                        bot_id: row.get(3)?,
+                        content: row.get(4)?,
+                        mentioned_bots: mentioned,
+                        timestamp: row.get(6)?,
+                        reactions: Vec::new(),
+                    })
+                })
+                .map_err(|e| GmError::Platform(e.to_string()))?;
+            for r in rows {
+                out.push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+            }
+        }
+        out.reverse();
+        for msg in &mut out {
+            msg.reactions = Self::list_reactions_with_conn(&conn, &msg.id)?;
+        }
+        Ok(out)
+    }
+
+    fn list_reactions_with_conn(
+        conn: &Connection,
+        message_id: &str,
+    ) -> Result<Vec<MessageReactionRecord>> {
         let mut stmt = conn
             .prepare(
-                r#"SELECT id, channel_id, author, bot_id, content, mentioned_bots_json, timestamp
-                   FROM channel_messages
-                   WHERE channel_id = ?1
-                   ORDER BY timestamp DESC, rowid DESC
-                   LIMIT ?2"#,
+                r#"SELECT id, message_id, emoji, actor, created_at
+                   FROM message_reactions_v1
+                   WHERE message_id = ?1
+                   ORDER BY created_at ASC, id ASC"#,
             )
             .map_err(|e| GmError::Platform(e.to_string()))?;
         let rows = stmt
-            .query_map(params![clean_chan, limit as i64], |row| {
-                let m_json: String = row.get(5)?;
-                let mentioned: Vec<String> = serde_json::from_str(&m_json).unwrap_or_default();
-                Ok(ChannelMessageRecord {
+            .query_map(params![message_id], |row| {
+                Ok(MessageReactionRecord {
                     id: row.get(0)?,
-                    channel_id: row.get(1)?,
-                    author: row.get(2)?,
-                    bot_id: row.get(3)?,
-                    content: row.get(4)?,
-                    mentioned_bots: mentioned,
-                    timestamp: row.get(6)?,
+                    message_id: row.get(1)?,
+                    emoji: row.get(2)?,
+                    actor: row.get(3)?,
+                    created_at: row.get(4)?,
                 })
             })
             .map_err(|e| GmError::Platform(e.to_string()))?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+        rows.map(|r| r.map_err(|e| GmError::Platform(e.to_string())))
+            .collect()
+    }
+
+    pub fn list_reactions(&self, message_id: &str) -> Result<Vec<MessageReactionRecord>> {
+        let conn = self.conn.lock();
+        Self::list_reactions_with_conn(&conn, message_id.trim())
+    }
+
+    pub fn add_reaction(
+        &self,
+        message_id: &str,
+        emoji: &str,
+        actor: &str,
+    ) -> Result<Vec<MessageReactionRecord>> {
+        let clean_msg = message_id.trim();
+        let clean_emoji = emoji.trim();
+        let clean_actor = if actor.trim().is_empty() {
+            "operator"
+        } else {
+            actor.trim()
+        };
+        if clean_msg.is_empty() {
+            return Err(GmError::Config("Message ID cannot be empty".into()));
         }
-        out.reverse();
-        Ok(out)
+        if clean_emoji.is_empty() || clean_emoji.chars().count() > 32 || clean_emoji.contains('\n')
+        {
+            return Err(GmError::Config(
+                "Reaction emoji must be 1-32 characters".into(),
+            ));
+        }
+
+        let conn = self.conn.lock();
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM channel_messages WHERE id = ?1",
+                params![clean_msg],
+                |r| r.get(0),
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        if exists == 0 {
+            return Err(GmError::Config(format!(
+                "Unknown channel message '{clean_msg}'"
+            )));
+        }
+
+        let id = format!("rxn-{}", uuid::Uuid::new_v4());
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            r#"INSERT OR IGNORE INTO message_reactions_v1 (id, message_id, emoji, actor, created_at)
+               VALUES (?1, ?2, ?3, ?4, ?5)"#,
+            params![id, clean_msg, clean_emoji, clean_actor, now],
+        )
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+
+        Self::list_reactions_with_conn(&conn, clean_msg)
     }
 
     pub fn set_channel_paused(&self, channel_id: &str, paused: bool) -> Result<bool> {
@@ -447,5 +556,26 @@ mod tests {
             updated.instructions,
             "Updated instructions: ensure clippy is clean."
         );
+    }
+
+    #[test]
+    fn test_message_reactions_persistence_and_dedup() {
+        let store = ChannelStore::in_memory().unwrap();
+        let msg = store
+            .post_message("general", "operator", None, "Hello team", &[])
+            .unwrap();
+        let rxns = store.add_reaction(&msg.id, "👍", "operator").unwrap();
+        assert_eq!(rxns.len(), 1);
+        assert_eq!(rxns[0].emoji, "👍");
+        // Duplicate same actor+emoji is idempotent
+        let rxns_again = store.add_reaction(&msg.id, "👍", "operator").unwrap();
+        assert_eq!(rxns_again.len(), 1);
+        // Different emoji/actor appends cleanly and appears in list_messages
+        let rxns_two = store.add_reaction(&msg.id, "🎉", "muse").unwrap();
+        assert_eq!(rxns_two.len(), 2);
+
+        let msgs = store.list_messages("general", 10).unwrap();
+        assert_eq!(msgs[0].reactions.len(), 2);
+        assert!(store.add_reaction("missing-msg", "👍", "operator").is_err());
     }
 }

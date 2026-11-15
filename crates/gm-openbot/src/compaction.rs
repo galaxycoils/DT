@@ -53,11 +53,22 @@ impl ContextCompactor {
         ((self.max_context_tokens as f32) * self.trigger_ratio) as usize
     }
 
-    /// Compact `messages` in-place if estimated tokens exceed `max_context_tokens * trigger_ratio`.
+    pub fn threshold_tokens_excluding_system(&self, system_tokens: usize) -> usize {
+        ((self.max_context_tokens.saturating_sub(system_tokens) as f32) * self.trigger_ratio)
+            as usize
+    }
+
+    /// Compact `messages` in-place if non-system tokens exceed
+    /// `(max_context_tokens - system_tokens) * trigger_ratio`.
     /// Preserves leading `system` messages and the last `keep_recent_turns` messages verbatim.
     pub fn compact_if_needed(&self, messages: &mut Vec<ChatMessage>) -> CompactionReport {
+        let leading_system_count = messages.iter().take_while(|m| m.role == "system").count();
+        let system_tokens = Self::estimate_tokens(&messages[..leading_system_count]);
         let before = Self::estimate_tokens(messages);
-        if before <= self.threshold_tokens() || messages.len() <= self.keep_recent_turns + 1 {
+        let conversation_tokens = before.saturating_sub(system_tokens);
+        if conversation_tokens <= self.threshold_tokens_excluding_system(system_tokens)
+            || messages.len().saturating_sub(leading_system_count) <= self.keep_recent_turns
+        {
             return CompactionReport {
                 compacted: false,
                 estimated_tokens_before: before,
@@ -121,5 +132,49 @@ impl ContextCompactor {
             estimated_tokens_after: after,
             summarized_messages_count: split_idx,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn large_system_prompt_with_short_turns_does_not_compact() {
+        let compactor = ContextCompactor::new(24_000, 0.80, 1);
+        let mut msgs = vec![
+            ChatMessage::text("system", "X".repeat(80_000)), // ~20,000 tokens
+            ChatMessage::text("system", "[Sat 2026-11-14] [model=muse-spark]"),
+            ChatMessage::text("user", "Hey, what is on my calendar today?"),
+            ChatMessage::text("assistant", "Checking your calendar now."),
+        ];
+
+        let report = compactor.compact_if_needed(&mut msgs);
+        assert!(!report.compacted);
+        assert_eq!(report.summarized_messages_count, 0);
+        assert_eq!(msgs.len(), 4);
+    }
+
+    #[test]
+    fn large_system_prompt_compacts_when_conversation_grows() {
+        let compactor = ContextCompactor::new(24_000, 0.80, 1);
+        // Remaining budget after ~20,004 system tokens is ~3,996 * 0.80 = ~3,196 tokens.
+        // Push ~3,600 tokens of conversation across 5 non-system messages.
+        let mut msgs = vec![
+            ChatMessage::text("system", "X".repeat(80_000)),
+            ChatMessage::text("system", "[Sat 2026-11-14] [model=muse-spark]"),
+            ChatMessage::text("user", "A".repeat(4_800)),
+            ChatMessage::text("assistant", "B".repeat(4_800)),
+            ChatMessage::text("user", "C".repeat(4_800)),
+            ChatMessage::text("assistant", "Recent reply"),
+        ];
+
+        let report = compactor.compact_if_needed(&mut msgs);
+        assert!(report.compacted);
+        assert_eq!(report.summarized_messages_count, 3);
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[1].role, "system");
+        assert!(msgs[2].content.contains("[Compacted Session Summary"));
+        assert_eq!(msgs.last().unwrap().content, "Recent reply");
     }
 }

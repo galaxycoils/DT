@@ -1,3 +1,4 @@
+mod muse_render;
 mod native;
 use clap::{Parser, Subcommand};
 use gm_core::config::GmConfig;
@@ -294,7 +295,7 @@ fn handle_daemon_event(ev: DaemonEvent) {
                 gm_ui_append_chat_message(role.as_ptr(), msg.as_ptr());
             }
         }
-        DaemonEvent::ApprovalResolved { .. } => {}
+        DaemonEvent::ApprovalResolved { .. } | DaemonEvent::ActivityUpdated { .. } => {}
         DaemonEvent::ChannelMessage {
             channel_id,
             author,
