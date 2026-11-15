@@ -407,6 +407,16 @@ impl MuseRuntimePaths {
                 &["workspace", "memory"][..],
                 "workspace/memory",
             ),
+            (
+                "workspace/custom-skills",
+                &["workspace", "custom-skills"][..],
+                "custom-skills",
+            ),
+            (
+                "workspace/custom-connectors",
+                &["workspace", "custom-connectors"][..],
+                "custom-connectors",
+            ),
         ] {
             let dir = self.storage.join(subdir);
             specs.push(MountSpec {

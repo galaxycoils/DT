@@ -34,6 +34,16 @@ Portions copyright (c) 2025-2026 Darius Maintainers.
 
 ---
 
+### Bundled Upstream Reference Texts (`crates/gm-muse/assets/upstream/`)
+
+Grok-Muse bundles the published `Meta/muse-agent` system prompt, workspace templates, documentation files, and core workflow skills verbatim (with the sole removal of the repository uploader's personal name from `USER.md`) under `crates/gm-muse/assets/upstream/` for local prompt fidelity and runtime bootstrapping.
+
+- Source mirror: `https://github.com/asgeirtj/system_prompts_leaks/tree/main/Meta/muse-agent`
+- Upstream commit SHA: `bb4c9c5a8bcbe281e2fbe3fd1fa961e514c0a93f` (fetched 2026-11-14)
+- Integrity manifest: see `crates/gm-muse/assets/UPSTREAM.md` for per-file SHA-256 checksums.
+
+---
+
 ### License Texts
 
 #### MIT License
