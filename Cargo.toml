@@ -5,6 +5,7 @@ members = [
     "crates/gm-platform",
     "crates/gm-cu-helper",
     "crates/gm-llm",
+    "crates/gm-muse",
     "crates/gm-safety",
     "crates/gm-memory",
     "crates/gm-goals",
