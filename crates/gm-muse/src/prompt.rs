@@ -884,7 +884,8 @@ mod tests {
         }
         let expected = std::fs::read_to_string(&snapshot_path).unwrap();
         assert_eq!(
-            combined, expected,
+            combined.replace("\r\n", "\n"),
+            expected.replace("\r\n", "\n"),
             "MainChat snapshot drifted; inspect diff or regenerate intentionally"
         );
     }
