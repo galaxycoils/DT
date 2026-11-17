@@ -288,11 +288,18 @@ pub fn extract_markdown_tables(text: &str) -> Vec<ParsedMarkdownTable> {
     let mut tables = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
-    let mut in_fence=false;
+    let mut in_fence = false;
     while i + 1 < lines.len() {
         let header_line = lines[i].trim();
-        if header_line.starts_with("```") {in_fence=!in_fence;i+=1;continue;}
-        if in_fence {i+=1;continue;}
+        if header_line.starts_with("```") {
+            in_fence = !in_fence;
+            i += 1;
+            continue;
+        }
+        if in_fence {
+            i += 1;
+            continue;
+        }
         let sep_line = lines[i + 1].trim();
         if header_line.starts_with('|')
             && header_line.ends_with('|')
