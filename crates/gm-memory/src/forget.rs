@@ -66,6 +66,11 @@ pub enum FileCleanupTarget {
         relative_path: String,
         file_sha256: String,
     },
+    RedactGoalCatalog {
+        relative_path: String,
+        file_sha256: String,
+        goal_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +285,7 @@ fn is_standalone_deletable_file(rel: &str) -> bool {
         || rel == "MEMORY.md"
         || rel == "PROACTIVE_PREFERENCES.md"
         || rel == "FEEDBACK.md"
+        || rel == "goals/goals.json"
         || rel == "memory/bank/experience.md"
         || rel == "memory/bank/opinions.md"
         || rel == "memory/bank/world.md"
@@ -287,6 +293,7 @@ fn is_standalone_deletable_file(rel: &str) -> bool {
         || rel == "memory/travel/PROFILE.md"
         || rel.ends_with("/INDEX.md")
         || rel == "INDEX.md"
+        || rel.ends_with(".json")
     {
         return false;
     }
@@ -294,7 +301,19 @@ fn is_standalone_deletable_file(rel: &str) -> bool {
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("");
-    matches!(ext, "md" | "txt" | "yaml" | "yml" | "json")
+    matches!(ext, "md" | "txt" | "yaml" | "yml")
+}
+
+fn is_supported_corpus_file(rel: &str, abs: &Path) -> bool {
+    if rel == "goals/goals.json" {
+        return true;
+    }
+    let ext = abs
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(ext.as_str(), "md" | "txt" | "yaml" | "yml" | "json")
 }
 
 fn inspect_file_for_matches(
@@ -303,9 +322,64 @@ fn inspect_file_for_matches(
     needle_lower: &str,
     allow_standalone: bool,
 ) -> Result<Vec<FileCleanupTarget>> {
-    let Some((content, file_sha)) = SharedFileStore::global().read_text_with_sha256(abs)? else {
+    if allow_standalone && !is_supported_corpus_file(rel, abs) {
         return Ok(Vec::new());
+    }
+    let is_json = rel.ends_with(".json");
+    let (content, file_sha) = match SharedFileStore::global().read_text_with_sha256(abs) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return Ok(Vec::new()),
+        Err(err) => {
+            // Corrupt or non-UTF8 JSON files must fail explicitly; unrelated binary artifacts are skipped.
+            if is_json {
+                return Err(err);
+            }
+            return Ok(Vec::new());
+        }
     };
+
+    if rel == "goals/goals.json" {
+        if content.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let goals = gm_core::goal::Goal::list_from_json_normalized(&content)
+            .map_err(|e| GmError::Config(format!("Corrupt goals catalog '{rel}': {e}")))?;
+        let mut matched_goal_ids = Vec::new();
+        for goal in &goals {
+            if goal.matches_structural_field(needle_lower) {
+                return Err(GmError::Config(format!(
+                    "Refusing unsupported structured edit to required/link field in '{rel}' (goal '{}')",
+                    goal.id
+                )));
+            }
+            if goal.matches_supported_text_field(needle_lower) {
+                matched_goal_ids.push(goal.id.clone());
+            }
+        }
+        if matched_goal_ids.is_empty() {
+            if contains_ignore_ascii_case(&content, needle_lower) {
+                return Err(GmError::Config(format!(
+                    "Refusing unsupported structured edit in '{rel}'"
+                )));
+            }
+            return Ok(Vec::new());
+        }
+        return Ok(vec![FileCleanupTarget::RedactGoalCatalog {
+            relative_path: rel.to_string(),
+            file_sha256: file_sha,
+            goal_ids: matched_goal_ids,
+        }]);
+    }
+
+    if is_json {
+        if contains_ignore_ascii_case(&content, needle_lower) {
+            return Err(GmError::Config(format!(
+                "Refusing unsupported line-based edit on structured JSON file '{rel}'"
+            )));
+        }
+        return Ok(Vec::new());
+    }
+
     let lines: Vec<&str> = content.lines().collect();
     let mut matched_lines = Vec::new();
     let mut non_header_unmatched = 0usize;
@@ -679,6 +753,15 @@ impl ForgetPlanner {
                             matched_locators.push(relative_path.clone());
                             citations.push(relative_path.clone());
                         }
+                        FileCleanupTarget::RedactGoalCatalog {
+                            relative_path,
+                            goal_ids,
+                            ..
+                        } => {
+                            let loc = format!("{relative_path}#{}", goal_ids.join(","));
+                            matched_locators.push(loc.clone());
+                            citations.push(loc);
+                        }
                     }
                     targets.push(ctor(item));
                     *summary_counts.entry(cat_key.to_string()).or_insert(0) += 1;
@@ -824,6 +907,7 @@ fn validate_targeted_file<'a>(
                 relative_path,
                 file_sha256,
             } => Some((storage.join(relative_path), 0, file_sha256.as_str(), true)),
+            FileCleanupTarget::RedactGoalCatalog { .. } => None,
         },
         _ => None,
     }
@@ -948,6 +1032,7 @@ impl ForgetExecutor {
                         FileCleanupTarget::DeleteStandaloneFile { relative_path, .. } => {
                             relative_path
                         }
+                        FileCleanupTarget::RedactGoalCatalog { relative_path, .. } => relative_path,
                     };
                     if is_unsafe_relative_path(rel)
                         || rel.starts_with("self_improvement/migrations")
@@ -963,9 +1048,27 @@ impl ForgetExecutor {
             }
         }
 
-        // Step 2: Re-check every line hash and standalone file hash
+        // Step 2: Re-check every line hash, standalone file hash, and structured JSON catalog hash
         let mut stale_files = Vec::new();
         for target in &plan.targets {
+            if let ForgetTarget::GoalsCorpus(FileCleanupTarget::RedactGoalCatalog {
+                relative_path,
+                file_sha256,
+                ..
+            }) = target
+            {
+                let abs = storage.join(relative_path);
+                let Ok(Some((_, actual_sha))) =
+                    SharedFileStore::global().read_text_with_sha256(&abs)
+                else {
+                    stale_files.push(relative_path.clone());
+                    continue;
+                };
+                if actual_sha != *file_sha256 {
+                    stale_files.push(relative_path.clone());
+                }
+                continue;
+            }
             if let Some((abs, line_no, expected_sha, is_standalone)) =
                 validate_targeted_file(target, &res.paths)
             {
@@ -1058,6 +1161,89 @@ impl ForgetExecutor {
                 Ok(out)
             })?;
             removed_lines += removal_count;
+        }
+
+        // Step 3b: JSON-aware redaction for goals/goals.json (never line-delete structured JSON)
+        for target in &plan.targets {
+            if let ForgetTarget::GoalsCorpus(FileCleanupTarget::RedactGoalCatalog {
+                relative_path,
+                file_sha256,
+                goal_ids,
+            }) = target
+            {
+                let needle = verification_query
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        GmError::Config(
+                            "Goal catalog redaction requires a live verification query".into(),
+                        )
+                    })?
+                    .to_string();
+                let abs = storage.join(relative_path);
+                let ids = goal_ids.clone();
+                let outcome = SharedFileStore::global().update_sync(
+                    &abs,
+                    Some(file_sha256),
+                    move |existing| {
+                        let mut goals = gm_core::goal::Goal::list_from_json_normalized(existing)
+                            .map_err(|e| {
+                                GmError::Config(format!(
+                                    "Corrupt goals catalog during confirm: {e}"
+                                ))
+                            })?;
+                        let expected_count = goals.len();
+                        for goal in &mut goals {
+                            if ids.contains(&goal.id) {
+                                let next_title =
+                                    redact_case_insensitive(&goal.title, &needle, "[forgotten]");
+                                goal.title = if next_title.trim().is_empty() {
+                                    "[forgotten]".into()
+                                } else {
+                                    next_title
+                                };
+                                goal.description = redact_case_insensitive(
+                                    &goal.description,
+                                    &needle,
+                                    "[forgotten]",
+                                );
+                                goal.stop_conditions = goal
+                                    .stop_conditions
+                                    .iter()
+                                    .map(|sc| redact_case_insensitive(sc, &needle, "[forgotten]"))
+                                    .collect();
+                                goal.category = goal
+                                    .category
+                                    .as_deref()
+                                    .map(|c| redact_case_insensitive(c, &needle, "[forgotten]"));
+                                goal.pause_notes = goal
+                                    .pause_notes
+                                    .as_deref()
+                                    .map(|p| redact_case_insensitive(p, &needle, "[forgotten]"));
+                            }
+                        }
+                        let serialized = serde_json::to_string_pretty(&goals)?;
+                        let validated = gm_core::goal::Goal::list_from_json_normalized(&serialized)
+                            .map_err(|e| {
+                                GmError::Config(format!(
+                                    "Goal catalog validation failed after redaction: {e}"
+                                ))
+                            })?;
+                        if validated.len() != expected_count {
+                            return Err(GmError::Config(
+                                "Goal count mismatch after catalog redaction".into(),
+                            ));
+                        }
+                        Ok(serialized)
+                    },
+                )?;
+                if let gm_muse::shared_files::SharedUpdateOutcome::Conflict { .. } = outcome {
+                    return Err(GmError::Config(
+                        "Goals catalog changed concurrently during Forget confirmation".into(),
+                    ));
+                }
+                removed_lines += goal_ids.len();
+            }
         }
 
         // Step 4: Delete exact standalone files only (never directories or globs)
@@ -1405,6 +1591,7 @@ impl ForgetExecutor {
                     let rel = rel_os.to_string_lossy().replace('\\', "/");
                     if rel == "memory/provenance.sqlite"
                         || rel.starts_with("memory/provenance.sqlite-")
+                        || !is_supported_corpus_file(&rel, &abs)
                         || abs
                             .extension()
                             .and_then(|e| e.to_str())
@@ -1728,5 +1915,169 @@ mod tests {
         let report = ForgetExecutor::confirm(&plan, &resources, true, Some("secret_item")).unwrap();
         assert_eq!(report.status, ForgetStatus::IncompleteFilesChanged);
         assert_eq!(report.message, "incomplete: files changed since plan");
+    }
+
+    #[test]
+    fn forgetting_a_goal_field_leaves_all_other_goals_listable() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = MuseRuntimePaths::shared(dir.path());
+        std::fs::create_dir_all(paths.goals_dir()).unwrap();
+        let secret = "zxq_canary_goal_secret_42";
+        let goals_json = serde_json::json!([
+            {
+                "id": "g-1",
+                "title": "Run a marathon",
+                "description": "Train 4 days per week",
+                "status": "Active",
+                "stop_conditions": ["Finish 26.2 miles"],
+                "created_at": "2026-11-01T00:00:00Z",
+                "next_check_at": "2026-11-02T00:00:00Z",
+                "verified_close": false,
+                "slug": "run-a-marathon",
+                "category": "Fitness",
+                "parent_goal_id": null,
+                "goal_doc_path": null,
+                "track_brief_schedule": null,
+                "pause_notes": null
+            },
+            {
+                "id": "g-2",
+                "title": "Private medical milestone",
+                "description": format!("Discuss {secret} with specialist"),
+                "status": "Active",
+                "stop_conditions": ["Initial intake", format!("Confirm {secret} cleared")],
+                "created_at": "2026-11-01T00:00:00Z",
+                "next_check_at": "2026-11-02T00:00:00Z",
+                "verified_close": false,
+                "slug": "private-medical-milestone",
+                "category": "Health",
+                "parent_goal_id": "g-1",
+                "goal_doc_path": null,
+                "track_brief_schedule": null,
+                "pause_notes": format!("Paused due to {secret}")
+            },
+            {
+                "id": "g-3",
+                "title": "Learn Rust async",
+                "description": "Build tokio service",
+                "status": "Active",
+                "stop_conditions": ["Ship v1"],
+                "created_at": "2026-11-01T00:00:00Z",
+                "next_check_at": "2026-11-02T00:00:00Z",
+                "verified_close": false,
+                "slug": "learn-rust-async",
+                "category": "Engineering",
+                "parent_goal_id": null,
+                "goal_doc_path": null,
+                "track_brief_schedule": null,
+                "pause_notes": null
+            }
+        ]);
+        let catalog_path = paths.goals_dir().join("goals.json");
+        SharedFileStore::global()
+            .write_exact_sync(
+                &catalog_path,
+                None,
+                &serde_json::to_string_pretty(&goals_json).unwrap(),
+            )
+            .unwrap();
+
+        // Add an unrelated binary PNG artifact under workspace/goals to ensure binary files are skipped cleanly
+        let bin_dir = paths.workspace_goals_dir().join("run-a-marathon/files");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bin_path = bin_dir.join("chart.png");
+        let bin_bytes: Vec<u8> = vec![0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe];
+        std::fs::write(&bin_path, &bin_bytes).unwrap();
+
+        let memory = PersonalMemoryStore::in_memory().unwrap();
+        let provenance = ProvenanceStore::in_memory().unwrap();
+        let resources = ForgetResources::new(paths.clone(), memory, provenance);
+
+        let plan = ForgetPlanner::plan(secret, &resources).unwrap();
+        let report = ForgetExecutor::confirm(&plan, &resources, true, Some(secret)).unwrap();
+        assert_eq!(report.status, ForgetStatus::Forgotten);
+
+        let after = std::fs::read_to_string(&catalog_path).unwrap();
+        let parsed = gm_core::goal::Goal::list_from_json_normalized(&after)
+            .expect("goals.json must remain valid Goal catalog after forget");
+        assert_eq!(parsed.len(), 3, "All 3 goals must remain intact");
+        assert_eq!(parsed[1].id, "g-2");
+        assert_eq!(parsed[1].slug, "private-medical-milestone");
+        assert_eq!(parsed[1].parent_goal_id.as_deref(), Some("g-1"));
+        assert!(!after.contains(secret));
+        assert_eq!(std::fs::read(&bin_path).unwrap(), bin_bytes);
+    }
+
+    #[test]
+    fn forget_refuses_corrupt_goals_json_and_unsupported_structured_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = MuseRuntimePaths::shared(dir.path());
+        std::fs::create_dir_all(paths.goals_dir()).unwrap();
+        let catalog_path = paths.goals_dir().join("goals.json");
+        let corrupt = "[{\"id\": \"g-1\", \"title\": ";
+        SharedFileStore::global()
+            .write_exact_sync(&catalog_path, None, corrupt)
+            .unwrap();
+
+        let memory = PersonalMemoryStore::in_memory().unwrap();
+        let provenance = ProvenanceStore::in_memory().unwrap();
+        let resources = ForgetResources::new(paths.clone(), memory.clone(), provenance.clone());
+
+        assert!(ForgetPlanner::plan("g-1", &resources).is_err());
+        assert_eq!(std::fs::read_to_string(&catalog_path).unwrap(), corrupt);
+
+        // Valid catalog, but targeting a structural field (`slug`) must refuse
+        let goal = gm_core::goal::Goal::new("SecretSlugTitle", "Ordinary description");
+        SharedFileStore::global()
+            .write_exact_sync(
+                &catalog_path,
+                None,
+                &serde_json::to_string_pretty(&vec![&goal]).unwrap(),
+            )
+            .unwrap();
+        assert!(ForgetPlanner::plan(&goal.slug, &resources).is_err());
+
+        // Arbitrary JSON file under memory/ matching query must refuse line-based editing
+        std::fs::create_dir_all(paths.memory_dir()).unwrap();
+        let other_json = paths.memory_dir().join("structured.json");
+        SharedFileStore::global()
+            .write_exact_sync(&other_json, None, r#"{"token":"needle_json_99"}"#)
+            .unwrap();
+        assert!(ForgetPlanner::plan("needle_json_99", &resources).is_err());
+    }
+
+    #[test]
+    fn forget_goal_catalog_detects_stale_plan_when_modified_before_confirm() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = MuseRuntimePaths::shared(dir.path());
+        std::fs::create_dir_all(paths.goals_dir()).unwrap();
+        let secret = "stale_goal_secret_77";
+        let goal = gm_core::goal::Goal::new("Stale check goal", format!("Contains {secret}"));
+        let catalog_path = paths.goals_dir().join("goals.json");
+        SharedFileStore::global()
+            .write_exact_sync(
+                &catalog_path,
+                None,
+                &serde_json::to_string_pretty(&vec![&goal]).unwrap(),
+            )
+            .unwrap();
+
+        let memory = PersonalMemoryStore::in_memory().unwrap();
+        let provenance = ProvenanceStore::in_memory().unwrap();
+        let resources = ForgetResources::new(paths.clone(), memory, provenance);
+
+        let plan = ForgetPlanner::plan(secret, &resources).unwrap();
+        let mut modified = goal.clone();
+        modified.description = format!("Updated {secret}");
+        SharedFileStore::global()
+            .write_exact_sync(
+                &catalog_path,
+                None,
+                &serde_json::to_string_pretty(&vec![&modified]).unwrap(),
+            )
+            .unwrap();
+
+        let report = ForgetExecutor::confirm(&plan, &resources, true, Some(secret)).unwrap();
+        assert_eq!(report.status, ForgetStatus::IncompleteFilesChanged);
     }
 }
