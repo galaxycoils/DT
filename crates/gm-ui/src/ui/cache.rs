@@ -214,6 +214,7 @@ pub struct MemoizedMessageLayout {
     pub width_bucket: u32,
     pub parts: Vec<RenderedPart>,
     pub tables: Vec<ParsedMarkdownTable>,
+    pub markdown: Vec<Vec<MarkdownBlock>>,
     content_hash: u64,
     has_card: bool,
 }
@@ -253,6 +254,10 @@ impl MarkdownLayoutCache {
 
         if needs_recompute {
             let parts = parse_message_bubbles(content);
+            let markdown = parts
+                .iter()
+                .map(|part| markdown_blocks(&part.text))
+                .collect();
             let tables = extract_markdown_tables(content);
             if self.entries.len() >= Self::MAX_ENTRIES
                 && let Some(oldest) = self.order.pop_front()
@@ -267,6 +272,7 @@ impl MarkdownLayoutCache {
                     width_bucket,
                     parts,
                     tables,
+                    markdown,
                     content_hash,
                     has_card,
                 },
@@ -282,8 +288,11 @@ pub fn extract_markdown_tables(text: &str) -> Vec<ParsedMarkdownTable> {
     let mut tables = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
+    let mut in_fence=false;
     while i + 1 < lines.len() {
         let header_line = lines[i].trim();
+        if header_line.starts_with("```") {in_fence=!in_fence;i+=1;continue;}
+        if in_fence {i+=1;continue;}
         let sep_line = lines[i + 1].trim();
         if header_line.starts_with('|')
             && header_line.ends_with('|')
@@ -342,5 +351,70 @@ mod regression_tests {
             .content_hash;
         assert_ne!(first, second);
         assert!(cache.get_or_compute("id", "Other", true, 400.0).has_card);
+    }
+}
+
+/// Small cached block model; tables use the separate interactive table renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MarkdownBlock {
+    Heading(u8, String),
+    Paragraph(String),
+    Quote(String),
+    Code(String),
+}
+pub fn markdown_blocks(text: &str) -> Vec<MarkdownBlock> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if line.trim_start().starts_with("```") {
+            i += 1;
+            let mut code = Vec::new();
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                code.push(lines[i]);
+                i += 1;
+            }
+            blocks.push(MarkdownBlock::Code(code.join("\n")));
+            i += 1;
+            continue;
+        }
+        if line.trim().starts_with('|') && lines.get(i + 1).is_some_and(|l| l.contains("---")) {
+            i += 2;
+            while i < lines.len() && lines[i].trim().starts_with('|') {
+                i += 1;
+            }
+            continue;
+        }
+        let level = line.bytes().take_while(|b| *b == b'#').count();
+        if (1..=6).contains(&level) && line.as_bytes().get(level) == Some(&b' ') {
+            blocks.push(MarkdownBlock::Heading(
+                level as u8,
+                line[level + 1..].into(),
+            ));
+        } else if let Some(quote) = line.strip_prefix("> ") {
+            blocks.push(MarkdownBlock::Quote(quote.into()));
+        } else {
+            blocks.push(MarkdownBlock::Paragraph(line.into()));
+        }
+        i += 1;
+    }
+    blocks
+}
+#[cfg(test)]
+mod markdown_tests {
+    use super::*;
+    #[test]
+    fn fences_headings_and_tables_are_cached_without_duplicate_table_text() {
+        assert_eq!(
+            markdown_blocks(
+                "# Title\n```rust\nfn f() -> u8 {}\n```\n| A |\n| --- |\n| B |\n> Quote"
+            ),
+            vec![
+                MarkdownBlock::Heading(1, "Title".into()),
+                MarkdownBlock::Code("fn f() -> u8 {}".into()),
+                MarkdownBlock::Quote("Quote".into())
+            ]
+        );
     }
 }

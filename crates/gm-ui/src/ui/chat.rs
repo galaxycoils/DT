@@ -606,6 +606,7 @@ pub fn draw_chat_canvas(
                         row,
                         &layout.parts,
                         &layout.tables,
+                        &layout.markdown,
                         connected && !sending,
                         &mut send,
                         &mut submit_message,
@@ -638,6 +639,7 @@ fn draw_transcript_row(
     row: &TranscriptRow,
     parts: &[RenderedPart],
     tables: &[ParsedMarkdownTable],
+    markdown: &[Vec<crate::ui::cache::MarkdownBlock>],
     can_interact: bool,
     send: &mut impl FnMut(DaemonRequest),
     submit_message: &mut impl FnMut(String, Option<String>),
@@ -746,7 +748,13 @@ fn draw_transcript_row(
                 for (p_idx, part) in parts.iter().enumerate() {
                     ui.push_id(("part", p_idx), |ui| {
                         if !part.text.is_empty() {
-                            ui.add(egui::Label::new(part.text.as_str()).selectable(true).wrap());
+                            if let Some(blocks) = markdown.get(p_idx) {
+                                draw_markdown_blocks(ui, blocks, palette);
+                            } else {
+                                ui.add(
+                                    egui::Label::new(part.text.as_str()).selectable(true).wrap(),
+                                );
+                            }
                         }
                         for (a_idx, att) in part.attachments.iter().enumerate() {
                             ui.push_id(("att", a_idx), |ui| {
@@ -1490,4 +1498,103 @@ pub fn render_inline_card(
                 ));
             }
         });
+}
+
+fn draw_markdown_blocks(
+    ui: &mut egui::Ui,
+    blocks: &[crate::ui::cache::MarkdownBlock],
+    palette: &GrokPalette,
+) {
+    use crate::ui::cache::MarkdownBlock;
+    for block in blocks {
+        match block {
+            MarkdownBlock::Heading(level, text) => {
+                ui.label(
+                    RichText::new(text)
+                        .strong()
+                        .size(26.0 - *level as f32 * 2.0),
+                );
+            }
+            MarkdownBlock::Quote(text) => {
+                ui.label(
+                    RichText::new(format!("▏ {text}"))
+                        .italics()
+                        .color(palette.text_secondary),
+                );
+            }
+            MarkdownBlock::Code(code) => {
+                if ui.small_button("Copy Code").clicked() {
+                    ui.ctx().copy_text(code.clone());
+                }
+                ui.add(
+                    egui::Label::new(RichText::new(code).monospace())
+                        .selectable(true)
+                        .wrap(),
+                );
+            }
+            MarkdownBlock::Paragraph(text) => {
+                let mut job = egui::text::LayoutJob::default();
+                let mut rest = text.as_str();
+                while !rest.is_empty() {
+                    let marker = rest.char_indices().find(|(_, c)| matches!(c, '*' | '`'));
+                    let Some((at, ch)) = marker else {
+                        job.append(
+                            rest,
+                            0.0,
+                            egui::TextFormat {
+                                color: palette.text_primary,
+                                ..Default::default()
+                            },
+                        );
+                        break;
+                    };
+                    if at > 0 {
+                        job.append(
+                            &rest[..at],
+                            0.0,
+                            egui::TextFormat {
+                                color: palette.text_primary,
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    let strong = ch == '*' && rest[at..].starts_with("**");
+                    let count = if strong { 2 } else { 1 };
+                    let tail = &rest[at + count..];
+                    let delimiter = if strong {
+                        "**"
+                    } else if ch == '`' {
+                        "`"
+                    } else {
+                        "*"
+                    };
+                    if let Some(end) = tail.find(delimiter) {
+                        let mut format = egui::TextFormat {
+                            color: palette.text_primary,
+                            ..Default::default()
+                        };
+                        format.font_id = if ch == '`' {
+                            egui::FontId::monospace(13.0)
+                        } else {
+                            egui::FontId::proportional(if strong { 15.0 } else { 14.0 })
+                        };
+                        format.italics = ch == '*' && !strong;
+                        job.append(&tail[..end], 0.0, format);
+                        rest = &tail[end + count..];
+                    } else {
+                        job.append(
+                            &rest[at..],
+                            0.0,
+                            egui::TextFormat {
+                                color: palette.text_primary,
+                                ..Default::default()
+                            },
+                        );
+                        break;
+                    }
+                }
+                ui.add(egui::Label::new(job).selectable(true).wrap());
+            }
+        }
+    }
 }
