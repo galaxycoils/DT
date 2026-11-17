@@ -876,3 +876,26 @@ mod signed_manifest_tests {
         assert!(verify_release_manifest(&expired, signature.as_bytes(), &public).is_err());
     }
 }
+
+/// Shared checked updater used by both native IPC and the authenticated companion.
+pub struct CompanionUpdateService {
+    pub download_dir: PathBuf,
+}
+#[async_trait::async_trait]
+impl gm_openbot::CompanionUpdates for CompanionUpdateService {
+    async fn check(&self) -> Result<serde_json::Value> {
+        let latest = check_latest_release(DEFAULT_REPO, None).await?;
+        Ok(serde_json::to_value(latest)?)
+    }
+    async fn download_verified(&self) -> Result<serde_json::Value> {
+        let latest = check_latest_release(DEFAULT_REPO, None).await?;
+        if !latest.update_available {
+            return Ok(serde_json::json!({"update_available":false}));
+        }
+        let (path, verified) =
+            download_and_verify_update(&latest, &self.download_dir, None).await?;
+        Ok(
+            serde_json::json!({"path":path,"verified":verified,"release_url":latest.release_url,"next_step":"Open the verified installer, then restart Grok Muse."}),
+        )
+    }
+}

@@ -398,6 +398,18 @@ fn assemble_dmg(id: &str, output: &str) -> Result<(), Box<dyn std::error::Error>
     // 1. Compile & assemble bundles
     create_app_bundles(false)?;
 
+    // Packaging debug builds should not duplicate their symbol tables in the image.
+    for executable in [
+        "target/bundle/GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper",
+        "target/bundle/GrokMuse.app/Contents/MacOS/gm-ui",
+        "target/bundle/GrokMuse.app/Contents/MacOS/gm-daemon",
+        "target/bundle/GrokMuse.app/Contents/MacOS/gm",
+    ] {
+        let status = Command::new("strip").args(["-S", executable]).status()?;
+        if !status.success() {
+            return Err(format!("Could not strip packaging symbols from {executable}").into());
+        }
+    }
     // 2. Sign both bundles with hardened runtime & entitlements
     println!(
         "==> Signing bundles with hardened runtime (--options runtime) & entitlements.plist..."
@@ -419,7 +431,7 @@ fn assemble_dmg(id: &str, output: &str) -> Result<(), Box<dyn std::error::Error>
     println!("==> Copying signed app bundles into staging directory...");
     let cp_helper = Command::new("cp")
         .args([
-            "-R",
+            "-cR",
             "target/bundle/GrokMuseCUHelper.app",
             "target/dmg-staging/",
         ])
@@ -429,7 +441,7 @@ fn assemble_dmg(id: &str, output: &str) -> Result<(), Box<dyn std::error::Error>
     }
 
     let cp_ui = Command::new("cp")
-        .args(["-R", "target/bundle/GrokMuse.app", "target/dmg-staging/"])
+        .args(["-cR", "target/bundle/GrokMuse.app", "target/dmg-staging/"])
         .status()?;
     if !cp_ui.success() {
         return Err("Failed to copy GrokMuse.app to staging".into());

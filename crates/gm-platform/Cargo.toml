@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+wayland-pipewire = ["dep:pipewire"]
+
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 uuid = { workspace = true }
@@ -29,7 +33,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 x11rb = { version = "0.13.2", features = ["xtest", "screensaver", "randr"] }
 atspi = { version = "0.25", default-features = false, features = ["tokio"] }
 zbus = { version = "5", default-features = false, features = ["tokio"] }
-pipewire = { version = "0.8", features = ["v0_3_65"] }
+pipewire = { version = "0.10.1", features = ["v0_3_65"], optional = true }
 futures-util = "0.3"
 ashpd = { version = "0.11", default-features = false, features = ["tokio"] }
 

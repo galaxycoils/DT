@@ -49,6 +49,22 @@ jobs:
         working-directory: grok-muse
         run: cargo fmt --all -- --check
 
+      - name: Install Node for companion verification
+        if: runner.os == 'Linux'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify companion source, bundle and DOM interactions
+        if: runner.os == 'Linux'
+        working-directory: grok-muse
+        run: |
+          npm ci --prefix tools/companion
+          npm run build --prefix tools/companion
+          git diff --exit-code -- crates/gm-openbot/src/companion_ui.js crates/gm-openbot/src/companion_ui.html
+          npm test --prefix tools/companion
+          node --test tools/tests/companion-events.test.cjs
+
       - name: Clippy check (macOS)
         if: runner.os == 'macOS'
         working-directory: grok-muse
@@ -85,6 +101,15 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: grok-muse
         run: tools/test-native-x11.sh
+
+      - name: Verify companion in a real browser with isolated daemon storage
+        if: runner.os == 'Linux'
+        working-directory: grok-muse
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+        run: |
+          cargo build -p gm-daemon --bin gm-daemon
+          npm run smoke --prefix tools/companion
 
       - name: Run G5 eval suite gate
         working-directory: grok-muse

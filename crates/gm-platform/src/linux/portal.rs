@@ -1,5 +1,7 @@
 //! One user-selected monitor is shared by capture and input. No XWayland fallback.
-use super::{error, now};
+use super::error;
+#[cfg(feature = "wayland-pipewire")]
+use super::now;
 use ashpd::desktop::{
     PersistMode, Session,
     remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop},
@@ -342,6 +344,22 @@ fn keysym(name: &str) -> Result<i32> {
     })
 }
 
+#[cfg(not(feature = "wayland-pipewire"))]
+fn pipewire_frame(
+    _fd: std::os::fd::OwnedFd,
+    _node: u32,
+    _bounds: Rect,
+    _edge: Option<u32>,
+    _quality: Option<u8>,
+    _cancel: &AtomicBool,
+    _live: &AtomicBool,
+) -> Result<FrameCapture> {
+    Err(error(
+        "Wayland PipeWire screen capture requires compiling gm-platform with the 'wayland-pipewire' feature",
+    ))
+}
+
+#[cfg(feature = "wayland-pipewire")]
 fn pipewire_frame(
     fd: std::os::fd::OwnedFd,
     node: u32,
@@ -353,10 +371,10 @@ fn pipewire_frame(
 ) -> Result<FrameCapture> {
     use pipewire::{self as pw, properties::properties, spa};
     use std::{cell::RefCell, rc::Rc};
-    let main = pw::main_loop::MainLoop::new(None).map_err(error)?;
-    let context = pw::context::Context::new(&main).map_err(error)?;
+    let main = pw::main_loop::MainLoopBox::new(None).map_err(error)?;
+    let context = pw::context::ContextBox::new(main.loop_(), None).map_err(error)?;
     let core = context.connect_fd(fd, None).map_err(error)?;
-    let stream = pw::stream::Stream::new(&core,"Grok Muse shared monitor",properties! { *pw::keys::MEDIA_TYPE=>"Video", *pw::keys::MEDIA_CATEGORY=>"Capture", *pw::keys::MEDIA_ROLE=>"Screen" }).map_err(error)?;
+    let stream = pw::stream::StreamBox::new(&core,"Grok Muse shared monitor",properties! { *pw::keys::MEDIA_TYPE=>"Video", *pw::keys::MEDIA_CATEGORY=>"Capture", *pw::keys::MEDIA_ROLE=>"Screen" }).map_err(error)?;
     type CapturedFrame = (u32, u32, Vec<u8>);
     struct State {
         format: spa::param::video::VideoInfoRaw,
@@ -489,6 +507,8 @@ fn pipewire_frame(
         if std::time::Instant::now() >= deadline {
             return Err(error("PipeWire capture timed out"));
         }
-        main.loop_().iterate(std::time::Duration::from_millis(30));
+        main.loop_().iterate(pw::loop_::Timeout::Finite(
+            std::time::Duration::from_millis(30),
+        ));
     }
 }

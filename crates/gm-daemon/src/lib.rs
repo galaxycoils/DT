@@ -1611,7 +1611,8 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
         blocklist.clone(),
         Arc::new(audit_log.clone()),
         Arc::clone(&platform),
-    );
+    )
+    .with_config_path(config_path.clone());
 
     if config.muse.enable_muse_prompt {
         let muse_paths = gm_core::muse_paths::MuseRuntimePaths::from_config(&config, Some("muse"));
@@ -1643,7 +1644,20 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
             let bridges_cfg = config.openbot.bridges.clone();
             let (token, slack_secret) = companion_web_credentials(&config)?;
             let bridge = gm_openbot::BridgeRouter::new(sup.clone(), bridges_cfg);
-            let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret);
+            let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+                .with_updates(Arc::new(updater::CompanionUpdateService {
+                    download_dir: config.storage_dir.join("updates"),
+                }))
+                .with_runtime_deps(
+                    control_server.interactions(),
+                    control_server.shared_config(),
+                    config_path.clone(),
+                    Some(Arc::clone(&budget)),
+                    Some(Arc::clone(&llm_client)),
+                    Some(router.clone()),
+                    Some(kill_switch.clone()),
+                    Some(Arc::clone(&platform) as Arc<dyn gm_platform::Platform>),
+                );
             match web.bind_and_serve(&bind_addr).await {
                 Ok((comp_addr, comp_handle)) => {
                     let sp_handle = if config.muse.enable_spaces {
@@ -2251,6 +2265,7 @@ pub async fn run_bots(
                 allow_shell: true,
                 allow_network: true,
                 created_at: chrono::Utc::now().to_rfc3339(),
+                ..Default::default()
             };
             sup.roster().upsert_bot(profile.clone())?;
             if json {
@@ -2677,25 +2692,54 @@ fn companion_web_credentials(config: &GmConfig) -> Result<(Option<String>, Optio
 
 pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
     let config = GmConfig::load(config_path.as_deref())?;
-    let sup = open_default_openbot_supervisor(config_path)?;
+    let sup = open_default_openbot_supervisor(config_path.clone())?;
     println!("==> Starting OpenBot Companion Web / AG-UI / A2A server on http://{bind} ...");
     let secrets = KeychainSecrets::default();
     let budget = Arc::new(BudgetManager::open(
         config.budget.clone(),
         &config.storage_dir,
     )?);
-    let llm = Arc::new(HybridLlmClient::new(build_llm_backend(&secrets), budget));
+    let llm = Arc::new(HybridLlmClient::new(
+        build_llm_backend(&secrets),
+        Arc::clone(&budget),
+    ));
+    let router = LlmRouter::new(config.providers.clone());
+    let kill_switch = KillSwitch::new();
+    let platform = Arc::new(IpcPlatformClient::new(&config.socket_path));
+    let interactions = gm_openbot::SharedInteractionState::new();
+    let handler = control_server::DaemonApprovalHandler::new(
+        interactions.pending_approvals(),
+        sup.daemon_event_sender(),
+        std::time::Duration::from_secs(60),
+    )
+    .with_pending_questions(interactions.pending_questions())
+    .with_openbot(Some(sup.clone()))
+    .with_blocklist(BlocklistManager::new(&config.safety.blocklisted_apps));
     let runtime = sup.start_runtime(
-        Arc::new(IpcPlatformClient::new(&config.socket_path)),
-        llm,
-        LlmRouter::new(config.providers.clone()),
-        KillSwitch::new(),
+        Arc::clone(&platform),
+        Arc::clone(&llm),
+        router.clone(),
+        kill_switch.clone(),
         BlocklistManager::new(&config.safety.blocklisted_apps),
-        None,
+        Some(Arc::new(handler)),
     )?;
     let bridge = gm_openbot::BridgeRouter::new(sup.clone(), config.openbot.bridges.clone());
     let (token, slack_secret) = companion_web_credentials(&config)?;
-    let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret);
+    let shared_config = Arc::new(parking_lot::RwLock::new(config.clone()));
+    let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+        .with_updates(Arc::new(updater::CompanionUpdateService {
+            download_dir: config.storage_dir.join("updates"),
+        }))
+        .with_runtime_deps(
+            interactions,
+            shared_config,
+            config_path,
+            Some(budget),
+            Some(llm),
+            Some(router),
+            Some(kill_switch),
+            Some(platform as Arc<dyn gm_platform::Platform>),
+        );
     let (comp_addr, comp_handle) = match web.bind_and_serve(bind).await {
         Ok(server) => server,
         Err(error) => {

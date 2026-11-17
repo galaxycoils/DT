@@ -242,7 +242,7 @@ impl SpacesManager {
         let exp = Utc::now().timestamp() + SPACE_TOKEN_TTL_SECS;
         let tok = mint_space_token(self.secret(), slug, exp);
         Ok(format!(
-            "http://127.0.0.1:{spaces_port}/spaces/v2/{slug}/{tok}/index.html"
+            "http://127.0.0.1:{spaces_port}/spaces/v2/{slug}/?token={tok}"
         ))
     }
 
@@ -541,6 +541,7 @@ pub struct SpacesWebState {
 pub fn build_spaces_router(state: SpacesWebState) -> Router {
     let companion_port_atomic = Arc::clone(&state.spaces.companion_port);
     Router::new()
+        .route("/spaces/v2/:slug/", get(open_space_query))
         .route("/spaces/v2/:slug/:token/*path", get(serve_space_asset))
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
@@ -574,6 +575,24 @@ pub fn build_spaces_router(state: SpacesWebState) -> Router {
         ))
         .layer(DefaultBodyLimit::max(64 * 1024))
         .with_state(state)
+}
+
+// The canonical query-token entry redirects into the capability directory so
+// relative CSS/JS assets retain authorization without cookies or shared origin.
+async fn open_space_query(
+    Path(slug): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    State(state): State<SpacesWebState>,
+) -> axum::response::Response {
+    if validate_space_slug(&slug).is_err() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let token = query.get("token").map(String::as_str).unwrap_or_default();
+    if !verify_space_token(state.spaces.secret(), &slug, token, Utc::now().timestamp()) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    axum::response::Redirect::temporary(&format!("/spaces/v2/{slug}/{token}/index.html"))
+        .into_response()
 }
 
 async fn serve_space_asset(

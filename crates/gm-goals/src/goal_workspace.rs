@@ -399,6 +399,16 @@ impl GoalWorkspaceManager {
             .map(|(text, _)| text)
             .ok_or_else(|| GmError::Config(format!("Goal deliverable '{rel_file}' not found")))
     }
+
+    pub fn delete_deliverable(&self, slug: &str, rel_file: &str) -> Result<bool> {
+        validate_goal_slug(slug)?;
+        let clean = validate_rel_subpath(rel_file)?;
+        let target = self.goal_files_dir(slug)?.join(clean);
+        if !target.exists() {
+            return Ok(false);
+        }
+        SharedFileStore::global().remove_file_sync(&target, None)
+    }
 }
 
 fn collect_rel_files_no_follow(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {

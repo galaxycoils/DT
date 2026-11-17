@@ -344,6 +344,7 @@ pub fn import_team(
             allow_network: t_bot.allow_network,
             allow_gui: t_bot.allow_gui,
             created_at: Utc::now().to_rfc3339(),
+            ..Default::default()
         };
         supervisor.roster().upsert_bot(profile)?;
         bots_imported += 1;
@@ -387,6 +388,8 @@ pub fn import_team(
             minute: t_routine.minute,
             weekdays: t_routine.weekdays.clone(),
             quiet_hours: t_routine.quiet_hours.clone(),
+            interval_minutes: None,
+            webhook_secret_ref: None,
             enabled: false,
         };
 

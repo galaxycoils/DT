@@ -64,6 +64,8 @@ pub struct GmConfig {
     pub workspace_vm: WorkspaceVmConfig,
     #[serde(default)]
     pub muse: MuseConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 impl GmConfig {
@@ -142,6 +144,24 @@ impl GmConfig {
                 "muse.context_tokens must be at least 8000".into(),
             ));
         }
+        if !matches!(self.ui.theme.as_str(), "system" | "dark" | "light") {
+            return Err(crate::error::GmError::Config(
+                "ui.theme must be one of: system, dark, light".into(),
+            ));
+        }
+        if !matches!(self.ui.accent_mode.as_str(), "bot_color" | "black") {
+            return Err(crate::error::GmError::Config(
+                "ui.accent_mode must be one of: bot_color, black".into(),
+            ));
+        }
+        if !matches!(
+            self.ui.computer_execution_mode.as_str(),
+            "ask" | "always" | "never"
+        ) {
+            return Err(crate::error::GmError::Config(
+                "ui.computer_execution_mode must be one of: ask, always, never".into(),
+            ));
+        }
         Ok(())
     }
     pub fn save(&self, path: &Path) -> crate::error::Result<()> {
@@ -217,6 +237,7 @@ impl Default for GmConfig {
             openbot,
             workspace_vm: WorkspaceVmConfig::default(),
             muse: MuseConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }
@@ -358,8 +379,11 @@ pub struct ChatBridgesConfig {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_default_config() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let config = GmConfig::default();
         assert!(!config.socket_path.as_os_str().is_empty());
         assert!(!config.daemon_socket_path.as_os_str().is_empty());
@@ -380,6 +404,7 @@ mod tests {
 
     #[test]
     fn test_load_or_default_custom_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path = std::env::temp_dir().join(format!("test_config_{}.json", uuid::Uuid::new_v4()));
         let json = r#"{
             "socket_path": "/tmp/custom-helper.sock",
@@ -420,6 +445,7 @@ mod tests {
 
     #[test]
     fn test_load_or_default_partial_file() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let path =
             std::env::temp_dir().join(format!("test_partial_config_{}.json", uuid::Uuid::new_v4()));
         let json = r#"{
@@ -445,6 +471,7 @@ mod tests {
 
     #[test]
     fn test_env_var_overrides() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("GM_SOCKET_PATH", "/tmp/env-helper.sock");
             std::env::set_var("GM_DAEMON_SOCKET_PATH", "/tmp/env-daemon.sock");
@@ -527,6 +554,102 @@ mod tests {
         let mut bad_ctx = GmConfig::default();
         bad_ctx.muse.context_tokens = 7_999;
         assert!(bad_ctx.validate().is_err());
+    }
+
+    #[test]
+    fn test_ui_config_roundtrip_and_validation() {
+        let cfg = GmConfig::default();
+        assert_eq!(cfg.ui.theme, "system");
+        assert_eq!(cfg.ui.accent_mode, "bot_color");
+        assert!(!cfg.ui.hardware_acceleration);
+        assert!(!cfg.ui.sidebar_collapsed);
+        assert_eq!(cfg.ui.language, "en-US");
+        assert_eq!(cfg.ui.timezone, "UTC");
+        assert!(cfg.ui.spellcheck);
+        assert!(cfg.ui.notifications_enabled);
+        assert!(cfg.ui.notification_sound);
+        assert!(cfg.ui.suppress_notifications_when_active);
+        assert!(!cfg.ui.auto_review_approvals);
+        assert_eq!(cfg.ui.computer_execution_mode, "ask");
+        assert!(!cfg.ui.route_traffic_through_computer);
+        assert!(!cfg.ui.hardware_security_keys);
+        assert!(cfg.ui.auto_updates);
+        assert_eq!(cfg.ui.primary_bot_id, "muse");
+        assert!(cfg.validate().is_ok());
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let parsed: GmConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.ui.theme, "system");
+        assert_eq!(parsed.ui.accent_mode, "bot_color");
+        assert_eq!(parsed.ui.computer_execution_mode, "ask");
+
+        // Legacy JSON missing `ui` must load cleanly with defaults.
+        let legacy: GmConfig =
+            serde_json::from_str(r#"{"storage_dir": "/tmp/legacy-ui"}"#).unwrap();
+        assert_eq!(legacy.ui.theme, "system");
+        assert!(legacy.validate().is_ok());
+
+        let mut bad_theme = GmConfig::default();
+        bad_theme.ui.theme = "neon".into();
+        assert!(bad_theme.validate().is_err());
+
+        let mut bad_accent = GmConfig::default();
+        bad_accent.ui.accent_mode = "rainbow".into();
+        assert!(bad_accent.validate().is_err());
+
+        let mut bad_exec = GmConfig::default();
+        bad_exec.ui.computer_execution_mode = "yolo".into();
+        assert!(bad_exec.validate().is_err());
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub theme: String,
+    pub accent_mode: String,
+    pub hardware_acceleration: bool,
+    pub sidebar_collapsed: bool,
+    pub language: String,
+    pub timezone: String,
+    pub spellcheck: bool,
+    pub notifications_enabled: bool,
+    pub notification_sound: bool,
+    pub suppress_notifications_when_active: bool,
+    pub quiet_hours_start: Option<String>,
+    pub quiet_hours_end: Option<String>,
+    pub auto_review_approvals: bool,
+    pub computer_execution_mode: String,
+    pub route_traffic_through_computer: bool,
+    pub hardware_security_keys: bool,
+    pub auto_updates: bool,
+    pub microphone_device: Option<String>,
+    pub primary_bot_id: String,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            theme: "system".into(),
+            accent_mode: "bot_color".into(),
+            hardware_acceleration: false,
+            sidebar_collapsed: false,
+            language: "en-US".into(),
+            timezone: "UTC".into(),
+            spellcheck: true,
+            notifications_enabled: true,
+            notification_sound: true,
+            suppress_notifications_when_active: true,
+            quiet_hours_start: None,
+            quiet_hours_end: None,
+            auto_review_approvals: false,
+            computer_execution_mode: "ask".into(),
+            route_traffic_through_computer: false,
+            hardware_security_keys: false,
+            auto_updates: true,
+            microphone_device: None,
+            primary_bot_id: "muse".into(),
+        }
     }
 }
 

@@ -244,6 +244,180 @@ pub enum DaemonRequest {
         #[serde(default)]
         expected_sha256: Option<String>,
     },
+    GetBootstrapState,
+    GetUiSettings,
+    SaveUiSettings {
+        ui: serde_json::Value,
+    },
+    SetBotUiPrefs {
+        bot_id: String,
+        prefs: serde_json::Value,
+    },
+    ManageBotSection {
+        op: String,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        collapsed: Option<bool>,
+        #[serde(default)]
+        sort_order: Option<i32>,
+    },
+    GetDirectChatHistory {
+        bot_id: String,
+        #[serde(default)]
+        before_seq: Option<u64>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    PostDirectChat {
+        bot_id: String,
+        content: String,
+        #[serde(default)]
+        reply_to_id: Option<String>,
+        #[serde(default)]
+        thread_id: Option<String>,
+    },
+    SearchMessages {
+        query: String,
+        #[serde(default)]
+        include_older: bool,
+        #[serde(default)]
+        bot_id: Option<String>,
+    },
+    MarkChatRead {
+        chat_kind: String,
+        chat_id: String,
+    },
+    ToggleMessageReaction {
+        chat_kind: String,
+        message_id: String,
+        emoji: String,
+        #[serde(default)]
+        actor: Option<String>,
+    },
+    SubmitSecretPrompt {
+        request_id: String,
+        bot_id: String,
+        fields: Vec<(String, String)>,
+        #[serde(default)]
+        save_to_vault: bool,
+        #[serde(default)]
+        vault_label: Option<String>,
+        #[serde(default)]
+        domain: Option<String>,
+    },
+    RespondQuestion {
+        request_id: String,
+        answers: Vec<String>,
+        #[serde(default)]
+        custom_text: Option<String>,
+    },
+    ManageCustomRule {
+        op: String,
+        #[serde(default)]
+        rule: Option<serde_json::Value>,
+        #[serde(default)]
+        id: Option<String>,
+    },
+    ManageVault {
+        op: String,
+        #[serde(default)]
+        item: Option<serde_json::Value>,
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        reveal_confirmed: bool,
+    },
+    ImportVaultCsv {
+        csv: String,
+        #[serde(default)]
+        source_hint: Option<String>,
+    },
+    GetUsageBreakdown {
+        #[serde(default)]
+        days: Option<u32>,
+    },
+    TriggerRoutineTest {
+        routine_id: String,
+    },
+    DeleteRoutine {
+        routine_id: String,
+    },
+    ListRoutineRuns {
+        routine_id: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    ListLibraryPage {
+        bot_id: String,
+        #[serde(default)]
+        filter: String,
+        #[serde(default)]
+        cursor: Option<usize>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    ListCustomConnectors,
+    SaveCustomConnector {
+        op: String,
+        #[serde(default)]
+        connector: Option<serde_json::Value>,
+        #[serde(default)]
+        id: Option<String>,
+    },
+    CaptureComputerPreview {
+        #[serde(default)]
+        max_long_edge: Option<u32>,
+        #[serde(default)]
+        quality: Option<u8>,
+    },
+    StartTeachTask {
+        bot_id: String,
+    },
+    StopTeachTask {
+        #[serde(default)]
+        save_skill_name: Option<String>,
+    },
+    CheckUpdates,
+    QueryAudit {
+        #[serde(default)]
+        category: Option<String>,
+        #[serde(default)]
+        bot_id: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    ExplainMemory {
+        target: String,
+    },
+    GetDiscretion {
+        chat_id: String,
+    },
+    ManageSkill {
+        op: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+    ManageSpace {
+        op: String,
+        slug: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+    ManageFeed {
+        op: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
+    ManageSystem {
+        op: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -332,6 +506,82 @@ pub enum DaemonEvent {
     },
     ActivityUpdated {
         reason: String,
+    },
+    BotUpdated {
+        bot_id: String,
+    },
+    BotStatusPhrase {
+        bot_id: String,
+        phrase: Option<String>,
+        needs_attention: bool,
+    },
+    DirectMessageAdded {
+        bot_id: String,
+        message: serde_json::Value,
+    },
+    MessageCardUpdated {
+        bot_id: String,
+        message_id: String,
+        card: serde_json::Value,
+    },
+    MessageReactionUpdated {
+        chat_kind: String,
+        chat_id: String,
+        message_id: String,
+        reactions: serde_json::Value,
+    },
+    RoutineUpdated {
+        routine_id: Option<String>,
+        bot_id: Option<String>,
+    },
+    RoutineRunRecorded {
+        routine_id: String,
+        run: serde_json::Value,
+    },
+    TaskUpdated {
+        task: serde_json::Value,
+    },
+    ApprovalExpired {
+        request_id: String,
+    },
+    SecretPromptRequested {
+        request_id: String,
+        bot_id: String,
+        title: String,
+        domain: Option<String>,
+        fields: Vec<String>,
+    },
+    QuestionRequested {
+        request_id: String,
+        bot_id: String,
+        prompt: String,
+        options: Vec<String>,
+        allow_multiple: bool,
+    },
+    OrderApprovalRequested {
+        request_id: String,
+        bot_id: String,
+        merchant: String,
+        item_title: String,
+        amount_usd: f64,
+    },
+    BudgetUpdated {
+        daily_spent_usd: f64,
+        daily_cap_usd: f64,
+    },
+    ComputerFrameReady {
+        width: u32,
+        height: u32,
+        jpeg_base64: String,
+        timestamp_ms: u64,
+    },
+    NotificationAlert {
+        id: String,
+        bot_id: Option<String>,
+        level: String,
+        title: String,
+        body: String,
+        request_id: Option<String>,
     },
 }
 
@@ -600,6 +850,223 @@ mod tests {
         match decoded2.payload {
             DaemonResponse::JsonPayload(v) => assert_eq!(v["count"], 3),
             _ => panic!("Expected JsonPayload"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_grokbot_ui_ipc_all_new_variants_roundtrip() {
+        let requests = vec![
+            DaemonRequest::GetBootstrapState,
+            DaemonRequest::GetUiSettings,
+            DaemonRequest::SaveUiSettings {
+                ui: serde_json::json!({"theme": "dark", "accent_mode": "black"}),
+            },
+            DaemonRequest::SetBotUiPrefs {
+                bot_id: "muse".into(),
+                prefs: serde_json::json!({"pinned": true, "avatar_shape": "Hex"}),
+            },
+            DaemonRequest::ManageBotSection {
+                op: "upsert".into(),
+                id: Some("sec-1".into()),
+                name: Some("Work".into()),
+                collapsed: Some(false),
+                sort_order: Some(1),
+            },
+            DaemonRequest::GetDirectChatHistory {
+                bot_id: "muse".into(),
+                before_seq: Some(50),
+                limit: Some(40),
+            },
+            DaemonRequest::PostDirectChat {
+                bot_id: "muse".into(),
+                content: "Hello Grok Bot".into(),
+                reply_to_id: Some("dm-1".into()),
+                thread_id: Some("thr-1".into()),
+            },
+            DaemonRequest::SearchMessages {
+                query: "invoice".into(),
+                include_older: true,
+                bot_id: Some("muse".into()),
+            },
+            DaemonRequest::MarkChatRead {
+                chat_kind: "dm".into(),
+                chat_id: "muse".into(),
+            },
+            DaemonRequest::ToggleMessageReaction {
+                chat_kind: "dm".into(),
+                message_id: "dm-2".into(),
+                emoji: "👍".into(),
+                actor: Some("user".into()),
+            },
+            DaemonRequest::SubmitSecretPrompt {
+                request_id: "sec-req-1".into(),
+                bot_id: "muse".into(),
+                fields: vec![("password".into(), "hunter2".into())],
+                save_to_vault: true,
+                vault_label: Some("GitHub".into()),
+                domain: Some("github.com".into()),
+            },
+            DaemonRequest::RespondQuestion {
+                request_id: "q-1".into(),
+                answers: vec!["Option A".into()],
+                custom_text: None,
+            },
+            DaemonRequest::ManageCustomRule {
+                op: "upsert".into(),
+                rule: Some(serde_json::json!({"mode": "allow", "pattern": "git status"})),
+                id: None,
+            },
+            DaemonRequest::ManageVault {
+                op: "list".into(),
+                item: None,
+                id: None,
+                reveal_confirmed: false,
+            },
+            DaemonRequest::ImportVaultCsv {
+                csv: "name,url,username,password\n".into(),
+                source_hint: Some("1Password".into()),
+            },
+            DaemonRequest::GetUsageBreakdown { days: Some(7) },
+            DaemonRequest::TriggerRoutineTest {
+                routine_id: "r-1".into(),
+            },
+            DaemonRequest::DeleteRoutine {
+                routine_id: "r-1".into(),
+            },
+            DaemonRequest::ListRoutineRuns {
+                routine_id: "r-1".into(),
+                limit: Some(20),
+            },
+            DaemonRequest::ListLibraryPage {
+                bot_id: "muse".into(),
+                filter: "Pages".into(),
+                cursor: Some(0),
+                limit: Some(5),
+            },
+            DaemonRequest::ListCustomConnectors,
+            DaemonRequest::SaveCustomConnector {
+                op: "upsert".into(),
+                connector: Some(serde_json::json!({"name": "Linear", "kind": "RemoteHttps"})),
+                id: None,
+            },
+            DaemonRequest::CaptureComputerPreview {
+                max_long_edge: Some(1280),
+                quality: Some(75),
+            },
+            DaemonRequest::StartTeachTask {
+                bot_id: "muse".into(),
+            },
+            DaemonRequest::StopTeachTask {
+                save_skill_name: Some("daily-triage".into()),
+            },
+            DaemonRequest::CheckUpdates,
+        ];
+
+        for (idx, req) in requests.into_iter().enumerate() {
+            let msg = IpcMessage {
+                id: (idx + 500) as u64,
+                payload: req,
+            };
+            let json_val = serde_json::to_value(&msg.payload).unwrap();
+            assert!(json_val.get("method").is_some());
+
+            let mut buf = Vec::new();
+            write_ipc_message(&mut buf, &msg).await.unwrap();
+            let mut cur = Cursor::new(buf);
+            let decoded: IpcMessage<DaemonRequest> = read_ipc_message(&mut cur).await.unwrap();
+            assert_eq!(serde_json::to_value(&decoded.payload).unwrap(), json_val);
+        }
+
+        let events = vec![
+            DaemonEvent::BotUpdated {
+                bot_id: "muse".into(),
+            },
+            DaemonEvent::BotStatusPhrase {
+                bot_id: "muse".into(),
+                phrase: Some("Checking mail…".into()),
+                needs_attention: false,
+            },
+            DaemonEvent::DirectMessageAdded {
+                bot_id: "muse".into(),
+                message: serde_json::json!({"id": "dm-1", "content": "hi"}),
+            },
+            DaemonEvent::MessageCardUpdated {
+                bot_id: "muse".into(),
+                message_id: "dm-1".into(),
+                card: serde_json::json!({"status": "approved"}),
+            },
+            DaemonEvent::MessageReactionUpdated {
+                chat_kind: "dm".into(),
+                chat_id: "muse".into(),
+                message_id: "dm-1".into(),
+                reactions: serde_json::json!([{"emoji": "👍", "count": 1}]),
+            },
+            DaemonEvent::RoutineUpdated {
+                routine_id: Some("r-1".into()),
+                bot_id: Some("muse".into()),
+            },
+            DaemonEvent::RoutineRunRecorded {
+                routine_id: "r-1".into(),
+                run: serde_json::json!({"status": "queued"}),
+            },
+            DaemonEvent::TaskUpdated {
+                task: serde_json::json!({"id": "t-1"}),
+            },
+            DaemonEvent::ApprovalExpired {
+                request_id: "req-1".into(),
+            },
+            DaemonEvent::SecretPromptRequested {
+                request_id: "sec-1".into(),
+                bot_id: "muse".into(),
+                title: "Sign in".into(),
+                domain: Some("github.com".into()),
+                fields: vec!["username".into(), "password".into()],
+            },
+            DaemonEvent::QuestionRequested {
+                request_id: "q-1".into(),
+                bot_id: "muse".into(),
+                prompt: "Pick one".into(),
+                options: vec!["A".into(), "B".into()],
+                allow_multiple: false,
+            },
+            DaemonEvent::OrderApprovalRequested {
+                request_id: "ord-1".into(),
+                bot_id: "muse".into(),
+                merchant: "Acme".into(),
+                item_title: "Cable".into(),
+                amount_usd: 19.99,
+            },
+            DaemonEvent::BudgetUpdated {
+                daily_spent_usd: 1.24,
+                daily_cap_usd: 5.0,
+            },
+            DaemonEvent::ComputerFrameReady {
+                width: 1280,
+                height: 720,
+                jpeg_base64: "AAAA".into(),
+                timestamp_ms: 123456,
+            },
+            DaemonEvent::NotificationAlert {
+                id: "n-1".into(),
+                bot_id: Some("muse".into()),
+                level: "warning".into(),
+                title: "Token expired".into(),
+                body: "Reconnect Gmail".into(),
+                request_id: None,
+            },
+        ];
+
+        for (idx, evt) in events.into_iter().enumerate() {
+            let msg = IpcMessage {
+                id: (idx + 700) as u64,
+                payload: DaemonResponse::Event(evt),
+            };
+            let json_val = serde_json::to_value(&msg.payload).unwrap();
+            let mut buf = Vec::new();
+            write_ipc_message(&mut buf, &msg).await.unwrap();
+            let mut cur = Cursor::new(buf);
+            let decoded: IpcMessage<DaemonResponse> = read_ipc_message(&mut cur).await.unwrap();
+            assert_eq!(serde_json::to_value(&decoded.payload).unwrap(), json_val);
         }
     }
 }

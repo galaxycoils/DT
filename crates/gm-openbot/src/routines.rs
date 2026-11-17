@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 fn error(e: impl std::fmt::Display) -> GmError {
     GmError::Config(format!("Routine: {e}"))
 }
+fn constant_time_secret_eq(a: &str, b: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let da = Sha256::digest(a.as_bytes());
+    let db = Sha256::digest(b.as_bytes());
+    let mut diff = 0u8;
+    for (x, y) in da.iter().zip(db.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuietHours {
     pub start_hour: u32,
@@ -24,6 +34,9 @@ impl QuietHours {
     }
 }
 
+pub const MAX_ROUTINES_PER_BOT: usize = 50;
+pub const MIN_ROUTINE_INTERVAL_MINUTES: u32 = 5;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Routine {
     pub id: String,
@@ -38,6 +51,10 @@ pub struct Routine {
     pub weekdays: Vec<u32>,
     #[serde(default)]
     pub quiet_hours: Option<QuietHours>,
+    #[serde(default)]
+    pub interval_minutes: Option<u32>,
+    #[serde(default)]
+    pub webhook_secret_ref: Option<String>,
     pub enabled: bool,
 }
 
@@ -76,6 +93,13 @@ impl Routine {
         {
             return Err(error("Invalid schedule, identifier or text limits"));
         }
+        if let Some(mins) = self.interval_minutes
+            && !(MIN_ROUTINE_INTERVAL_MINUTES..=10_080).contains(&mins)
+        {
+            return Err(error(format!(
+                "Interval must be at least {MIN_ROUTINE_INTERVAL_MINUTES} minutes (max 10080)"
+            )));
+        }
         if let Some(ref q) = self.quiet_hours
             && (q.start_hour > 23 || q.end_hour > 23)
         {
@@ -88,6 +112,9 @@ impl Routine {
     /// time advances to the first valid local minute on that date.
     pub fn next_after(&self, now: DateTime<Utc>) -> Result<DateTime<Utc>> {
         self.validate()?;
+        if let Some(mins) = self.interval_minutes {
+            return Ok(now + chrono::Duration::minutes(mins as i64));
+        }
         let timezone = self.timezone.parse::<Tz>().map_err(error)?;
         let today = now.with_timezone(&timezone).date_naive();
         for offset in 0..15 {
@@ -136,10 +163,50 @@ impl DurableTaskQueue {
     }
     pub fn save_routine(&self, routine: &Routine, now: DateTime<Utc>) -> Result<()> {
         let next = routine.next_after(now)?.to_rfc3339();
-        self.conn.lock().execute("INSERT INTO routines_v1(id,config_json,next_due) VALUES (?1,?2,?3)
+        let conn = self.conn.lock();
+        let existing_count = {
+            let mut stmt = conn
+                .prepare("SELECT id, config_json FROM routines_v1")
+                .map_err(error)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(error)?;
+            let mut cnt = 0usize;
+            for r in rows {
+                let (id, cfg_json) = r.map_err(error)?;
+                if id != routine.id
+                    && let Ok(parsed) = serde_json::from_str::<Routine>(&cfg_json)
+                    && parsed.bot_id == routine.bot_id
+                {
+                    cnt += 1;
+                }
+            }
+            cnt
+        };
+        if existing_count >= MAX_ROUTINES_PER_BOT {
+            return Err(error(format!(
+                "Bot '{}' has reached the maximum of {MAX_ROUTINES_PER_BOT} routines",
+                routine.bot_id
+            )));
+        }
+        conn.execute(
+            "INSERT INTO routines_v1(id,config_json,next_due) VALUES (?1,?2,?3)
             ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json,next_due=excluded.next_due",
-            params![routine.id,serde_json::to_string(routine)?,next]).map_err(error)?;
+            params![routine.id, serde_json::to_string(routine)?, next],
+        )
+        .map_err(error)?;
         Ok(())
+    }
+    pub fn delete_routine(&self, routine_id: &str) -> Result<bool> {
+        let rows = self
+            .conn
+            .lock()
+            .execute(
+                "DELETE FROM routines_v1 WHERE id = ?1",
+                params![routine_id.trim()],
+            )
+            .map_err(error)?;
+        Ok(rows > 0)
     }
     pub fn list_routines(&self) -> Result<Vec<RoutineState>> {
         let connection = self.conn.lock();
@@ -371,8 +438,169 @@ impl OpenBotSupervisor {
             return Err(error("Unknown channel"));
         }
 
-        self.queue().save_routine(routine, Utc::now())
+        let mut normalized = routine.clone();
+        if normalized.webhook_secret_ref.is_none() {
+            normalized.webhook_secret_ref = Some(format!(
+                "secret://keychain/gm_routine_hook_{}",
+                normalized.id
+            ));
+        }
+        if let Some(ref secret_ref) = normalized.webhook_secret_ref
+            && let Some(account) = secret_ref.strip_prefix("secret://keychain/")
+            && self.vault().backend().get_secret(account).is_err()
+        {
+            let generated = format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            );
+            let _ = self.vault().backend().set_secret(account, &generated);
+        }
+
+        self.queue().save_routine(&normalized, Utc::now())?;
+        let _ = self
+            .daemon_event_sender()
+            .send(gm_core::ipc::DaemonEvent::RoutineUpdated {
+                routine_id: Some(normalized.id.clone()),
+                bot_id: Some(normalized.bot_id.clone()),
+            });
+        self.emit_agui(
+            "ROUTINE_UPDATED",
+            &normalized.id,
+            &normalized.bot_id,
+            serde_json::json!({ "routine_id": normalized.id, "enabled": normalized.enabled }),
+        );
+        Ok(())
     }
+
+    pub fn verify_routine_webhook_key(&self, routine_id: &str, supplied_key: &str) -> Result<bool> {
+        let trimmed = supplied_key.trim();
+        if trimmed.is_empty() {
+            return Ok(false);
+        }
+        let Some(state) = self
+            .queue()
+            .list_routines()?
+            .into_iter()
+            .find(|s| s.routine.id == routine_id)
+        else {
+            return Ok(false);
+        };
+        let account = state
+            .routine
+            .webhook_secret_ref
+            .as_deref()
+            .and_then(|s| s.strip_prefix("secret://keychain/"))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("gm_routine_hook_{}", state.routine.id));
+        let Ok(expected) = self.vault().backend().get_secret(&account) else {
+            return Ok(false);
+        };
+        Ok(constant_time_secret_eq(&expected, trimmed))
+    }
+
+    pub fn get_routine_webhook_key(&self, routine_id: &str) -> Result<Option<String>> {
+        let Some(state) = self
+            .queue()
+            .list_routines()?
+            .into_iter()
+            .find(|s| s.routine.id == routine_id)
+        else {
+            return Ok(None);
+        };
+        let account = state
+            .routine
+            .webhook_secret_ref
+            .as_deref()
+            .and_then(|s| s.strip_prefix("secret://keychain/"))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("gm_routine_hook_{}", state.routine.id));
+        Ok(self.vault().backend().get_secret(&account).ok())
+    }
+
+    pub fn delete_routine(&self, routine_id: &str) -> Result<bool> {
+        let deleted = self.queue().delete_routine(routine_id)?;
+        if deleted {
+            let _ = self
+                .daemon_event_sender()
+                .send(gm_core::ipc::DaemonEvent::RoutineUpdated {
+                    routine_id: Some(routine_id.to_string()),
+                    bot_id: None,
+                });
+            self.emit_agui(
+                "ROUTINE_UPDATED",
+                routine_id,
+                "",
+                serde_json::json!({ "routine_id": routine_id, "deleted": true }),
+            );
+        }
+        Ok(deleted)
+    }
+
+    /// Manual "Test" button trigger: queues an immediate run bypassing `enabled` / `QuietGate` wait
+    /// while recording a normal `RoutineRunRecord` and broadcasting delta updates.
+    pub fn trigger_routine_test(&self, routine_id: &str) -> Result<Option<RoutineTriggerOutcome>> {
+        let Some(state) = self
+            .queue()
+            .list_routines()?
+            .into_iter()
+            .find(|s| s.routine.id == routine_id)
+        else {
+            return Ok(None);
+        };
+        let routine = state.routine;
+        if self.roster().get_bot(&routine.bot_id).is_none() {
+            return Err(error("Routine bot is unavailable"));
+        }
+        let now = Utc::now();
+        let task = self.submit_task(
+            Some(&routine.bot_id),
+            routine.channel_id.as_deref(),
+            &routine.instruction,
+            5,
+        )?;
+        let run_id = format!("run-test-{}-{}", routine.id, uuid::Uuid::new_v4().simple());
+        self.queue().conn.lock().execute(
+            "INSERT OR REPLACE INTO routine_runs_v1(id,routine_id,task_id,scheduled_for,fired_at,status) VALUES (?1,?2,?3,?4,?5,'queued')",
+            params![run_id, routine.id, task.id, now.to_rfc3339(), now.to_rfc3339()],
+        ).map_err(error)?;
+        let _ = self.queue().conn.lock().execute(
+            "UPDATE routines_v1 SET last_task_id=?1 WHERE id=?2",
+            params![task.id, routine.id],
+        );
+
+        let run_record = RoutineRunRecord {
+            id: run_id,
+            routine_id: routine.id.clone(),
+            task_id: Some(task.id.clone()),
+            scheduled_for: now.to_rfc3339(),
+            fired_at: now.to_rfc3339(),
+            status: "queued".into(),
+        };
+        let _ = self
+            .daemon_event_sender()
+            .send(gm_core::ipc::DaemonEvent::RoutineRunRecorded {
+                routine_id: routine.id.clone(),
+                run: serde_json::to_value(&run_record).unwrap_or_default(),
+            });
+        let _ = self
+            .daemon_event_sender()
+            .send(gm_core::ipc::DaemonEvent::RoutineUpdated {
+                routine_id: Some(routine.id.clone()),
+                bot_id: Some(routine.bot_id.clone()),
+            });
+        self.emit_agui(
+            "ROUTINE_QUEUED",
+            &task.id,
+            &routine.bot_id,
+            serde_json::json!({ "routine_id": routine.id, "trigger": "manual_test" }),
+        );
+        Ok(Some(RoutineTriggerOutcome {
+            status: "queued".into(),
+            task_id: Some(task.id),
+        }))
+    }
+
     pub(crate) fn tick_routines(&self, now: DateTime<Utc>) -> Result<usize> {
         let mut count = 0;
         for state in self.queue().list_routines()? {
@@ -388,6 +616,12 @@ impl OpenBotSupervisor {
             }
             if let Some(id) = self.queue().fire_routine(&routine, now)? {
                 count += 1;
+                let _ =
+                    self.daemon_event_sender()
+                        .send(gm_core::ipc::DaemonEvent::RoutineUpdated {
+                            routine_id: Some(routine.id.clone()),
+                            bot_id: Some(routine.bot_id.clone()),
+                        });
                 self.emit_agui(
                     "ROUTINE_QUEUED",
                     id,
@@ -479,6 +713,12 @@ impl OpenBotSupervisor {
                 user_prompt: None,
                 created_at: now,
             });
+            let _ = self
+                .daemon_event_sender()
+                .send(gm_core::ipc::DaemonEvent::RoutineUpdated {
+                    routine_id: Some(routine.id.clone()),
+                    bot_id: Some(routine.bot_id.clone()),
+                });
             self.emit_agui(
                 "ROUTINE_QUEUED",
                 id,
@@ -504,6 +744,8 @@ mod tests {
             minute: 30,
             weekdays: vec![],
             quiet_hours: None,
+            interval_minutes: None,
+            webhook_secret_ref: None,
             enabled: true,
         }
     }
@@ -701,5 +943,47 @@ mod tests {
         let posts = sup.feed_store().list_posts(20).unwrap();
         assert_eq!(posts.len(), initial_posts + 1);
         assert!(posts.iter().any(|p| p.kicker == "Routine"));
+    }
+
+    #[test]
+    fn routine_50_per_bot_cap_5_min_interval_and_manual_test_trigger() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = gm_core::config::GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        cfg.openbot.bots_dir = dir.path().join("bots");
+        let (tx, _) = tokio::sync::broadcast::channel(16);
+        let sup = OpenBotSupervisor::open(
+            cfg,
+            std::sync::Arc::new(gm_safety::AuditLogger::in_memory()),
+            tx,
+        )
+        .unwrap();
+
+        let mut too_fast = daily();
+        too_fast.id = "too-fast".into();
+        too_fast.interval_minutes = Some(4);
+        assert!(sup.save_routine(&too_fast).is_err());
+
+        for i in 0..MAX_ROUTINES_PER_BOT {
+            let mut r = daily();
+            r.id = format!("r-{i}");
+            r.interval_minutes = Some(5);
+            r.enabled = false;
+            sup.save_routine(&r).unwrap();
+        }
+        let mut r51 = daily();
+        r51.id = "r-50".into();
+        assert!(sup.save_routine(&r51).is_err());
+
+        // Test trigger runs even when routine is disabled
+        let out = sup.trigger_routine_test("r-0").unwrap().unwrap();
+        assert_eq!(out.status, "queued");
+        assert!(sup.list_routine_runs("r-0", 20).unwrap().len() == 1);
+
+        assert!(sup.delete_routine("r-0").unwrap());
+        // Slot freed!
+        sup.save_routine(&r51).unwrap();
     }
 }

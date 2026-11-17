@@ -34,6 +34,8 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 hmac = { workspace = true }
 regex = { workspace = true }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
 libc = { workspace = true }
 
