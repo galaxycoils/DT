@@ -6,7 +6,7 @@ use std::path::Path;
 #[cfg(not(target_os = "macos"))]
 use std::{path::PathBuf, process::Command};
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub fn linux_unit(binary: &Path, daemon: bool) -> std::result::Result<String, String> {
     let binary = binary.to_str().ok_or("Service binary path is not UTF-8")?;
     if !Path::new(binary).is_absolute() || binary.chars().any(char::is_control) {
