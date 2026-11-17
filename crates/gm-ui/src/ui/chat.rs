@@ -120,6 +120,15 @@ pub fn draw_chat_canvas(
                     ui_state.sidebar_manual_override =
                         Some(!ui_state.sidebar_manual_override.unwrap_or(false));
                 }
+                if ui_state.active_chat_kind == "channel" && ui.small_button("Edit Group").clicked()
+                {
+                    ui_state.channel_draft = ui_state.server_snapshot["channels"]
+                        .as_array()
+                        .and_then(|a| a.iter().find(|c| c["id"].as_str() == Some(active_channel)))
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"id":active_channel}));
+                    ui_state.active_modal = Some(ActiveModal::EditChannel);
+                }
                 let (avatar_rect, avatar_resp) =
                     ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
                 let tex = textures
@@ -369,7 +378,12 @@ pub fn draw_chat_canvas(
                         .inner_margin(egui::Margin::symmetric(8, 4))
                         .show(ui, |ui| {
                             ui.horizontal_wrapped(|ui| {
-                                ui.small(RichText::new("Mention Bot:").color(palette.text_muted));
+                                ui.small(RichText::new("Mention:").color(palette.text_muted));
+                                let mut targets=vec!["everyone".to_string()];
+                                if let Some(items)=ui_state.server_snapshot["integrations"].as_array() {targets.extend(items.iter().filter_map(|x|x["id"].as_str()).map(|id|format!("app:{id}")));}
+                                if let Some(items)=ui_state.server_snapshot["routines"].as_array() {targets.extend(items.iter().filter_map(|x|x["routine"]["id"].as_str()).map(|id|format!("routine:{id}")));}
+                                for target in targets {if ui.small_button(format!("@{target}")).clicked() {*draft=draft.trim_end_matches('@').to_string()+"@"+&target+" ";ui_state.mention_popup_open=false;}}
+
                                 for b in bots {
                                     if let Some(bid) = b["id"].as_str()
                                         && ui.small_button(format!("@{bid}")).clicked()
@@ -395,6 +409,8 @@ pub fn draw_chat_canvas(
                     .inner_margin(egui::Margin::symmetric(8, 4))
                     .show(ui, |ui| {
                         ui.horizontal_wrapped(|ui| {
+                            let skills=ui_state.server_snapshot["skills"].as_array().cloned().unwrap_or_default();
+                            for skill in skills {if let Some(name)=skill["name"].as_str() && ui.small_button(format!("/{name}")).clicked() {*draft=format!("/{name} ");ui_state.slash_popup_open=false;}}
                             for (cmd, desc) in SLASH_COMMANDS {
                                 if ui.small_button(*cmd).on_hover_text(*desc).clicked() {
                                     *draft = (*cmd).to_string();
@@ -453,11 +469,7 @@ pub fn draw_chat_canvas(
                     .on_hover_text("Attach file from workspace (< 25 MB)")
                     .clicked()
                 {
-                    send(DaemonRequest::ListBotFiles {
-                        bot_id: active_bot.clone(),
-                    });
-                    ui_state.details_drawer_open = true;
-                    ui_state.details_tab = BotDetailsTab::Library;
+                    ui_state.active_modal = Some(ActiveModal::AttachFile);
                 }
                 if ui
                     .small_button("@ Mention")

@@ -351,6 +351,7 @@ fn check_auth(
 
 pub fn build_companion_router(state: CompanionWebState) -> Router {
     let spaces_port_atomic = state.supervisor.spaces_port_atomic();
+    let sync_supervisor = state.supervisor.clone();
     Router::new()
         .route("/", get(serve_index))
         .route("/companion.css", get(serve_css))
@@ -539,10 +540,15 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let sp_atomic = Arc::clone(&spaces_port_atomic);
+                let sync_supervisor = sync_supervisor.clone();
                 async move {
                     let req_path = request.uri().path().to_string();
+                    let is_mutation = request.method() != axum::http::Method::GET && req_path.starts_with("/api/");
                     let is_html_route = req_path == "/" || req_path == "/admin/audit";
                     let mut response = next.run(request).await;
+                    if is_mutation && response.status().is_success() {
+                        sync_supervisor.emit_agui("STATE_INVALIDATED", "ui", "", serde_json::json!({"path":req_path}));
+                    }
                     let csp = if is_html_route {
                         let spaces_port = sp_atomic.load(Ordering::SeqCst);
                         format!(
@@ -2516,11 +2522,35 @@ async fn preview_bot_file_route(
         .map_err(map_gm_error)?
         .preview_shared_file(&q.path)
         .map_err(map_gm_error)?;
-    let text = String::from_utf8_lossy(&bytes).to_string();
+    use base64::Engine as _;
+    let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else if bytes.get(4..8) == Some(b"ftyp") {
+        Some("video/mp4")
+    } else {
+        None
+    };
+    let text = if mime.is_none() {
+        String::from_utf8_lossy(&bytes).to_string()
+    } else {
+        String::new()
+    };
+    let data_url = mime.map(|mime| {
+        format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        )
+    });
     Ok(Json(serde_json::json!({
         "bot_id": id,
         "path": q.path,
         "text": text,
+        "mime": mime,
+        "data_url": data_url,
     })))
 }
 
@@ -2980,14 +3010,11 @@ async fn respond_approval_route(
         } else {
             crate::rules::RuleMode::AskFirst
         };
-        let _ = state.supervisor.rules().upsert_rule(
-            None,
-            mode,
-            pattern,
-            None,
-            "Saved from approval card",
-            true,
-        );
+        state
+            .supervisor
+            .rules()
+            .upsert_rule(None, mode, pattern, None, "Saved from approval card", true)
+            .map_err(map_gm_error)?;
     }
     let resolved = state.interactions.resolve_approval(&id, approved).await;
     update_web_dm_card_status(
@@ -2999,6 +3026,7 @@ async fn respond_approval_route(
     Ok(Json(serde_json::json!({
         "request_id": id,
         "approved": approved,
+        "rule_saved": remember_rule.is_some(),
         "resolved": resolved,
     })))
 }
@@ -4168,7 +4196,11 @@ async fn system_provider_key_route(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .trim();
-    let key_name = format!("gm_provider_key_{provider}");
+    let key_name = match provider.as_str() {
+        "meta" => gm_llm::META_KEY_ACCOUNT.to_string(),
+        "xai" => gm_llm::XAI_KEY_ACCOUNT.to_string(),
+        _ => format!("gm_provider_key_{provider}"),
+    };
     if api_key.is_empty() {
         let _ = state.supervisor.vault().backend().delete_secret(&key_name);
     } else {

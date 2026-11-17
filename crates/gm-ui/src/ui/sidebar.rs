@@ -22,6 +22,66 @@ pub fn draw_adaptive_sidebar(
     active_channel: &mut String,
     mut send: impl FnMut(DaemonRequest),
 ) {
+    if ctx.content_rect().width() < 900.0 {
+        if ui_state.sidebar_manual_override == Some(true) {
+            let mut open = true;
+            egui::Window::new("Bots & Groups")
+                .open(&mut open)
+                .fixed_pos(egui::pos2(48.0, 52.0))
+                .default_width(240.0)
+                .max_height(ctx.content_rect().height() - 100.0)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui.button("＋ Bot").clicked() {
+                            ui_state.active_modal = Some(ActiveModal::CreateBot);
+                        }
+                        if ui.button("＋ Group").clicked() {
+                            ui_state.active_modal = Some(ActiveModal::CreateChannel);
+                        }
+                    });
+                    ui.text_edit_singleline(&mut ui_state.sidebar_search);
+                    let needle = ui_state.sidebar_search.to_lowercase();
+                    for bot in bots.iter().filter(|b| matches_bot_filter(b, &needle)) {
+                        let id = bot["id"].as_str().unwrap_or_default();
+                        let unread = unread_counts[format!("dm:{id}")].as_u64().unwrap_or(0);
+                        let status = &ui_state.server_snapshot["bot_statuses"][&id];
+                        let phrase = status["status_phrase"].as_str().unwrap_or(role);
+                        let attention = status["needs_attention"].as_bool().unwrap_or(false);
+                        if ui
+                            .button(format!(
+                                "{} · {unread}",
+                                bot["display_name"].as_str().unwrap_or(id)
+                            ))
+                            .clicked()
+                        {
+                            *active_bot = id.into();
+                            ui_state.active_chat_kind = "dm".into();
+                            send(DaemonRequest::GetDirectChatHistory {
+                                bot_id: id.into(),
+                                before_seq: None,
+                                limit: Some(50),
+                            });
+                            ui_state.sidebar_manual_override = Some(false);
+                        }
+                    }
+                    for channel in channels {
+                        let id = channel["id"].as_str().unwrap_or_default();
+                        if ui.button(format!("# {id}")).clicked() {
+                            *active_channel = id.into();
+                            ui_state.active_chat_kind = "channel".into();
+                            send(DaemonRequest::ChannelHistory {
+                                channel_id: id.into(),
+                            });
+                            ui_state.sidebar_manual_override = Some(false);
+                        }
+                    }
+                });
+            if !open {
+                ui_state.sidebar_manual_override = Some(false);
+            }
+        }
+        return;
+    }
     let visible_bots: Vec<&Value> = bots
         .iter()
         .filter(|b| !b["hidden_from_sidebar"].as_bool().unwrap_or(false))
@@ -31,8 +91,14 @@ pub fn draw_adaptive_sidebar(
         .filter(|b| b["hidden_from_sidebar"].as_bool().unwrap_or(false))
         .collect();
 
-    let mode =
-        SidebarMode::from_visible_bot_count(visible_bots.len(), ui_state.sidebar_manual_override);
+    let mode = SidebarMode::from_visible_bot_count(
+        if !sections.is_empty() {
+            5.max(visible_bots.len() + channels.len())
+        } else {
+            visible_bots.len() + channels.len()
+        },
+        ui_state.sidebar_manual_override,
+    );
 
     if mode == SidebarMode::AutoCollapsed {
         return;
@@ -138,6 +204,9 @@ pub fn draw_adaptive_sidebar(
                     {
                         ui_state.sidebar_manual_override = Some(false);
                     }
+                    if ui.small_button("＋ Group").clicked() {
+                        ui_state.active_modal = Some(ActiveModal::CreateChannel);
+                    }
                     if ui
                         .small_button("＋ Bot")
                         .on_hover_text("Create a new specialist Bot")
@@ -155,6 +224,17 @@ pub fn draw_adaptive_sidebar(
             );
             ui.add_space(6.0);
 
+            let status = &ui_state.server_snapshot["status"];
+            ui.small(format!(
+                "${:.2} / ${:.2} · {}",
+                status["daily_spend_usd"].as_f64().unwrap_or(0.0),
+                status["daily_cap_usd"].as_f64().unwrap_or(0.0),
+                if status["paused"].as_bool().unwrap_or(false) {
+                    "Paused"
+                } else {
+                    "Daemon"
+                }
+            ));
             let needle = ui_state.sidebar_search.trim().to_ascii_lowercase();
 
             egui::ScrollArea::vertical()
@@ -443,11 +523,18 @@ fn draw_bot_row(
     ui.painter().text(
         egui::Pos2::new(row_rect.min.x + 36.0, row_rect.center().y + 7.0),
         egui::Align2::LEFT_CENTER,
-        role,
+        phrase,
         egui::FontId::proportional(10.5),
         palette.text_muted,
     );
 
+    if attention {
+        ui.painter().circle_filled(
+            egui::pos2(row_rect.max.x - 6.0, row_rect.min.y + 6.0),
+            4.0,
+            palette.status_warn,
+        );
+    }
     if unread > 0 {
         let badge_pos = egui::Pos2::new(row_rect.max.x - 14.0, row_rect.center().y);
         ui.painter().circle_filled(badge_pos, 8.0, palette.accent);

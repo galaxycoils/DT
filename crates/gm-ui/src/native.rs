@@ -91,6 +91,8 @@ async fn rpc(config: &GmConfig, request: DaemonRequest) -> Result<DaemonResponse
 enum PendingKind {
     Other,
     Bootstrap,
+    ToolResult(String),
+    RevealWebhook(String),
     ImportAttachment,
     ListBotFiles,
     PreviewBotFile,
@@ -127,6 +129,28 @@ enum PendingKind {
 fn pending_kind(request: &DaemonRequest) -> PendingKind {
     match request {
         DaemonRequest::GetBootstrapState => PendingKind::Bootstrap,
+        DaemonRequest::ListRoutineRuns { .. } => PendingKind::ToolResult("routine_runs".into()),
+        DaemonRequest::QueryAudit { .. } => PendingKind::ToolResult("audit".into()),
+        DaemonRequest::ExplainMemory { .. } => PendingKind::ToolResult("explain_memory".into()),
+        DaemonRequest::GetDiscretion { .. } => PendingKind::ToolResult("discretion".into()),
+        DaemonRequest::CheckUpdates => PendingKind::ToolResult("updates".into()),
+        DaemonRequest::StartTeachTask { .. } | DaemonRequest::StopTeachTask { .. } => {
+            PendingKind::ToolResult("teach".into())
+        }
+        DaemonRequest::ManageSpace { op, .. } if op == "read" => {
+            PendingKind::ToolResult("space_file".into())
+        }
+        DaemonRequest::ManageSystem { op, payload } if op == "get_routine_webhook_key" => {
+            PendingKind::RevealWebhook(payload["routine_id"].as_str().unwrap_or_default().into())
+        }
+        DaemonRequest::ManageSystem { op, .. }
+            if matches!(
+                op.as_str(),
+                "get_bot_avatar" | "install_update" | "support_bundle" | "health" | "feedback"
+            ) =>
+        {
+            PendingKind::ToolResult(op.clone())
+        }
         DaemonRequest::ImportAttachment { .. } => PendingKind::ImportAttachment,
         DaemonRequest::ListBotFiles { .. } => PendingKind::ListBotFiles,
         DaemonRequest::PreviewBotFile { .. } => PendingKind::PreviewBotFile,
@@ -245,6 +269,8 @@ struct ViewState {
     computer_frame_meta: Option<(u32, u32, u64)>,
     pending_computer_frame_jpeg: Option<(u32, u32, u64, String)>,
     revealed_secret: Option<(String, String)>,
+    pending_ui_snapshot: Option<Value>,
+    tool_results: serde_json::Map<String, Value>,
 }
 
 impl ViewState {
@@ -258,6 +284,7 @@ impl ViewState {
     }
 
     fn apply_bootstrap(&mut self, value: Value) {
+        self.pending_ui_snapshot = Some(value.clone());
         if let Some(arr) = value["bots"].as_array() {
             self.bots = arr.clone();
         }
@@ -730,10 +757,27 @@ impl eframe::App for NativeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let previous_section = self.ui_state.section;
         let previous_modal = self.ui_state.active_modal.clone();
         // 1. Handle global GrokBot hotkeys & 5-tier Escape stack
         let hotkey_outcome = handle_global_hotkeys(ctx, &mut self.ui_state);
 
+        if previous_section != self.ui_state.section {
+            match self.ui_state.section {
+                WorkspaceSection::Feed => self.send(DaemonRequest::ListActivity),
+                WorkspaceSection::Goals => self.send(DaemonRequest::ListGoals),
+                WorkspaceSection::Spaces => self.send(DaemonRequest::ListSpaces),
+                WorkspaceSection::Audit => {
+                    self.send(DaemonRequest::ListQueue { bot_id: None });
+                    self.send(DaemonRequest::QueryAudit {
+                        category: None,
+                        bot_id: None,
+                        limit: Some(100),
+                    });
+                }
+                WorkspaceSection::Bots => {}
+            }
+        }
         if hotkey_outcome.escape_dismissed {
             if !matches!(
                 self.ui_state.active_modal,
@@ -761,6 +805,14 @@ impl eframe::App for NativeApp {
             self.settings_config.ui = ui;
         }
 
+        if let Ok(mut state) = self.shared.state.lock() {
+            if let Some(snapshot) = state.pending_ui_snapshot.take() {
+                self.ui_state.server_snapshot = snapshot;
+            }
+            for (key, value) in std::mem::take(&mut state.tool_results) {
+                self.ui_state.responses[key] = value;
+            }
+        }
         let target = crate::ui::state::NavTarget {
             section: self.ui_state.section,
             chat_kind: self.ui_state.active_chat_kind.clone(),
@@ -803,7 +855,13 @@ impl eframe::App for NativeApp {
         if let Ok(mut state) = self.shared.state.lock()
             && let Some((id, mut secret)) = state.revealed_secret.take()
         {
-            if self.ui_state.active_modal == Some(crate::ui::state::ActiveModal::Settings) {
+            if matches!(
+                self.ui_state.active_modal,
+                Some(
+                    crate::ui::state::ActiveModal::Settings
+                        | crate::ui::state::ActiveModal::RoutineEditor
+                )
+            ) {
                 self.ui_state.revealed_secrets.insert(id, secret);
             } else {
                 use zeroize::Zeroize;
@@ -1439,6 +1497,18 @@ async fn background(
                         }
                         s.error = None;
                         match (kind, response) {
+                            (PendingKind::ToolResult(key), DaemonResponse::JsonPayload(value)) => {
+                                s.tool_results.insert(key, value);
+                            }
+                            (
+                                PendingKind::RevealWebhook(id),
+                                DaemonResponse::JsonPayload(value),
+                            ) => {
+                                if let Some(secret) = value["webhook_key"].as_str() {
+                                    s.revealed_secret =
+                                        Some((format!("webhook:{id}"), secret.into()));
+                                }
+                            }
                             (PendingKind::Bootstrap, DaemonResponse::JsonPayload(value)) => {
                                 s.apply_bootstrap(value);
                             }

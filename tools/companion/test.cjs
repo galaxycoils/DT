@@ -1,0 +1,23 @@
+const {test}=require('node:test');
+const assert=require('node:assert/strict');
+const {JSDOM}=require('jsdom');
+const fs=require('node:fs');
+const path=require('node:path');
+const base=path.resolve(__dirname,'../../crates/gm-openbot/src');
+const source=fs.readFileSync(path.join(base,'companion_ui.source.js'),'utf8');
+function setup(compiled=false){
+ const dom=new JSDOM(fs.readFileSync(path.join(base,'companion_ui.html'),'utf8'),{url:'http://127.0.0.1:7433',runScripts:'outside-only',pretendToBeVisual:true});
+ const w=dom.window,calls=[];
+ w.matchMedia=()=>({matches:true,addEventListener(){}});
+ w.TextEncoder=TextEncoder;w.TextDecoder=TextDecoder;
+ w.fetch=async(url,options={})=>{calls.push({url,options});return {ok:true,status:200,headers:{get:()=> 'application/json'},json:async()=>url.includes('bootstrap')?{bots:[{id:'muse',display_name:'Muse',is_primary:true,avatar_color:'#2f7cf6',notifications_enabled:true}],channels:[{id:'general',participants:['muse']}],ui:{theme:'dark'},status:{spaces_port:7434},routines:[],spaces:[],goals:[],feed:{posts:[],ideas:[]},custom_rules:[],vault_items:[]}:url.includes('/messages')?[]:{items:[],next_cursor:null}};};
+ if(compiled)w.eval(fs.readFileSync(path.join(base,'companion_ui.js'),'utf8'));
+ else w.eval(source.replace('renderChrome();navigate();login();','window.testAPI={state,navigate,renderChrome,renderSidebar,renderDetails,chatCard,arrowEdit,sendMessage,parseSseFrames,settings,connectApps,composerChanged};'));
+ return {w,calls,dom,api:w.testAPI};
+}
+test('shipped bundle initializes login and five workspace buttons',()=>{const {w,dom}=setup(true);assert.match(w.document.querySelector('#overlay').textContent,/Connect to Grok Muse/);assert.equal(w.document.querySelectorAll('#rail button[aria-label]').length,9);assert.equal(w.document.querySelector('#overlay input').type,'password');dom.window.close();});
+test('source composer preserves code and sends the channel content contract',async()=>{const {w,calls,api,dom}=setup();assert.deepEqual(JSON.parse(JSON.stringify(api.arrowEdit('`a -> b` then ->'))),{text:'`a -> b` then →',position:14});api.state._token='test';api.state._kind='channel';api.state._target='general';await api.sendMessage('hello');const call=calls.find(x=>x.options.method==='POST'&&x.url.includes('/messages'));assert.equal(JSON.parse(call.options.body).content,'hello');assert.equal(JSON.parse(call.options.body).text,undefined);dom.window.close();});
+test('secret fields clear on cancel and bot output stays literal',async()=>{const {w,api,dom}=setup();const card=api.chatCard({kind:'secret_prompt',fields:['password']},{id:'1'});w.document.querySelector('#workspace').append(card);const input=card.querySelector('input[type=password]');input.value='private';const cancel=[...card.querySelectorAll('button')].find(x=>x.textContent==='Cancel');cancel.click();assert.equal(input.value,'');const literal=api.chatCard({kind:'info',summary:'<img src=x onerror=alert(1)>'},{id:'2'});assert.equal(literal.querySelector('img'),null);await new Promise(resolve=>setImmediate(resolve));dom.window.close();});
+test('all fourteen card families render without throwing',()=>{const {api,dom}=setup();for(const kind of ['approval','terminal_approval','ask_first','wheel_handoff','secret_prompt','question','draft','space_preview','media_output','shopping','phone_call','subagent_spawn','connect_app','initiative']){const el=api.chatCard({kind,title:'Example',fields:['password'],options:['Yes'],instruction:'Do it'},{id:'1'});assert.ok(el.textContent.includes('Example'));}dom.window.close();});
+test('sidebar adapts across one, three and five chats and supports hiding',()=>{const {w,api,dom}=setup();w.innerWidth=1220;for(const [count,mode]of [[1,'collapsed'],[3,'compact'],[5,'']]){api.state._data={bots:Array.from({length:count},(_,i)=>({id:'bot'+i})),channels:[]};api.renderSidebar();assert.equal(w.document.querySelector('#sidebar').className,mode);}dom.window.close();});
+test('SSE parser handles every chunk split and multiline data',()=>{const {api,dom}=setup();const wire=': keepalive\r\n\r\nevent: MESSAGE_ADDED\r\ndata: {"message":\r\ndata: "é→"}\r\n\r\n';for(let split=0;split<=wire.length;split++){const events=[];const callback=(type,data)=>events.push({type,data});let buffer=api.parseSseFrames(wire.slice(0,split),callback);buffer=api.parseSseFrames(buffer+wire.slice(split),callback);assert.equal(buffer,'');assert.deepEqual(events,[{type:'MESSAGE_ADDED',data:'{"message":\n"é→"}'}]);}dom.window.close();});

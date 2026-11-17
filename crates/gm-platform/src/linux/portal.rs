@@ -371,10 +371,10 @@ fn pipewire_frame(
 ) -> Result<FrameCapture> {
     use pipewire::{self as pw, properties::properties, spa};
     use std::{cell::RefCell, rc::Rc};
-    let main = pw::main_loop::MainLoop::new(None).map_err(error)?;
-    let context = pw::context::Context::new(&main).map_err(error)?;
+    let main = pw::main_loop::MainLoopBox::new(None).map_err(error)?;
+    let context = pw::context::ContextBox::new(main.loop_(), None).map_err(error)?;
     let core = context.connect_fd(fd, None).map_err(error)?;
-    let stream = pw::stream::Stream::new(&core,"Grok Muse shared monitor",properties! { *pw::keys::MEDIA_TYPE=>"Video", *pw::keys::MEDIA_CATEGORY=>"Capture", *pw::keys::MEDIA_ROLE=>"Screen" }).map_err(error)?;
+    let stream = pw::stream::StreamBox::new(&core,"Grok Muse shared monitor",properties! { *pw::keys::MEDIA_TYPE=>"Video", *pw::keys::MEDIA_CATEGORY=>"Capture", *pw::keys::MEDIA_ROLE=>"Screen" }).map_err(error)?;
     type CapturedFrame = (u32, u32, Vec<u8>);
     struct State {
         format: spa::param::video::VideoInfoRaw,

@@ -48,6 +48,18 @@ pub fn draw_workspace_section_view(
                     ui.small(activity_notice);
                 }
             });
+            ui.collapsing("Brief Prompt & Manual Post",|ui| {
+                ui.text_edit_multiline(&mut ui_state.feed_prompt);
+                if ui.button("Save brief prompt").clicked(){send(DaemonRequest::ManageFeed {op:"prompt".into(),payload:serde_json::json!({"prompt":ui_state.feed_prompt})});}
+                ui.text_edit_singleline(&mut ui_state.feed_post_title);ui.text_edit_multiline(&mut ui_state.feed_post_body);
+                if ui.button("Post to Feed").clicked(){send(DaemonRequest::ManageFeed {op:"post".into(),payload:serde_json::json!({"title":ui_state.feed_post_title,"body":ui_state.feed_post_body})});}
+            });
+            ui.collapsing("Ideas",|ui| {
+                ui.text_edit_multiline(&mut ui_state.idea_prompt);
+                if ui.button("Create Idea").clicked(){send(DaemonRequest::ManageFeed {op:"create_idea".into(),payload:serde_json::json!({"title":ui_state.idea_prompt,"action_prompt":ui_state.idea_prompt})});}
+                let ideas=ui_state.server_snapshot["feed"]["ideas"].as_array().cloned().unwrap_or_default();
+                for idea in ideas{ui.horizontal_wrapped(|ui|{ui.label(idea["title"].as_str().unwrap_or("Idea"));for (label,op) in [("Run","run_idea"),("Dismiss","dismiss_idea")]{if ui.button(label).clicked(){send(DaemonRequest::ManageFeed {op:op.into(),payload:serde_json::json!({"id":idea["id"]})});}}});}
+            });
             if let Some(prompt) = brief_prompt
                 && !prompt.trim().is_empty()
             {
@@ -361,6 +373,21 @@ pub fn draw_workspace_section_view(
         }
 
         WorkspaceSection::Audit => {
+            ui.collapsing("Governance Audit", |ui| {
+                if ui.button("Refresh Audit").clicked() {
+                    send(DaemonRequest::QueryAudit {
+                        category: None,
+                        bot_id: None,
+                        limit: Some(100),
+                    });
+                }
+                if !ui_state.responses["audit"].is_null() {
+                    ui.monospace(
+                        serde_json::to_string_pretty(&ui_state.responses["audit"])
+                            .unwrap_or_default(),
+                    );
+                }
+            });
             ui.horizontal(|ui| {
                 ui.heading(
                     RichText::new("🛡 Durable Task Queue & Governance Audit")

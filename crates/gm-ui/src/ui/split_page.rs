@@ -198,8 +198,13 @@ pub fn draw_split_page_panel(
                     ui.small("Capability URL unavailable (verify Spaces server is enabled).");
                 }
 
+                ui.checkbox(&mut ui_state.publish_confirmed, "I confirm publishing this Space");
+                if ui.add_enabled(ui_state.publish_confirmed, egui::Button::new("Publish (Confirmed)")).clicked() { send(DaemonRequest::ManageSpace {op:"publish".into(),slug:slug.clone(),payload:serde_json::json!({"confirmed":true})}); ui_state.publish_confirmed=false; }
+                if ui.button("Unpublish").clicked() { send(DaemonRequest::ManageSpace {op:"unpublish".into(),slug:slug.clone(),payload:serde_json::json!({})}); }
                 ui.add_space(8.0);
                 if editing_html {
+                    if ui.button("Load current HTML").clicked() { send(DaemonRequest::ManageSpace {op:"read".into(),slug:slug.clone(),payload:serde_json::json!({"relative_path":"index.html"})}); }
+                    if let Some(value) = ui_state.responses.as_object_mut().and_then(|o|o.remove("space_file")) { *space_html_draft=value["content"].as_str().unwrap_or_default().to_string(); }
                     ui.label("Update Static HTML (`index.html`):");
                     ui.add(
                         egui::TextEdit::multiline(space_html_draft)
@@ -208,12 +213,7 @@ pub fn draw_split_page_panel(
                             .code_editor(),
                     );
                     if ui.button("Save Static Space HTML").clicked() {
-                        send(DaemonRequest::CreateSpace {
-                            slug: slug.clone(),
-                            title: Some(title.clone()),
-                            kind: Some("static".into()),
-                            html: Some(space_html_draft.clone()),
-                        });
+                        send(DaemonRequest::ManageSpace { op:"edit".into(), slug:slug.clone(), payload:serde_json::json!({"relative_path":"index.html","content":space_html_draft}) });
                     }
                 } else {
                     ui.group(|ui| {

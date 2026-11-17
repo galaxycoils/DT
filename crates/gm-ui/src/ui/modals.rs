@@ -164,16 +164,46 @@ pub fn draw_active_modal(
                         }),
                     ));
 
+                    actions.retain(|(label, _, _)| {
+                        q.is_empty() || label.to_ascii_lowercase().contains(&q)
+                    });
+                    let down = ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+                            || i.consume_key(egui::Modifiers::CTRL, egui::Key::N)
+                    });
+                    let up = ctx.input_mut(|i| {
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+                            || i.consume_key(egui::Modifiers::CTRL, egui::Key::P)
+                    });
+                    if down {
+                        ui_state.command_palette_selected = (ui_state.command_palette_selected + 1)
+                            .min(actions.len().saturating_sub(1));
+                    }
+                    if up {
+                        ui_state.command_palette_selected =
+                            ui_state.command_palette_selected.saturating_sub(1);
+                    }
+                    let enter =
+                        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
                     let mut triggered: Option<PaletteAction> = None;
                     egui::ScrollArea::vertical()
                         .max_height(320.0)
                         .show(ui, |ui| {
-                            for (label, cat, cb) in actions {
+                            for (action_index, (label, cat, cb)) in actions.into_iter().enumerate()
+                            {
                                 if !q.is_empty() && !label.to_ascii_lowercase().contains(&q) {
                                     continue;
                                 }
                                 ui.horizontal(|ui| {
-                                    if ui.button(&label).clicked() {
+                                    if ui
+                                        .selectable_label(
+                                            action_index == ui_state.command_palette_selected,
+                                            &label,
+                                        )
+                                        .clicked()
+                                        || (enter
+                                            && action_index == ui_state.command_palette_selected)
+                                    {
                                         triggered = Some(cb);
                                     }
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -182,6 +212,14 @@ pub fn draw_active_modal(
                                 });
                             }
                         });
+                    if ui.button("Search older history").clicked() {
+                        send(DaemonRequest::SearchMessages {
+                            query: ui_state.command_palette_query.clone(),
+                            include_older: true,
+                            bot_id: None,
+                        });
+                        ui_state.search_bar_open = true;
+                    }
                     if let Some(cb) = triggered {
                         ui_state.active_modal = None;
                         cb(ui_state, active_bot, &mut send);
@@ -306,6 +344,20 @@ pub fn draw_active_modal(
                                     send(DaemonRequest::SaveUiSettings { ui: serde_json::json!({"hardware_acceleration": settings_config.ui.hardware_acceleration}) });
                                     *settings_notice = "Restart required to apply graphics backend change".into();
                                 }
+                                ui.strong("Notifications & Locale");
+                                ui.checkbox(&mut settings_config.ui.notifications_enabled,"Desktop alerts");
+                                ui.checkbox(&mut settings_config.ui.notification_sound,"Alert sound");
+                                ui.checkbox(&mut settings_config.ui.suppress_notifications_when_active,"Suppress when active");
+                                ui.checkbox(&mut settings_config.ui.spellcheck,"Spellcheck");
+                                ui.label("Language");ui.text_edit_singleline(&mut settings_config.ui.language);
+                                ui.label("IANA Timezone");ui.text_edit_singleline(&mut settings_config.ui.timezone);
+                                let mut quiet_start=settings_config.ui.quiet_hours_start.clone().unwrap_or_default();
+                                let mut quiet_end=settings_config.ui.quiet_hours_end.clone().unwrap_or_default();
+                                ui.label("Quiet hours start/end (HH:MM, empty disables)");
+                                ui.text_edit_singleline(&mut quiet_start);ui.text_edit_singleline(&mut quiet_end);
+                                settings_config.ui.quiet_hours_start=if quiet_start.is_empty(){None}else{Some(quiet_start)};
+                                settings_config.ui.quiet_hours_end=if quiet_end.is_empty(){None}else{Some(quiet_end)};
+                                if ui.button("Save Notification & Locale Preferences").clicked(){send(DaemonRequest::SaveUiSettings {ui:serde_json::to_value(&settings_config.ui).unwrap_or_default()});}
                                 ui.strong("Runtime Preferences");
                                 let mut ui_dirty = false;
                                 ui_dirty |= ui
@@ -638,14 +690,37 @@ pub fn draw_active_modal(
                                     }
                                 });
                                 let daily = usage_data["daily_spent_usd"].as_f64().unwrap_or(0.0);
-                                let total = usage_data["window_total_usd"].as_f64().unwrap_or(0.0);
+                                let total = usage_data["weekly_spent_usd"].as_f64().unwrap_or(0.0);
                                 ui.label(format!(
-                                    "Today: ${daily:.4} · Window Total: ${total:.4}"
+                                    "Today: ${daily:.4} · Weekly Total: ${total:.4}"
                                 ));
+                                for key in ["by_bot","by_source"]{ui.collapsing(key,|ui|{ui.monospace(serde_json::to_string_pretty(&usage_data[key]).unwrap_or_default());});}
+                                ui.label("Provider bases & models");
+                                ui.text_edit_singleline(&mut settings_config.providers.meta_api_base);
+                                ui.text_edit_singleline(&mut settings_config.providers.meta_reasoning_model);
+                                ui.text_edit_singleline(&mut settings_config.providers.xai_api_base);
+                                ui.text_edit_singleline(&mut settings_config.providers.xai_model);
+                                ui.checkbox(&mut settings_config.providers.allow_screenshot_egress_meta,"Allow Meta screenshot egress");
+                                ui.checkbox(&mut settings_config.providers.allow_screenshot_egress_xai,"Allow xAI screenshot egress");
+                                if ui.button("Save Providers & Budget").clicked(){send(DaemonRequest::SaveUiSettings {ui:serde_json::json!({"providers":settings_config.providers,"budget":settings_config.budget})});}
+
                             }
 
                             SettingsPane::SystemAndUpdates => {
                                 ui.strong("Configuration & System");
+                                ui.label(format!("Version {}",env!("CARGO_PKG_VERSION")));
+                                if ui.button("Check for Updates").clicked(){send(DaemonRequest::CheckUpdates);}
+                                let update=ui_state.responses["updates"].clone();
+                                if !update.is_null(){ui.monospace(serde_json::to_string_pretty(&update).unwrap_or_default());if let Some(url)=update["release_url"].as_str(){ui.hyperlink_to("Install verified release",url);}}
+                                ui.checkbox(&mut settings_config.ui.auto_updates,"Automatic updates when idle");
+                                if ui.button("Save Update Preference").clicked(){send(DaemonRequest::SaveUiSettings {ui:serde_json::json!({"auto_updates":settings_config.ui.auto_updates})});}
+                                if ui.button("Helper Health").clicked(){send(DaemonRequest::ManageSystem {op:"health".into(),payload:Value::Null});}
+                                if ui.button("Export Support Bundle").clicked(){send(DaemonRequest::ManageSystem {op:"support_bundle".into(),payload:Value::Null});}
+                                ui.text_edit_multiline(&mut ui_state.feedback_note);
+                                ui.checkbox(&mut ui_state.diagnostics_consent,"Include redacted diagnostics");
+                                if ui.button("Send Feedback").clicked(){send(DaemonRequest::ManageSystem {op:"feedback".into(),payload:serde_json::json!({"note":ui_state.feedback_note,"include_diagnostics":ui_state.diagnostics_consent})});}
+                                for key in ["health","support_bundle","feedback"]{if !ui_state.responses[key].is_null(){ui.monospace(serde_json::to_string_pretty(&ui_state.responses[key]).unwrap_or_default());}}
+
                                 if ui.button("Save Config File").clicked() {
                                     save_config_disk();
                                 }
@@ -1143,6 +1218,17 @@ pub fn draw_active_modal(
                 });
         }
 
+        ActiveModal::EditChannel => {
+            egui::Window::new("Edit Group Chat").open(&mut keep_open).show(ctx,|ui| {
+                let draft=&mut ui_state.channel_draft;
+                for (key,label) in [("topic","Topic"),("instructions","Instructions")] {
+                    ui.label(label);let mut value=draft[key].as_str().unwrap_or_default().to_string();if ui.text_edit_multiline(&mut value).changed(){draft[key]=value.into();}
+                }
+                for (key,label) in [("paused","Paused"),("archived","Archived")] {let mut flag=draft[key].as_bool().unwrap_or(false);if ui.checkbox(&mut flag,label).changed(){draft[key]=flag.into();}}
+                ui.small(format!("Participants: {}",draft["participants"]));
+                if ui.button("Save Group").clicked(){send(DaemonRequest::ManageSystem {op:"update_channel".into(),payload:serde_json::json!({"channel_id":draft["id"],"topic":draft["topic"],"instructions":draft["instructions"],"paused":draft["paused"],"archived":draft["archived"]})});close_requested=true;}
+            });
+        }
         ActiveModal::CreateChannel => {
             egui::Window::new("# Create Group Channel")
                 .open(&mut keep_open)
@@ -1170,6 +1256,21 @@ pub fn draw_active_modal(
                 });
         }
 
+        ActiveModal::AttachFile => {
+            egui::Window::new("Attach Local File")
+                .open(&mut keep_open)
+                .show(ctx, |ui| {
+                    ui.label("Local file path (≤25 MB)");
+                    ui.text_edit_singleline(&mut ui_state.attachment_path);
+                    if ui.button("Import Attachment").clicked() {
+                        send(DaemonRequest::ImportAttachment {
+                            bot_id: active_bot.clone(),
+                            source_path: std::path::PathBuf::from(ui_state.attachment_path.trim()),
+                        });
+                        close_requested = true;
+                    }
+                });
+        }
         ActiveModal::RoutineEditor => {
             egui::Window::new("Routine Editor")
                 .open(&mut keep_open)
@@ -1226,6 +1327,40 @@ pub fn draw_active_modal(
                     let mut enabled = draft["enabled"].as_bool().unwrap_or(true);
                     if ui.checkbox(&mut enabled, "Enabled").changed() {
                         draft["enabled"] = enabled.into();
+                    }
+                    let mut interval = draft["interval_minutes"].as_u64().unwrap_or(0);
+                    ui.horizontal(|ui| {
+                        ui.label("Interval minutes (0 = daily; otherwise ≥5)");
+                        if ui
+                            .add(egui::DragValue::new(&mut interval).range(0..=10080))
+                            .changed()
+                        {
+                            draft["interval_minutes"] = if interval == 0 {
+                                Value::Null
+                            } else {
+                                interval.into()
+                            };
+                        }
+                    });
+                    let id = draft["id"].as_str().unwrap_or_default().to_string();
+                    let port = ui_state.server_snapshot["status"]["companion_port"]
+                        .as_u64()
+                        .unwrap_or(7433);
+                    let hook = format!("http://127.0.0.1:{port}/api/routines/{id}/trigger");
+                    ui.label("POST Webhook URL (x-webhook-key)");
+                    if ui.button("Copy Webhook URL").clicked() {
+                        ctx.copy_text(hook);
+                    }
+                    if ui.button("Load Webhook Key").clicked() {
+                        send(DaemonRequest::ManageSystem {
+                            op: "get_routine_webhook_key".into(),
+                            payload: serde_json::json!({"routine_id":id}),
+                        });
+                    }
+                    if let Some(secret) = ui_state.revealed_secrets.get(&format!("webhook:{id}"))
+                        && ui.button("Copy x-webhook-key").clicked()
+                    {
+                        ctx.copy_text(secret.clone());
                     }
                     let valid = ["name", "bot_id", "instruction", "timezone"]
                         .iter()

@@ -140,6 +140,7 @@ pub enum BotDetailsTab {
     #[default]
     Settings,
     Computer,
+    Routines,
     Memory,
     Library,
 }
@@ -147,15 +148,16 @@ pub enum BotDetailsTab {
 impl BotDetailsTab {
     pub const ALL: [BotDetailsTab; 4] = [
         BotDetailsTab::Settings,
-        BotDetailsTab::Computer,
+        BotDetailsTab::Routines,
         BotDetailsTab::Memory,
         BotDetailsTab::Library,
     ];
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Settings => "Settings",
+            Self::Settings => "Overview",
             Self::Computer => "Computer",
+            Self::Routines => "Routines",
             Self::Memory => "Memory",
             Self::Library => "Library",
         }
@@ -203,7 +205,9 @@ pub enum ActiveModal {
     ConnectApps,
     CreateBot,
     CreateChannel,
+    EditChannel,
     RoutineEditor,
+    AttachFile,
     AvatarPicker {
         bot_id: String,
     },
@@ -276,6 +280,16 @@ impl InlineCardUiState {
 /// Complete GrokBot UI state held on `NativeApp`.
 pub struct GrokUiState {
     pub section: WorkspaceSection,
+    pub server_snapshot: Value,
+    pub responses: Value,
+    pub explain_query: String,
+    pub discretion_chat: String,
+    pub discretion_text: String,
+    pub discretion_sha: Option<String>,
+    pub discretion_loosens: bool,
+    pub forget_confirmed: bool,
+    pub forget_verify: String,
+    pub publish_confirmed: bool,
     pub nav_history: NavHistory,
     pub nav_request: i8,
     pub sidebar_manual_override: Option<bool>,
@@ -323,6 +337,13 @@ pub struct GrokUiState {
     pub custom_skill_body: String,
     pub new_section_name: String,
     pub routine_draft: Value,
+    pub channel_draft: Value,
+    pub feed_post_title: String,
+    pub feed_post_body: String,
+    pub feed_prompt: String,
+    pub idea_prompt: String,
+    pub feedback_note: String,
+    pub diagnostics_consent: bool,
     pub bot_profile_draft: Option<(String, Value)>,
 
     // Settings modal drafts
@@ -370,6 +391,7 @@ pub struct GrokUiState {
     pub avatar_shape_draft: String,
     pub avatar_color_draft: String,
     pub avatar_upload_path: String,
+    pub attachment_path: String,
 
     // Applied style fingerprint so `ctx.set_style` only runs on actual changes
     pub applied_style_key: String,
@@ -381,6 +403,16 @@ impl Default for GrokUiState {
     fn default() -> Self {
         Self {
             section: WorkspaceSection::Bots,
+            server_snapshot: Value::Null,
+            responses: serde_json::json!({}),
+            explain_query: String::new(),
+            discretion_chat: String::new(),
+            discretion_text: String::new(),
+            discretion_sha: None,
+            discretion_loosens: false,
+            forget_confirmed: false,
+            forget_verify: String::new(),
+            publish_confirmed: false,
             nav_history: NavHistory::default(),
             nav_request: 0,
             sidebar_manual_override: None,
@@ -419,6 +451,13 @@ impl Default for GrokUiState {
             custom_skill_body: String::new(),
             new_section_name: String::new(),
             routine_draft: Value::Null,
+            channel_draft: Value::Null,
+            feed_post_title: String::new(),
+            feed_post_body: String::new(),
+            feed_prompt: String::new(),
+            idea_prompt: String::new(),
+            feedback_note: String::new(),
+            diagnostics_consent: false,
             bot_profile_draft: None,
             theme_pref: "dark".into(),
             accent_mode: "bot_color".into(),
@@ -456,6 +495,7 @@ impl Default for GrokUiState {
             avatar_shape_draft: "Circle".into(),
             avatar_color_draft: "#2F7CF6".into(),
             avatar_upload_path: String::new(),
+            attachment_path: String::new(),
             applied_style_key: String::new(),
             cards: InlineCardUiState::default(),
         }

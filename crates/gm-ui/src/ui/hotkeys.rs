@@ -47,6 +47,9 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
         ui_state.nav_request = 1;
     }
 
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::A)) {
+        ui_state.active_modal = Some(ActiveModal::AttachFile);
+    }
     // Cmd/Ctrl + K -> Command Palette
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         ui_state.active_modal = if ui_state.active_modal == Some(ActiveModal::CommandPalette) {
@@ -121,9 +124,13 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
     ];
     for (idx, key) in digit_keys.into_iter().enumerate() {
         if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, key)) {
-            ui_state.section = WorkspaceSection::Bots;
-            ui_state.active_chat_kind = "dm".into();
-            outcome.switch_to_bot_index = Some(idx);
+            if idx < 5 {
+                ui_state.section = WorkspaceSection::ALL[idx];
+            } else {
+                ui_state.section = WorkspaceSection::Bots;
+                ui_state.active_chat_kind = "dm".into();
+                outcome.switch_to_bot_index = Some(idx);
+            }
             break;
         }
     }

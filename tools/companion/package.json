@@ -1,0 +1,1 @@
+{"private":true,"scripts":{"build":"./build.sh","test":"node --test test.cjs"},"devDependencies":{"jsdom":"26.1.0","terser":"5.44.1"}}

@@ -101,7 +101,8 @@ pub fn draw_bot_details_drawer(
                             textures.evict_prefix("live_computer:");
                         }
                         match tab {
-                            BotDetailsTab::Computer => {
+                            BotDetailsTab::Routines => {send(DaemonRequest::ListRoutines);}
+                    BotDetailsTab::Computer => {
                                 send(DaemonRequest::CaptureComputerPreview {
                                     max_long_edge: Some(1280),
                                     quality: Some(75),
@@ -207,6 +208,34 @@ pub fn draw_bot_details_drawer(
                                 ui_state.open_avatar_picker(active_bot, bot);
                             }
                         }
+                    }
+
+                            BotDetailsTab::Routines => {
+                        if ui.button("＋ New Routine").clicked() {
+                            ui_state.routine_draft = serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "name":"New Routine", "bot_id":active_bot, "instruction":"", "timezone":"UTC", "hour":9, "minute":0, "weekdays":[], "enabled":true});
+                            ui_state.active_modal = Some(ActiveModal::RoutineEditor);
+                        }
+                        let routines = ui_state.server_snapshot["routines"].as_array().cloned().unwrap_or_default();
+                        for entry in routines {
+                            let mut routine = entry.get("routine").unwrap_or(&entry).clone();
+                            if routine["bot_id"].as_str() != Some(active_bot) { continue; }
+                            let id = routine["id"].as_str().unwrap_or_default().to_string();
+                            ui.group(|ui| {
+                                let mut enabled = routine["enabled"].as_bool().unwrap_or(false);
+                                if ui.checkbox(&mut enabled, routine["name"].as_str().unwrap_or("Routine")).changed() {
+                                    routine["enabled"] = enabled.into();
+                                    send(DaemonRequest::SaveRoutine { routine: routine.clone() });
+                                }
+                                ui.small(format!("Next: {}", entry["next_run_utc"].as_str().unwrap_or("manual")));
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.small_button("Test ▶").clicked() { send(DaemonRequest::TriggerRoutineTest { routine_id:id.clone() }); }
+                                    if ui.small_button("Edit / Webhook").clicked() { ui_state.routine_draft=routine.clone(); ui_state.active_modal=Some(ActiveModal::RoutineEditor); }
+                                    if ui.small_button("Last 20 runs").clicked() { send(DaemonRequest::ListRoutineRuns { routine_id:id.clone(), limit:Some(20) }); }
+                                    if ui.small_button("Delete").clicked() { send(DaemonRequest::DeleteRoutine { routine_id:id.clone() }); }
+                                });
+                            });
+                        }
+                        if !ui_state.responses["routine_runs"].is_null() { ui.monospace(serde_json::to_string_pretty(&ui_state.responses["routine_runs"]).unwrap_or_default()); }
                     }
 
                     BotDetailsTab::Computer => {
@@ -370,6 +399,22 @@ pub fn draw_bot_details_drawer(
                             });
                         });
 
+                        ui.collapsing("Explain Memory", |ui| {
+                            ui.text_edit_singleline(&mut ui_state.explain_query);
+                            if ui.button("Explain provenance").clicked() { send(DaemonRequest::ExplainMemory {target:ui_state.explain_query.clone()}); }
+                            ui.monospace(serde_json::to_string_pretty(&ui_state.responses["explain_memory"]).unwrap_or_default());
+                        });
+                        ui.collapsing("Side-Chat Discretion", |ui| {
+                            ui.label("Chat ID"); ui.text_edit_singleline(&mut ui_state.discretion_chat);
+                            if ui.button("Load policy").clicked() { send(DaemonRequest::GetDiscretion {chat_id:ui_state.discretion_chat.clone()}); }
+                            if let Some(policy) = ui_state.responses.as_object_mut().and_then(|o|o.remove("discretion")) {
+                                ui_state.discretion_sha=policy["sha256"].as_str().map(str::to_string);
+                                ui_state.discretion_text=policy["user_rules"].as_array().map(|a|a.iter().filter_map(|x|x.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
+                            }
+                            ui.text_edit_multiline(&mut ui_state.discretion_text);
+                            ui.checkbox(&mut ui_state.discretion_loosens,"Loosens existing restrictions");
+                            if ui.button("Save discretion").clicked() { send(DaemonRequest::UpdateDiscretion {chat_id:ui_state.discretion_chat.clone(),rules:ui_state.discretion_text.lines().map(str::to_string).collect(),expected_sha256:ui_state.discretion_sha.clone()}); }
+                        });
                         ui.collapsing("Two-Phase Forget", |ui| {
                             ui.add(
                                 egui::TextEdit::singleline(forget_request)
@@ -391,16 +436,16 @@ pub fn draw_bot_details_drawer(
                                     "Plan {plan_id} ready ({})",
                                     plan["summary_counts"]
                                 ));
+                                ui.checkbox(&mut ui_state.forget_confirmed, "I confirm permanent erasure");
+                                ui.text_edit_singleline(&mut ui_state.forget_verify);
                                 if ui
-                                    .small_button(
-                                        RichText::new("Confirm Erase").color(palette.status_danger),
-                                    )
+                                    .add_enabled(ui_state.forget_confirmed, egui::Button::new(RichText::new("Confirm Erase").color(palette.status_danger)))
                                     .clicked()
                                 {
                                     send(DaemonRequest::ForgetConfirm {
                                         bot_id: Some(active_bot.to_string()),
                                         plan_id: plan_id.to_string(),
-                                        verification_query: None,
+                                        verification_query: Some(ui_state.forget_verify.clone()),
                                         confirmed: true,
                                     });
                                 }

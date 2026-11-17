@@ -130,25 +130,21 @@ impl GrokPalette {
 
         if dark_mode {
             let accent = if monochrome {
-                Color32::from_rgb(0xF0, 0xF4, 0xF8)
+                Color32::from_rgb(0x27, 0x2B, 0x36)
             } else {
                 bot_color
             };
-            let accent_text = if monochrome {
-                Color32::from_rgb(0x0B, 0x0D, 0x10)
-            } else {
-                Color32::WHITE
-            };
+            let accent_text = Color32::WHITE;
             Self {
                 dark_mode: true,
-                bg_canvas: Color32::from_rgb(0x0B, 0x0D, 0x10),
-                bg_sidebar: Color32::from_rgb(0x11, 0x15, 0x1B),
-                bg_elevated: Color32::from_rgb(0x16, 0x1B, 0x22),
-                bg_hover: Color32::from_rgb(0x1C, 0x23, 0x2D),
-                border_subtle: Color32::from_rgb(0x23, 0x2A, 0x35),
-                text_primary: Color32::from_rgb(0xF0, 0xF4, 0xF8),
-                text_secondary: Color32::from_rgb(0x9B, 0xA3, 0xB0),
-                text_muted: Color32::from_rgb(0x64, 0x6E, 0x7D),
+                bg_canvas: Color32::from_rgb(0x0B, 0x0C, 0x0E),
+                bg_sidebar: Color32::from_rgb(0x10, 0x12, 0x15),
+                bg_elevated: Color32::from_rgb(0x1E, 0x22, 0x28),
+                bg_hover: Color32::from_rgb(0x16, 0x19, 0x1D),
+                border_subtle: Color32::from_rgb(0x24, 0x29, 0x32),
+                text_primary: Color32::from_rgb(0xF3, 0xF4, 0xF6),
+                text_secondary: Color32::from_rgb(0x9C, 0xA3, 0xAF),
+                text_muted: Color32::from_rgb(0x6B, 0x72, 0x80),
                 accent,
                 accent_text,
                 status_ok: Color32::from_rgb(0x22, 0xC5, 0x5E),
@@ -157,20 +153,20 @@ impl GrokPalette {
             }
         } else {
             let accent = if monochrome {
-                Color32::from_rgb(0x0F, 0x17, 0x2A)
+                Color32::from_rgb(0x1C, 0x1F, 0x26)
             } else {
                 bot_color
             };
             Self {
                 dark_mode: false,
-                bg_canvas: Color32::from_rgb(0xF8, 0xFA, 0xFC),
-                bg_sidebar: Color32::from_rgb(0xF1, 0xF5, 0xF9),
+                bg_canvas: Color32::from_rgb(0xFF, 0xFF, 0xFF),
+                bg_sidebar: Color32::from_rgb(0xF8, 0xF9, 0xFB),
                 bg_elevated: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-                bg_hover: Color32::from_rgb(0xE2, 0xE8, 0xF0),
-                border_subtle: Color32::from_rgb(0xE2, 0xE8, 0xF0),
-                text_primary: Color32::from_rgb(0x0F, 0x17, 0x2A),
-                text_secondary: Color32::from_rgb(0x47, 0x55, 0x69),
-                text_muted: Color32::from_rgb(0x94, 0xA3, 0xB8),
+                bg_hover: Color32::from_rgb(0xE5, 0xE7, 0xEB),
+                border_subtle: Color32::from_rgb(0xE5, 0xE7, 0xEB),
+                text_primary: Color32::from_rgb(0x11, 0x18, 0x27),
+                text_secondary: Color32::from_rgb(0x4B, 0x55, 0x63),
+                text_muted: Color32::from_rgb(0x9C, 0xA3, 0xAF),
                 accent,
                 accent_text: Color32::WHITE,
                 status_ok: Color32::from_rgb(0x16, 0xA3, 0x4A),
