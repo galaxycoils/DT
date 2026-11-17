@@ -167,6 +167,140 @@ fn collect_private_details(paths: &MuseRuntimePaths) -> Vec<String> {
     fragments.into_iter().collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleIntent {
+    Allow,
+    Deny,
+    Neutral,
+}
+
+fn normalize_rule_text(rule: &str) -> String {
+    rule.trim()
+        .replace(['\u{2018}', '\u{2019}'], "'")
+        .to_lowercase()
+}
+
+fn contains_negation_marker(rule_lower: &str) -> bool {
+    const NEGATIONS: &[&str] = &[
+        "never",
+        "do not",
+        "don't",
+        "dont",
+        "must not",
+        "mustn't",
+        "cannot",
+        "can't",
+        "cant",
+        "no sharing",
+        "no auto-reply",
+        "no auto reply",
+        "forbid",
+        "prohibit",
+        "block",
+        "refuse",
+        "deny",
+        "without ",
+        "except ",
+        "unless ",
+        "ask before",
+        "ask me before",
+        "require approval",
+        "require confirmation",
+    ];
+    NEGATIONS.iter().any(|marker| rule_lower.contains(marker))
+}
+
+fn contains_affirmative_disclosure_marker(rule_lower: &str) -> bool {
+    const AFFIRMATIVES: &[&str] = &[
+        "allow",
+        "may share",
+        "can share",
+        "ok to share",
+        "okay to share",
+        "permitted to share",
+        "permission to share",
+        "authorize sharing",
+        "authorise sharing",
+        "approved to share",
+        "always share",
+        "feel free to share",
+        "you may disclose",
+        "can disclose",
+    ];
+    AFFIRMATIVES
+        .iter()
+        .any(|marker| rule_lower.contains(marker))
+        || rule_lower.starts_with("share ")
+        || rule_lower.starts_with("disclose ")
+}
+
+fn classify_disclosure_rule(rule_lower: &str) -> RuleIntent {
+    // Deny always wins within a single rule if any negation/prohibition marker is present.
+    if contains_negation_marker(rule_lower) {
+        RuleIntent::Deny
+    } else if contains_affirmative_disclosure_marker(rule_lower) {
+        RuleIntent::Allow
+    } else {
+        RuleIntent::Neutral
+    }
+}
+
+fn is_generic_share_prohibition(rule_lower: &str) -> bool {
+    classify_disclosure_rule(rule_lower) == RuleIntent::Deny
+        && [
+            "never share",
+            "do not share",
+            "don't share",
+            "dont share",
+            "no sharing",
+            "forbid sharing",
+            "prohibit sharing",
+            "never disclose",
+            "do not disclose",
+            "don't disclose",
+        ]
+        .iter()
+        .any(|p| rule_lower.contains(p))
+        && [
+            "anything",
+            "any private",
+            "private details",
+            "personal details",
+            "all private",
+        ]
+        .iter()
+        .any(|scope| rule_lower.contains(scope))
+}
+
+fn classify_auto_reply_rule(rule_lower: &str) -> RuleIntent {
+    let mentions_reply = [
+        "auto-reply",
+        "auto reply",
+        "always reply",
+        "respond automatically",
+        "automatic reply",
+        "reply automatically",
+    ]
+    .iter()
+    .any(|m| rule_lower.contains(m));
+
+    if contains_negation_marker(rule_lower)
+        && (mentions_reply
+            || rule_lower.contains("never reply")
+            || rule_lower.contains("do not reply")
+            || rule_lower.contains("don't reply")
+            || rule_lower.contains("never respond")
+            || rule_lower.contains("do not respond")
+            || rule_lower.contains("don't respond"))
+    {
+        RuleIntent::Deny
+    } else if mentions_reply {
+        RuleIntent::Allow
+    } else {
+        RuleIntent::Neutral
+    }
+}
+
 impl DiscretionStore {
     pub fn new(paths: MuseRuntimePaths) -> Self {
         Self { paths }
@@ -317,11 +451,43 @@ impl DiscretionStore {
         }
 
         let lower_out = outbound_text.to_lowercase();
-        let rules_joined = policy.user_rules.join("\n").to_lowercase();
+        let normalized_rules: Vec<String> = policy
+            .user_rules
+            .iter()
+            .map(|r| normalize_rule_text(r))
+            .collect();
+
         for detail in collect_private_details(&self.paths) {
             if lower_out.contains(&detail) {
-                let explicitly_allowed = rules_joined.contains(&detail)
-                    || (rules_joined.contains("allow share") && approved_irreversible);
+                let mut has_deny = false;
+                let mut has_specific_allow = false;
+                let mut has_generic_allow_share = false;
+
+                for rule_lower in &normalized_rules {
+                    match classify_disclosure_rule(rule_lower) {
+                        RuleIntent::Deny => {
+                            if rule_lower.contains(&detail)
+                                || is_generic_share_prohibition(rule_lower)
+                            {
+                                has_deny = true;
+                            }
+                        }
+                        RuleIntent::Allow => {
+                            if rule_lower.contains(&detail) {
+                                has_specific_allow = true;
+                            }
+                            if rule_lower.contains("allow share") {
+                                has_generic_allow_share = true;
+                            }
+                        }
+                        RuleIntent::Neutral => {}
+                    }
+                }
+
+                // Precedence: Deny rules ALWAYS win ties, including when generic
+                // `allow share` + `approved_irreversible` is present.
+                let explicitly_allowed = !has_deny
+                    && (has_specific_allow || (has_generic_allow_share && approved_irreversible));
                 if !explicitly_allowed {
                     return Ok(DiscretionEvaluation {
                         allowed: false,
@@ -335,11 +501,25 @@ impl DiscretionStore {
             }
         }
 
-        let matches_user_rule = !policy.user_rules.is_empty()
-            && policy.user_rules.iter().any(|r| {
-                let lr = r.to_lowercase();
-                lr.contains("auto-reply") || lr.contains("always reply")
+        let has_reply_deny = normalized_rules
+            .iter()
+            .any(|r| classify_auto_reply_rule(r) == RuleIntent::Deny);
+        let has_reply_allow = normalized_rules
+            .iter()
+            .any(|r| classify_auto_reply_rule(r) == RuleIntent::Allow);
+        // Deny wins ties for auto-reply as well.
+        let matches_user_rule = !has_reply_deny && has_reply_allow;
+
+        if !requested_reply && has_reply_deny {
+            return Ok(DiscretionEvaluation {
+                allowed: false,
+                required_tier: ActionTier::Irreversible,
+                blocked_reason: Some(
+                    "RULE-PRIVACY-DISCRETION: Refused unrequested reply forbidden by user discretion rule".into(),
+                ),
+                rule_citation: Some("RULE-PRIVACY-DISCRETION".into()),
             });
+        }
 
         if !requested_reply && !matches_user_rule {
             if !approved_irreversible {
@@ -447,5 +627,140 @@ mod tests {
             .evaluate_outbound("slack-C123", "Hello! Build #42 passed.", true, false)
             .unwrap();
         assert!(safe.allowed);
+    }
+
+    #[test]
+    fn never_share_rule_containing_the_detail_blocks_the_leak() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = MuseRuntimePaths::shared(dir.path());
+        SharedFileStore::global()
+            .write_exact_sync(
+                paths.user_md(),
+                None,
+                "# USER.md\n- Address: 742 Evergreen Terrace, Springfield\n",
+            )
+            .unwrap();
+
+        let store = DiscretionStore::new(paths);
+        // 1. "Never share X" containing X must block
+        store
+            .update_user_rules(
+                "slack-neg",
+                &["Never share 742 Evergreen Terrace, Springfield".into()],
+                None,
+            )
+            .unwrap();
+        let eval = store
+            .evaluate_outbound(
+                "slack-neg",
+                "The address is 742 Evergreen Terrace, Springfield.",
+                true,
+                false,
+            )
+            .unwrap();
+        assert!(!eval.allowed, "Never share rule must block leak");
+
+        // 2. "Do not share X", "Don't share X", uppercase "NEVER SHARE X", and ambiguous/neutral rules must all block
+        for (chat, rule) in [
+            (
+                "slack-donot",
+                "Do not share 742 Evergreen Terrace, Springfield",
+            ),
+            (
+                "slack-dont",
+                "Don't share 742 Evergreen Terrace, Springfield",
+            ),
+            (
+                "slack-upper",
+                "NEVER SHARE 742 EVERGREEN TERRACE, SPRINGFIELD",
+            ),
+            (
+                "slack-ambig",
+                "742 Evergreen Terrace, Springfield is my home address",
+            ),
+            (
+                "slack-ask",
+                "Ask me before sharing 742 Evergreen Terrace, Springfield",
+            ),
+        ] {
+            store.update_user_rules(chat, &[rule.into()], None).unwrap();
+            let res = store
+                .evaluate_outbound(
+                    chat,
+                    "Meet me at 742 Evergreen Terrace, Springfield.",
+                    true,
+                    true,
+                )
+                .unwrap();
+            assert!(
+                !res.allowed,
+                "Rule '{rule}' must block leak even with generic approval"
+            );
+        }
+
+        // 3. Affirmative allow rule permits sharing the named detail
+        store
+            .update_user_rules(
+                "slack-allow",
+                &["Allow sharing 742 Evergreen Terrace, Springfield with delivery drivers".into()],
+                None,
+            )
+            .unwrap();
+        let allowed_res = store
+            .evaluate_outbound(
+                "slack-allow",
+                "Deliver to 742 Evergreen Terrace, Springfield.",
+                true,
+                false,
+            )
+            .unwrap();
+        assert!(
+            allowed_res.allowed,
+            "Explicit affirmative allow rule should permit sharing"
+        );
+
+        // 4. Conflicting allow + deny rules: Deny wins even with generic approval (`allow share` + `approved_irreversible = true`)
+        store
+            .update_user_rules(
+                "slack-conflict",
+                &[
+                    "Allow sharing 742 Evergreen Terrace, Springfield".into(),
+                    "Allow share for approved tasks".into(),
+                    "Never share 742 Evergreen Terrace, Springfield".into(),
+                ],
+                None,
+            )
+            .unwrap();
+        let conflict_res = store
+            .evaluate_outbound(
+                "slack-conflict",
+                "Address: 742 Evergreen Terrace, Springfield.",
+                true,
+                true,
+            )
+            .unwrap();
+        assert!(
+            !conflict_res.allowed,
+            "Deny rule must win over specific and generic allow rules"
+        );
+
+        // 5. Negated auto-reply rule ("Never auto-reply") must block unrequested replies
+        store
+            .update_user_rules(
+                "slack-noreply",
+                &[
+                    "Allow auto-reply during business hours".into(),
+                    "Never auto-reply without human confirmation".into(),
+                ],
+                None,
+            )
+            .unwrap();
+        let noreply_res = store
+            .evaluate_outbound("slack-noreply", "Status update: all green.", false, true)
+            .unwrap();
+        assert!(
+            !noreply_res.allowed,
+            "Negated auto-reply rule must win and block unrequested reply"
+        );
     }
 }
