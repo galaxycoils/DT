@@ -1031,7 +1031,8 @@ mod staging_tests {
         let unsigned_meta = serde_json::json!({"tag_name":"v9.9.9","html_url":"https://example.invalid/release","assets":[
             {"name":name,"browser_download_url":format!("http://{address}/asset"),"size":bytes.len()},
             {"name":"grok-muse-release.json","browser_download_url":format!("http://{address}/manifest"),"size":1024}]});
-        let unsigned_check = parse_github_release_json(&unsigned_meta.to_string(), "0.3.0").unwrap();
+        let unsigned_check =
+            parse_github_release_json(&unsigned_meta.to_string(), "0.3.0").unwrap();
         assert!(
             download_with_trusted_key(&unsigned_check, destination.path(), None, &public)
                 .await

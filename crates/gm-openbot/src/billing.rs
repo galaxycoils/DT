@@ -225,7 +225,12 @@ impl BillingStore {
         signature_header: &str,
         raw_body: &str,
     ) -> Result<(bool, WorkspaceEntitlements)> {
-        verify_stripe_signature(webhook_secret, signature_header, raw_body, Utc::now().timestamp())?;
+        verify_stripe_signature(
+            webhook_secret,
+            signature_header,
+            raw_body,
+            Utc::now().timestamp(),
+        )?;
         let val: serde_json::Value = serde_json::from_str(raw_body)
             .map_err(|e| GmError::Config(format!("Invalid Stripe webhook JSON: {e}")))?;
         let event_id = val["id"]
@@ -260,10 +265,7 @@ impl BillingStore {
             return Ok((false, self.get_entitlements(ws_id)?));
         }
 
-        let new_mode = if matches!(
-            event_type,
-            "checkout.session.completed" | "invoice.paid"
-        ) {
+        let new_mode = if matches!(event_type, "checkout.session.completed" | "invoice.paid") {
             "hosted_pro"
         } else {
             "hosted_free"
@@ -304,16 +306,24 @@ mod tests {
         let hdr = format!("t={ts},v1={mac}");
 
         // Invalid signature rejected
-        assert!(hosted.process_stripe_webhook("whsec_test", "t=0,v1=bad", payload).is_err());
+        assert!(
+            hosted
+                .process_stripe_webhook("whsec_test", "t=0,v1=bad", payload)
+                .is_err()
+        );
 
         // First valid delivery credits 2000 cents
-        let (applied1, ent1) = hosted.process_stripe_webhook("whsec_test", &hdr, payload).unwrap();
+        let (applied1, ent1) = hosted
+            .process_stripe_webhook("whsec_test", &hdr, payload)
+            .unwrap();
         assert!(applied1);
         assert_eq!(ent1.mode, BillingMode::HostedPro);
         assert_eq!(ent1.credit_balance_cents, 2000);
 
         // Duplicate delivery is idempotent and does NOT double-credit
-        let (applied2, ent2) = hosted.process_stripe_webhook("whsec_test", &hdr, payload).unwrap();
+        let (applied2, ent2) = hosted
+            .process_stripe_webhook("whsec_test", &hdr, payload)
+            .unwrap();
         assert!(!applied2);
         assert_eq!(ent2.credit_balance_cents, 2000);
     }

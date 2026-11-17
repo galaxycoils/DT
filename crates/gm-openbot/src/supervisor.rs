@@ -160,10 +160,8 @@ impl OpenBotSupervisor {
         let marketplace = crate::marketplace::MarketplaceStore::open(
             config.storage_dir.join("marketplace.sqlite"),
         )?;
-        let billing = crate::billing::BillingStore::open(
-            config.storage_dir.join("billing.sqlite"),
-            true,
-        )?;
+        let billing =
+            crate::billing::BillingStore::open(config.storage_dir.join("billing.sqlite"), true)?;
 
         let a2a = A2aCoordinator::new(
             roster.clone(),
@@ -281,17 +279,16 @@ impl OpenBotSupervisor {
             self.vault.backend().set_secret(&account, secret)?;
             incoming.credential_ref = Some(format!("secret://keychain/{account}"));
             incoming.connection_state = gm_core::config::ProviderConnectionState::Connected;
-            incoming.validated_origin =
-                Some(gm_core::config::extract_provider_origin(&incoming.base_url)?);
+            incoming.validated_origin = Some(gm_core::config::extract_provider_origin(
+                &incoming.base_url,
+            )?);
             incoming.last_error = None;
         }
         let saved = cfg.upsert_profile(incoming, revalidate_credentials || api_key.is_some())?;
         self.set_providers_config(cfg);
-        let _ = self
-            .daemon_events_tx
-            .send(DaemonEvent::ActivityUpdated {
-                reason: "providers_updated".into(),
-            });
+        let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+            reason: "providers_updated".into(),
+        });
         Ok(saved)
     }
 
@@ -316,15 +313,16 @@ impl OpenBotSupervisor {
             };
         }
         self.set_providers_config(cfg.clone());
-        let _ = self
-            .daemon_events_tx
-            .send(DaemonEvent::ActivityUpdated {
-                reason: "providers_updated".into(),
-            });
+        let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+            reason: "providers_updated".into(),
+        });
         Ok(cfg)
     }
 
-    fn resolve_profile_bearer(&self, profile: &gm_core::config::ProviderProfileConfig) -> Option<String> {
+    fn resolve_profile_bearer(
+        &self,
+        profile: &gm_core::config::ProviderProfileConfig,
+    ) -> Option<String> {
         let cred = profile.credential_ref.as_deref()?;
         let account = cred.strip_prefix("secret://keychain/")?;
         let raw = self.vault.backend().get_secret(account).ok()?;
@@ -355,12 +353,14 @@ impl OpenBotSupervisor {
         }
         let bearer = self.resolve_profile_bearer(&profile);
         let backend = gm_llm::ReqwestLlmBackend::new();
-        match backend.discover_models(&profile.base_url, bearer.as_deref()).await {
+        match backend
+            .discover_models(&profile.base_url, bearer.as_deref())
+            .await
+        {
             Ok(models) => {
                 if let Some(existing) = cfg.profiles.iter_mut().find(|p| p.id == profile_id) {
                     existing.discovered_models = models.clone();
-                    existing.connection_state =
-                        gm_core::config::ProviderConnectionState::Connected;
+                    existing.connection_state = gm_core::config::ProviderConnectionState::Connected;
                     existing.last_error = None;
                 }
                 self.set_providers_config(cfg);
@@ -485,7 +485,9 @@ impl OpenBotSupervisor {
                     let code = payload
                         .get("code")
                         .and_then(|v| v.as_str())
-                        .ok_or_else(|| GmError::Config("Missing OAuth authorization code".into()))?;
+                        .ok_or_else(|| {
+                            GmError::Config("Missing OAuth authorization code".into())
+                        })?;
                     let redirect_uri = payload
                         .get("redirect_uri")
                         .and_then(|v| v.as_str())
@@ -531,11 +533,9 @@ impl OpenBotSupervisor {
                 updated.last_error = None;
                 let saved = cfg.upsert_profile(updated, true)?;
                 self.set_providers_config(cfg);
-                let _ = self
-                    .daemon_events_tx
-                    .send(DaemonEvent::ActivityUpdated {
-                        reason: "providers_updated".into(),
-                    });
+                let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+                    reason: "providers_updated".into(),
+                });
                 Ok(serde_json::json!({
                     "profile": saved,
                     "connected": true,
@@ -556,11 +556,9 @@ impl OpenBotSupervisor {
                 updated.last_error = None;
                 let saved = cfg.upsert_profile(updated, false)?;
                 self.set_providers_config(cfg);
-                let _ = self
-                    .daemon_events_tx
-                    .send(DaemonEvent::ActivityUpdated {
-                        reason: "providers_updated".into(),
-                    });
+                let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+                    reason: "providers_updated".into(),
+                });
                 Ok(serde_json::json!({
                     "profile": saved,
                     "connected": false,

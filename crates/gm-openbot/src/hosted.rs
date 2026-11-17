@@ -79,10 +79,14 @@ pub fn validate_workspace_slug(ws_id: &str) -> Result<String> {
 pub fn workspace_worker_dir(workers_root: &Path, ws_id: &str) -> Result<PathBuf> {
     let clean = validate_workspace_slug(ws_id)?;
     let root_canon = if workers_root.exists() {
-        workers_root.canonicalize().unwrap_or_else(|_| workers_root.to_path_buf())
+        workers_root
+            .canonicalize()
+            .unwrap_or_else(|_| workers_root.to_path_buf())
     } else {
         std::fs::create_dir_all(workers_root)?;
-        workers_root.canonicalize().unwrap_or_else(|_| workers_root.to_path_buf())
+        workers_root
+            .canonicalize()
+            .unwrap_or_else(|_| workers_root.to_path_buf())
     };
     let dir = root_canon.join(&clean);
     std::fs::create_dir_all(&dir)?;
@@ -163,7 +167,11 @@ pub struct HostedControlPlane {
 }
 
 impl HostedControlPlane {
-    pub fn open(db_path: impl AsRef<Path>, workers_root: impl AsRef<Path>, master_key: &[u8]) -> Result<Self> {
+    pub fn open(
+        db_path: impl AsRef<Path>,
+        workers_root: impl AsRef<Path>,
+        master_key: &[u8],
+    ) -> Result<Self> {
         if master_key.len() < 16 {
             return Err(GmError::Config(
                 "Hosted master encryption key must be at least 16 bytes".into(),
@@ -347,10 +355,17 @@ impl HostedControlPlane {
         })
     }
 
-    pub fn restore_workspace(&self, target_ws_id: &str, bundle: &WorkspaceBackupBundle) -> Result<usize> {
+    pub fn restore_workspace(
+        &self,
+        target_ws_id: &str,
+        bundle: &WorkspaceBackupBundle,
+    ) -> Result<usize> {
         let clean = validate_workspace_slug(target_ws_id)?;
-        let payload_json =
-            serde_json::to_string(&(&bundle.ws_id, &bundle.files, &bundle.encrypted_secret_accounts))?;
+        let payload_json = serde_json::to_string(&(
+            &bundle.ws_id,
+            &bundle.files,
+            &bundle.encrypted_secret_accounts,
+        ))?;
         let actual = hex::encode(Sha256::digest(payload_json.as_bytes()));
         if actual != bundle.sha256 {
             return Err(GmError::SafetyViolation(
@@ -465,11 +480,20 @@ mod tests {
     fn hosted_control_plane_enforces_tenant_isolation_encryption_and_backup_restore() {
         let dir = tempfile::tempdir().unwrap();
         let workers = dir.path().join("workers");
-        let plane = HostedControlPlane::in_memory(&workers, b"super-strong-master-key-32bytes!").unwrap();
-        assert!(plane.postgres_schema_sql().contains("CREATE TABLE IF NOT EXISTS workspaces"));
+        let plane =
+            HostedControlPlane::in_memory(&workers, b"super-strong-master-key-32bytes!").unwrap();
+        assert!(
+            plane
+                .postgres_schema_sql()
+                .contains("CREATE TABLE IF NOT EXISTS workspaces")
+        );
 
-        let ws_a = plane.provision_workspace("ws_alpha", "t1", "Alpha", "tok-alpha").unwrap();
-        let ws_b = plane.provision_workspace("ws_beta", "t2", "Beta", "tok-beta").unwrap();
+        let ws_a = plane
+            .provision_workspace("ws_alpha", "t1", "Alpha", "tok-alpha")
+            .unwrap();
+        let ws_b = plane
+            .provision_workspace("ws_beta", "t2", "Beta", "tok-beta")
+            .unwrap();
         assert_ne!(ws_a.worker_dir, ws_b.worker_dir);
 
         // Cross-tenant auth denied
@@ -486,11 +510,18 @@ mod tests {
         // Dry run import + backup + restore + cross-tenant restore block
         std::fs::write(Path::new(&ws_a.worker_dir).join("SOUL.md"), "# Alpha Bot").unwrap();
         let dry = plane
-            .dry_run_import("ws_alpha", &BTreeMap::from([("USER.md".into(), "Hi".into())]), 1)
+            .dry_run_import(
+                "ws_alpha",
+                &BTreeMap::from([("USER.md".into(), "Hi".into())]),
+                1,
+            )
             .unwrap();
         assert_eq!(dry.files_planned, 1);
         let bak = plane.backup_workspace("ws_alpha").unwrap();
-        assert_eq!(bak.encrypted_secret_accounts, vec!["openai_key".to_string()]);
+        assert_eq!(
+            bak.encrypted_secret_accounts,
+            vec!["openai_key".to_string()]
+        );
         assert!(plane.restore_workspace("ws_beta", &bak).is_err());
         std::fs::remove_file(Path::new(&ws_a.worker_dir).join("SOUL.md")).unwrap();
         assert_eq!(plane.restore_workspace("ws_alpha", &bak).unwrap(), 1);

@@ -72,14 +72,18 @@ pub(crate) async fn ws_connect_and_read_text_frames(
             .await
             .map_err(|e| GmError::Platform(format!("WebSocket handshake read error: {e}")))?;
         if n == 0 {
-            return Err(GmError::Platform("WebSocket closed during handshake".into()));
+            return Err(GmError::Platform(
+                "WebSocket closed during handshake".into(),
+            ));
         }
         filled += n;
         if let Some(pos) = hdr_buf[..filled].windows(4).position(|w| w == b"\r\n\r\n") {
             break pos + 4;
         }
         if filled == hdr_buf.len() {
-            return Err(GmError::Platform("Oversized WebSocket response header".into()));
+            return Err(GmError::Platform(
+                "Oversized WebSocket response header".into(),
+            ));
         }
     };
     let hdr_str = String::from_utf8_lossy(&hdr_buf[..hdr_end]);

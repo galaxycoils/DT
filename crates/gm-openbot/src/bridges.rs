@@ -410,9 +410,12 @@ impl BridgeRouter {
 
         // 3. Post into OpenBot `#general` channel and trigger any `@bot` mentions or channel owner
         let author = format!("{}:{}", msg.platform, msg.sender_name);
-        let (_, spawned) =
-            self.supervisor
-                .post_channel_message(target_channel, &author, None, &inbound_content)?;
+        let (_, spawned) = self.supervisor.post_channel_message(
+            target_channel,
+            &author,
+            None,
+            &inbound_content,
+        )?;
         let ids: Vec<String> = spawned.iter().map(|t| t.id.clone()).collect();
 
         Ok(BridgeDispatchReply {

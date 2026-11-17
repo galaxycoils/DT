@@ -98,7 +98,8 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
     let sent_replies = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
     let sent_ref = sent_replies.clone();
     let relay_client_signer =
-        OutboundRelayClient::new("https://placeholder.example.com", "relay-secret", "tok-1").unwrap();
+        OutboundRelayClient::new("https://placeholder.example.com", "relay-secret", "tok-1")
+            .unwrap();
     let mut env = SignedRelayEnvelope {
         delivery_id: "deliv-100".into(),
         platform: "slack".into(),
@@ -254,12 +255,26 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
     );
     assert!(
         relay
-            .send_outbound_reply(&router, "slack", "C-MAPPED", "Unsolicited ping", false, false)
+            .send_outbound_reply(
+                &router,
+                "slack",
+                "C-MAPPED",
+                "Unsolicited ping",
+                false,
+                false
+            )
             .await
             .is_err()
     );
     let sent = relay
-        .send_outbound_reply(&router, "slack", "C-MAPPED", "Alerts are clear.", true, false)
+        .send_outbound_reply(
+            &router,
+            "slack",
+            "C-MAPPED",
+            "Alerts are clear.",
+            true,
+            false,
+        )
         .await
         .unwrap();
     assert_eq!(sent.len(), 1);
@@ -329,14 +344,25 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
     })
     .unwrap();
     let mut vsess = VoiceSession::start("muse");
-    assert!(voice_engine.transcribe_wav(&mut vsess, b"RIFF").await.is_err());
+    assert!(
+        voice_engine
+            .transcribe_wav(&mut vsess, b"RIFF")
+            .await
+            .is_err()
+    );
     vsess.acknowledge_consent();
     assert_eq!(
-        voice_engine.transcribe_wav(&mut vsess, b"RIFF").await.unwrap(),
+        voice_engine
+            .transcribe_wav(&mut vsess, b"RIFF")
+            .await
+            .unwrap(),
         "hello world"
     );
     assert_eq!(
-        voice_engine.synthesize_speech(&mut vsess, "Hi there").await.unwrap(),
+        voice_engine
+            .synthesize_speech(&mut vsess, "Hi there")
+            .await
+            .unwrap(),
         vec![1, 2, 3, 4]
     );
     vsess.request_barge_in();
@@ -362,16 +388,29 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
         password: "secret".into(),
     })
     .unwrap();
-    assert!(sip.originate_call("muse", "+15551234567", false).await.is_err());
+    assert!(
+        sip.originate_call("muse", "+15551234567", false)
+            .await
+            .is_err()
+    );
     let mut sip_sess = sip
         .originate_call("muse", "+15551234567", true)
         .await
         .unwrap();
     assert_eq!(sip_sess.external_media_channel_id.as_deref(), Some("ext-1"));
-    sip.announce_consent(&mut sip_sess, "recording notice").await.unwrap();
+    sip.announce_consent(&mut sip_sess, "recording notice")
+        .await
+        .unwrap();
     assert!(sip_sess.consent_announced);
-    assert_eq!(sip.stream_ari_transcript_events(&mut sip_sess, 2).await.unwrap(), 1);
-    sip.transfer_to_human(&mut sip_sess, "PJSIP/100").await.unwrap();
+    assert_eq!(
+        sip.stream_ari_transcript_events(&mut sip_sess, 2)
+            .await
+            .unwrap(),
+        1
+    );
+    sip.transfer_to_human(&mut sip_sess, "PJSIP/100")
+        .await
+        .unwrap();
     assert_eq!(sip_sess.state, VoiceSessionState::HandedOff);
     sip.reconnect_session(&mut sip_sess).unwrap();
     assert_eq!(sip_sess.reconnect_attempts, 1);
@@ -388,7 +427,10 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
     let raw = r#"{"event":"meeting.rtms_started"}"#;
     let sig = format!(
         "v0={}",
-        gm_openbot::compute_hmac_sha256_hex(b"zm-secret", format!("v0:1700000000:{raw}").as_bytes())
+        gm_openbot::compute_hmac_sha256_hex(
+            b"zm-secret",
+            format!("v0:1700000000:{raw}").as_bytes()
+        )
     );
     assert!(zoom.verify_webhook_signature("1700000000", raw, &sig));
     assert!(!zoom.verify_webhook_signature("1700000000", raw, "v0=bad"));
@@ -415,7 +457,11 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
         oauth_access_token: "ya29.test".into(),
     })
     .unwrap();
-    assert!(meet.join_conference("muse", "abc-defg-hij", false).await.is_err());
+    assert!(
+        meet.join_conference("muse", "abc-defg-hij", false)
+            .await
+            .is_err()
+    );
     let mut gm_sess = meet
         .join_conference("muse", "abc-defg-hij", true)
         .await

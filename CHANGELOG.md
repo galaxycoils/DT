@@ -2,6 +2,17 @@
 
 All notable changes to **Grok-Muse** are documented in this file.
 
+## [v0.6.0] — Full Rakazo Parity & Multi-Provider Suite (2026-11-17)
+
+### Added & Fixed
+- **Privacy, Data-Loss & Security Fixes (`discretion.rs`, `forget.rs`, `goal_workspace.rs`, `enable_skills`)**: Enforced deny-wins rule precedence on `DISCRETION.md` evaluation, JSON-aware Two-Phase Forget across `goals.json`, `SharedFileStore` mutex serialization on `goals.json` mutations, strict `muse.enable_skills` gating across agent/API/IPC, and `UPSTREAM.md` sync for `zod` `4.6.6`.
+- **Multi-Provider Stack (`crates/gm-llm`, `crates/gm-core`, `crates/gm-ui`, `crates/gm-daemon`)**: Added ChatGPT PKCE OAuth & `/v1/responses` SSE streaming, Kilo Gateway, OpenRouter, Nous Portal OAuth, Custom Chat Completions/Responses endpoints, 5-tier precedence (`Routine -> Bot -> Workspace -> Account -> Legacy`), fail-in-place behavior, `/models` discovery, separate ChatGPT included-allowance accounting, and endpoint origin-change revalidation (`NeedsRevalidation`).
+- **Relay, Bridges, Honest Probing & Voice/Meetings (`crates/gm-openbot`)**: Outbound-only HTTPS webhook relay, persisted `bridge_channel_mappings_v1` & deduplication, honest capability probing (`connectors.rs`), local Whisper/TTS (`voice.rs`), Asterisk ARI SIP (`sip_asterisk.rs` with Tier-3 carrier-cost gate), Zoom RTMS (`meetings_zoom.rs`), and Google Meet REST/Events (`meetings_google.rs`).
+- **Hosted `/api/v1`, Marketplace, Stripe Sandbox & Web/Mobile Clients (`clients/web/`, `clients/mobile/`)**: Scoped `/api/v1/workspaces/:ws_id/events` SSE, PostgreSQL control-plane DDL + AES-encrypted tenant secrets + dry-run import/backup/restore, scope-confirmed plugin marketplace, idempotent Stripe webhook processing preserving free self-hosted BYOK, and React/Expo clients styled with Rakazo UI tokens.
+- **Release Readiness**: Merged PR #2 durable `database.rs`, `patch.rs`, `user_services.rs`, and Ed25519 manifest updater verification.
+
+---
+
 ## [v0.5.0] — GrokBot Workspace Parity (2026-11-17)
 
 ### Added

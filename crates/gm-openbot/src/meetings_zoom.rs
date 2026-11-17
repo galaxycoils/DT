@@ -176,7 +176,9 @@ impl ZoomRtmsClient {
 
     pub fn recover_reconnect(&self, session: &mut ZoomMeetingSession) -> Result<()> {
         if session.state == VoiceSessionState::Ended {
-            return Err(GmError::Config("Cannot reconnect an ended Zoom session".into()));
+            return Err(GmError::Config(
+                "Cannot reconnect an ended Zoom session".into(),
+            ));
         }
         session.reconnects += 1;
         session.state = VoiceSessionState::Listening;

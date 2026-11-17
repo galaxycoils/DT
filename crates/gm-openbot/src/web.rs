@@ -4396,30 +4396,56 @@ fn api_v1_router() -> Router<CompanionWebState> {
         .route("/bootstrap", get(get_bootstrap_route))
         .route("/workspaces/:ws_id/events", get(stream_workspace_events_v1))
         .route("/bots", get(list_bots).post(upsert_bot_route))
-        .route("/dm/:bot_id/messages", get(list_dm_messages_route).post(post_dm_message_route))
+        .route(
+            "/dm/:bot_id/messages",
+            get(list_dm_messages_route).post(post_dm_message_route),
+        )
         .route("/channels", get(list_channels).post(create_channel))
-        .route("/channels/:id/messages", get(list_channel_messages).post(post_channel_message))
+        .route(
+            "/channels/:id/messages",
+            get(list_channel_messages).post(post_channel_message),
+        )
         .route("/approvals/:id", post(respond_approval_route))
         .route("/approvals/:id/respond", post(respond_approval_route))
         .route("/questions/:id", post(respond_question_route))
         .route("/questions/:id/respond", post(respond_question_route))
-        .route("/routines", get(list_routines_route).post(upsert_routine_route))
+        .route(
+            "/routines",
+            get(list_routines_route).post(upsert_routine_route),
+        )
         .route("/routines/:id/test", post(test_routine_route))
         .route("/routines/:id/runs", get(list_routine_runs_route))
-        .route("/goals", get(list_goals_route).post(create_goal_route).patch(patch_goal_route))
+        .route(
+            "/goals",
+            get(list_goals_route)
+                .post(create_goal_route)
+                .patch(patch_goal_route),
+        )
         .route("/spaces", get(list_spaces_route).post(create_space_route))
         .route("/spaces/:slug/url", get(get_space_url_route))
         .route("/usage", get(get_usage_route))
         .route("/system/providers", get(system_providers_get_route))
-        .route("/system/providers/profile", post(system_provider_profile_route))
-        .route("/system/providers/:id/discover-models", post(system_provider_discover_models_route))
-        .route("/system/providers/:id/oauth/:op", post(system_provider_oauth_route))
+        .route(
+            "/system/providers/profile",
+            post(system_provider_profile_route),
+        )
+        .route(
+            "/system/providers/:id/discover-models",
+            post(system_provider_discover_models_route),
+        )
+        .route(
+            "/system/providers/:id/oauth/:op",
+            post(system_provider_oauth_route),
+        )
         .route("/connectors", get(list_connectors_route))
         .route("/connectors/probe/:id", get(probe_connector_v1_route))
         .route("/marketplace", get(list_marketplace_v1_route))
         .route("/marketplace/install", post(install_marketplace_v1_route))
         .route("/marketplace/:id/update", post(update_marketplace_v1_route))
-        .route("/marketplace/:id", axum::routing::delete(remove_marketplace_v1_route))
+        .route(
+            "/marketplace/:id",
+            axum::routing::delete(remove_marketplace_v1_route),
+        )
         .route("/billing/status", get(billing_status_v1_route))
         .route("/billing/checkout", post(billing_checkout_v1_route))
         .route("/billing/webhooks/stripe", post(stripe_webhook_v1_route))
@@ -4455,8 +4481,7 @@ async fn stream_workspace_events_v1(
         Err(_) => None,
     });
     Ok(Sse::new(stream).keep_alive(
-        axum::response::sse::KeepAlive::new()
-            .interval(std::time::Duration::from_secs(15)),
+        axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
     ))
 }
 
@@ -4596,8 +4621,12 @@ async fn billing_checkout_v1_route(
         .as_str()
         .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing stripe_secret_key"))?;
     let ws_id = body["ws_id"].as_str().unwrap_or("default");
-    let success = body["success_url"].as_str().unwrap_or("https://localhost/ok");
-    let cancel = body["cancel_url"].as_str().unwrap_or("https://localhost/cancel");
+    let success = body["success_url"]
+        .as_str()
+        .unwrap_or("https://localhost/ok");
+    let cancel = body["cancel_url"]
+        .as_str()
+        .unwrap_or("https://localhost/cancel");
     let price_id = body["price_id"].as_str().unwrap_or("price_default");
     let res = state
         .supervisor
@@ -5344,7 +5373,9 @@ mod tests {
         );
 
         let oauth_start = client
-            .post(format!("{base}/api/system/providers/chatgpt-default/oauth/start"))
+            .post(format!(
+                "{base}/api/system/providers/chatgpt-default/oauth/start"
+            ))
             .bearer_auth("secret-token")
             .json(&serde_json::json!({}))
             .send()

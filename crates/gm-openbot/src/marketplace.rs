@@ -77,7 +77,10 @@ impl MarketplaceStore {
                 "1.0.0",
                 "Grok Muse Catalog",
                 "Review pull requests and summarize diffs via verified GitHub connector.",
-                vec!["connectors.github.read".to_string(), "skills.use".to_string()],
+                vec![
+                    "connectors.github.read".to_string(),
+                    "skills.use".to_string(),
+                ],
                 r#"{"kind":"skill_bundle","entrypoint":"pr-review"}"#,
             ),
             (
@@ -192,7 +195,10 @@ impl MarketplaceStore {
         let count = self
             .conn
             .lock()
-            .execute("DELETE FROM installed_plugins_v1 WHERE id = ?1", params![id.trim()])
+            .execute(
+                "DELETE FROM installed_plugins_v1 WHERE id = ?1",
+                params![id.trim()],
+            )
             .map_err(|e| GmError::Platform(e.to_string()))?;
         Ok(count > 0)
     }
@@ -208,7 +214,8 @@ impl MarketplaceStore {
         let rows = stmt
             .query_map([], |r| {
                 let scopes_raw: String = r.get(3)?;
-                let approved_scopes: Vec<String> = serde_json::from_str(&scopes_raw).unwrap_or_default();
+                let approved_scopes: Vec<String> =
+                    serde_json::from_str(&scopes_raw).unwrap_or_default();
                 Ok(InstalledMarketplacePlugin {
                     id: r.get(0)?,
                     name: r.get(1)?,
@@ -238,7 +245,9 @@ mod tests {
         assert!(store.install_plugin(&cat[0], &[]).is_err());
 
         // Confirmed scopes succeed
-        let installed = store.install_plugin(&cat[0], &cat[0].requested_scopes).unwrap();
+        let installed = store
+            .install_plugin(&cat[0], &cat[0].requested_scopes)
+            .unwrap();
         assert_eq!(installed.version, "1.0.0");
 
         // Update plugin version atomically

@@ -1,7 +1,7 @@
-# Grok-Muse Hybrid Agent (`v0.5.0` — GrokBot Workspace Parity)
+# Grok-Muse Hybrid Agent (`v0.6.0` — Full Rakazo Parity & Multi-Provider Suite)
 
-> **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite for macOS.**  
-> Built in Rust with native Rust desktop rendering, macOS ScreenCaptureKit/Accessibility integration, scoped workspace file access, an offline workspace VM transport, Candle model support, and hybrid LLM routing (Meta Muse + xAI Grok + Local VLM).
+> **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native macOS, React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
+> Built in Rust with native Rust desktop rendering, macOS ScreenCaptureKit/Accessibility integration, scoped workspace file access, Candle model support, and multi-provider hybrid LLM routing (`ChatGPT OAuth`, `Kilo Gateway`, `OpenRouter`, `Nous Portal`, `Meta Muse`, `xAI Grok`, `Custom Responses/ChatCompletions`, and `Local VLM`).
 
 The current branch adds a durable task dispatcher, native desktop client, persistent conversations, bot/channel editing, attachments, scheduled routines, durable usage accounting and authenticated update staging. Windows UI Automation/GDI/input and Linux X11/AT-SPI plus Wayland portal/PipeWire backends are implemented; native Windows/macOS and real Wayland certification remain outstanding. The VM transport requires a separately provisioned signed image. See [implementation status](docs/implementation-status.md) for implemented behavior, setup, and remaining public-release work. Performance/quality numbers below are targets, not certified results.
 
@@ -26,7 +26,14 @@ The current branch adds a durable task dispatcher, native desktop client, persis
 
 ---
 
-## What's New in `v0.5.0` (GrokBot Workspace Parity)
+## What's New in `v0.6.0` (Full Rakazo Parity)
+
+- **Multi-Provider OAuth, Responses API & 5-Tier Precedence (`crates/gm-llm`, `crates/gm-core`)**: Added ChatGPT PKCE OAuth (`/v1/responses` streaming + separate included-allowance tracking), Kilo Gateway, OpenRouter, Nous Portal OAuth (with 401 refresh-and-retry), Custom Chat Completions/Responses endpoints, `Routine -> Bot -> Workspace -> Account -> Legacy` precedence with fail-in-place semantics, `/models` discovery, per-profile screenshot egress gates, and origin-change `NeedsRevalidation`.
+- **Relay, Bridges, Honest Connect Apps & Voice/Meetings (`crates/gm-openbot`)**: Outbound-only HMAC-verified HTTPS relay (`relay.rs`), persisted channel mappings & deduplication (`bridges.rs`), real capability probing (`connectors.rs`), local Whisper/TTS (`voice.rs`), Asterisk ARI SIP trunk with Tier-3 carrier-cost gate (`sip_asterisk.rs`), Zoom RTMS (`meetings_zoom.rs`), and Google Meet REST/Events (`meetings_google.rs`).
+- **Hosted Control Plane, `/api/v1` API, Marketplace & Billing (`crates/gm-openbot`, `clients/`)**: Versioned `/api/v1/*` API with cross-tenant SSE scoping, PostgreSQL schema + AES-256 encrypted tenant secrets (`hosted.rs`), scope-confirmed marketplace (`marketplace.rs`), Stripe sandbox webhook/billing preserving free self-hosted BYOK (`billing.rs`), plus React Web (`clients/web/`) and Expo Mobile (`clients/mobile/`) clients using `@rakazo/ui-tokens`.
+- **Release Readiness & Security Hardening**: Integrated `discretion.rs` deny-wins privacy fixes, JSON-safe `forget.rs`, locked `goal_workspace.rs`, gated `enable_skills`, and PR #2 database migration/patch-review/user-services/signed-updater tooling.
+
+### Previous `v0.5.0` Highlights (GrokBot Workspace Parity)
 
 Grok-Muse `v0.5.0` builds on the `v0.4.0` **Meta Muse Agent Integration** (`crates/gm-muse`, `crates/gm-memory`, `crates/gm-goals`) and `v0.3.0` **OpenBot Multi-Agent & Coworker Suite** (`crates/gm-openbot`):
 

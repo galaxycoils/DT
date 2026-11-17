@@ -105,7 +105,12 @@ impl VoiceSession {
         self.updated_at = Utc::now().to_rfc3339();
     }
 
-    pub fn append_turn(&mut self, speaker: impl Into<String>, text: impl Into<String>, is_final: bool) {
+    pub fn append_turn(
+        &mut self,
+        speaker: impl Into<String>,
+        text: impl Into<String>,
+        is_final: bool,
+    ) {
         self.transcript.push(TranscriptTurn {
             id: format!("trn-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]),
             speaker: speaker.into(),
@@ -147,7 +152,11 @@ impl LocalVoiceEngine {
         })
     }
 
-    pub async fn transcribe_wav(&self, session: &mut VoiceSession, wav_bytes: &[u8]) -> Result<String> {
+    pub async fn transcribe_wav(
+        &self,
+        session: &mut VoiceSession,
+        wav_bytes: &[u8],
+    ) -> Result<String> {
         if !session.consent_acknowledged {
             return Err(GmError::SafetyViolation(
                 "Voice transcription requires explicit participant consent first".into(),
@@ -175,11 +184,7 @@ impl LocalVoiceEngine {
             .json()
             .await
             .map_err(|e| GmError::Platform(format!("Invalid STT JSON response: {e}")))?;
-        let text = body["text"]
-            .as_str()
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let text = body["text"].as_str().unwrap_or("").trim().to_string();
         if !text.is_empty() {
             session.append_turn("caller", &text, true);
         }
@@ -187,7 +192,11 @@ impl LocalVoiceEngine {
         Ok(text)
     }
 
-    pub async fn synthesize_speech(&self, session: &mut VoiceSession, text: &str) -> Result<Vec<u8>> {
+    pub async fn synthesize_speech(
+        &self,
+        session: &mut VoiceSession,
+        text: &str,
+    ) -> Result<Vec<u8>> {
         if session.barge_in_requested {
             session.barge_in_requested = false;
             session.state = VoiceSessionState::Listening;

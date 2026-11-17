@@ -208,8 +208,12 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
         DaemonRequest::ForgetConfirm { .. } => PendingKind::ForgetConfirm,
         DaemonRequest::GetProviderSettings
         | DaemonRequest::SaveProviderProfile { .. }
-        | DaemonRequest::DiscoverProviderModels { .. } => PendingKind::ToolResult("providers".into()),
-        DaemonRequest::ProviderOAuthAction { .. } => PendingKind::ToolResult("provider_oauth".into()),
+        | DaemonRequest::DiscoverProviderModels { .. } => {
+            PendingKind::ToolResult("providers".into())
+        }
+        DaemonRequest::ProviderOAuthAction { .. } => {
+            PendingKind::ToolResult("provider_oauth".into())
+        }
         DaemonRequest::UpdateDiscretion { .. } => PendingKind::UpdateDiscretion,
         _ => PendingKind::Other,
     }
@@ -890,9 +894,9 @@ impl eframe::App for NativeApp {
                 } else {
                     if key == "providers" || key == "provider_oauth" {
                         let candidate = value.get("providers").unwrap_or(&value);
-                        if let Ok(parsed) =
-                            serde_json::from_value::<gm_core::config::ProvidersConfig>(candidate.clone())
-                        {
+                        if let Ok(parsed) = serde_json::from_value::<gm_core::config::ProvidersConfig>(
+                            candidate.clone(),
+                        ) {
                             self.settings_config.providers = parsed;
                         } else if let Some(prof_val) = value.get("profile")
                             && let Ok(prof) = serde_json::from_value::<
