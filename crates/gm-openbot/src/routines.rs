@@ -55,6 +55,10 @@ pub struct Routine {
     pub interval_minutes: Option<u32>,
     #[serde(default)]
     pub webhook_secret_ref: Option<String>,
+    #[serde(default)]
+    pub preferred_provider: Option<String>,
+    #[serde(default)]
+    pub preferred_model: Option<String>,
     pub enabled: bool,
 }
 
@@ -197,6 +201,7 @@ impl DurableTaskQueue {
         .map_err(error)?;
         Ok(())
     }
+
     pub fn delete_routine(&self, routine_id: &str) -> Result<bool> {
         let rows = self
             .conn
@@ -518,6 +523,33 @@ impl OpenBotSupervisor {
         Ok(self.vault().backend().get_secret(&account).ok())
     }
 
+    pub fn routine_preference_for_task(
+        &self,
+        task_id: &str,
+    ) -> Result<Option<(Option<String>, Option<String>)>> {
+        let routine_id: Option<String> = self
+            .queue()
+            .conn
+            .lock()
+            .query_row(
+                "SELECT routine_id FROM routine_runs_v1 WHERE task_id = ?1 LIMIT 1",
+                [task_id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some(rid) = routine_id else {
+            return Ok(None);
+        };
+        let found = self
+            .queue()
+            .list_routines()?
+            .into_iter()
+            .find(|s| s.routine.id == rid)
+            .map(|s| (s.routine.preferred_provider, s.routine.preferred_model));
+        Ok(found)
+    }
+
     pub fn delete_routine(&self, routine_id: &str) -> Result<bool> {
         let deleted = self.queue().delete_routine(routine_id)?;
         if deleted {
@@ -746,6 +778,8 @@ mod tests {
             quiet_hours: None,
             interval_minutes: None,
             webhook_secret_ref: None,
+            preferred_provider: None,
+            preferred_model: None,
             enabled: true,
         }
     }

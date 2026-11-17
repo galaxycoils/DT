@@ -441,10 +441,32 @@ impl BotRoster {
                 .as_ref()
                 .is_some_and(|s| s.len() > 256)
             || profile.preferred_provider.as_ref().is_some_and(|s| {
-                !matches!(
-                    s.as_str(),
-                    "meta" | "muse" | "xai" | "grok" | "claude" | "codex" | "anthropic" | "openai"
-                )
+                let trim = s.trim();
+                let lower = trim.to_ascii_lowercase();
+                let valid_builtin = matches!(
+                    lower.as_str(),
+                    "meta"
+                        | "muse"
+                        | "xai"
+                        | "grok"
+                        | "claude"
+                        | "codex"
+                        | "anthropic"
+                        | "openai"
+                        | "chatgpt"
+                        | "kilo"
+                        | "kilo_gateway"
+                        | "openrouter"
+                        | "nous"
+                        | "nous_portal"
+                        | "custom"
+                );
+                let valid_profile_id = !trim.is_empty()
+                    && trim.len() <= 64
+                    && trim
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+                !(valid_builtin || valid_profile_id)
             })
         {
             return Err(GmError::Config(

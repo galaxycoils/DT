@@ -281,25 +281,35 @@ impl SharedInteractionState {
 }
 
 pub fn get_ui_settings_snapshot(cfg: &GmConfig, sup: &OpenBotSupervisor) -> serde_json::Value {
+    let prov = sup.providers_config();
     serde_json::json!({
         "ui": sup.ui_config(),
         "allow_host_desktop": sup.allow_host_desktop(),
         "allow_secret_injection": cfg.safety.allow_secret_injection,
-        "providers": {
-            "meta_api_base": cfg.providers.meta_api_base,
-            "meta_cu_model": cfg.providers.meta_cu_model,
-            "meta_reasoning_model": cfg.providers.meta_reasoning_model,
-            "xai_api_base": cfg.providers.xai_api_base,
-            "xai_model": cfg.providers.xai_model,
-            "allow_screenshot_egress_meta": cfg.providers.allow_screenshot_egress_meta,
-            "allow_screenshot_egress_xai": cfg.providers.allow_screenshot_egress_xai,
-        },
+        "providers": prov,
         "budget": {
             "daily_spend_cap_usd": cfg.budget.daily_spend_cap_usd,
             "per_job_spend_cap_usd": cfg.budget.per_job_spend_cap_usd,
             "max_daily_notifications": cfg.budget.max_daily_notifications,
         },
     })
+}
+
+/// Validates and atomically persists `sup.providers_config()` into `shared_config` and `config_path`.
+pub fn persist_providers_config(
+    shared_config: &Arc<RwLock<GmConfig>>,
+    config_path: Option<&Path>,
+    sup: &OpenBotSupervisor,
+) -> Result<gm_core::config::ProvidersConfig> {
+    let providers = sup.providers_config();
+    let mut next = shared_config.read().clone();
+    next.providers = providers.clone();
+    next.validate()?;
+    if let Some(path) = config_path {
+        next.save(path)?;
+    }
+    *shared_config.write() = next;
+    Ok(providers)
 }
 
 /// Validates, merges, and persists UI + non-secret Settings updates atomically to `config_path`
@@ -375,6 +385,20 @@ pub fn apply_and_save_ui_settings(
         {
             next.providers.allow_screenshot_egress_xai = v;
         }
+        if let Some(v) = p.get("workspace_default_profile_id") {
+            next.providers.workspace_default_profile_id = v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string);
+        }
+        if let Some(v) = p.get("account_default_profile_id") {
+            next.providers.account_default_profile_id = v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(ToString::to_string);
+        }
     }
 
     next.validate()?;
@@ -384,6 +408,7 @@ pub fn apply_and_save_ui_settings(
 
     sup.set_ui_config(next.ui.clone());
     sup.set_allow_host_desktop(next.safety.allow_host_desktop);
+    sup.set_providers_config(next.providers.clone());
     *shared_config.write() = next.clone();
 
     let _ = sup

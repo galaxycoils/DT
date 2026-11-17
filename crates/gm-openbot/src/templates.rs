@@ -390,6 +390,8 @@ pub fn import_team(
             quiet_hours: t_routine.quiet_hours.clone(),
             interval_minutes: None,
             webhook_secret_ref: None,
+            preferred_provider: None,
+            preferred_model: None,
             enabled: false,
         };
 

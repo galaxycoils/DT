@@ -217,12 +217,12 @@ mod tests {
         let engine = Arc::new(CandleVlmEngine::new(config).unwrap());
         let adapter = LocalVlmLlmAdapter::new(engine);
 
-        let target = ModelTarget {
-            provider: ProviderKind::Meta,
-            api_base: "local://candle".into(),
-            model: "HuggingFaceTB/SmolVLM-Instruct".into(),
-            allow_vision: true,
-        };
+        let target = ModelTarget::simple(
+            ProviderKind::Meta,
+            "local://candle",
+            "HuggingFaceTB/SmolVLM-Instruct",
+            true,
+        );
 
         let messages = vec![ChatMessage::text("user", "Click the Submit button")];
 

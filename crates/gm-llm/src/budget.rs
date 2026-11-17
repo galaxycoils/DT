@@ -26,6 +26,10 @@ pub struct UsageBreakdown {
     pub daily_cap_usd: f64,
     pub per_job_cap_usd: f64,
     pub max_daily_notifications: u32,
+    #[serde(default)]
+    pub chatgpt_allowance_requests: u64,
+    #[serde(default)]
+    pub chatgpt_allowance_tokens: u64,
     pub by_bot: Vec<UsageBucket>,
     pub by_source: Vec<UsageBucket>,
     pub daily_series: Vec<UsageDailyPoint>,
@@ -45,6 +49,8 @@ struct DailyLedger {
     spent: f64,
     reserved: f64,
     poisoned: bool,
+    chatgpt_allowance_requests: u64,
+    chatgpt_allowance_tokens: u64,
     entries: BTreeMap<String, MemoryUsageEntry>,
 }
 
@@ -147,6 +153,8 @@ impl BudgetManager {
                 spent: 0.0,
                 reserved: 0.0,
                 poisoned: false,
+                chatgpt_allowance_requests: 0,
+                chatgpt_allowance_tokens: 0,
                 entries: BTreeMap::new(),
             })),
             job: Arc::new(Mutex::new(JobLedger::default())),
@@ -340,6 +348,19 @@ impl BudgetManager {
         })
     }
 
+    pub fn record_chatgpt_allowance(&self, tokens: u64) {
+        let mut daily = self.daily.lock();
+        let day = chrono::Utc::now().date_naive();
+        if daily.day != day && daily.reserved == 0.0 {
+            daily.day = day;
+            daily.spent = 0.0;
+            daily.chatgpt_allowance_requests = 0;
+            daily.chatgpt_allowance_tokens = 0;
+        }
+        daily.chatgpt_allowance_requests = daily.chatgpt_allowance_requests.saturating_add(1);
+        daily.chatgpt_allowance_tokens = daily.chatgpt_allowance_tokens.saturating_add(tokens);
+    }
+
     pub fn record_spend(&self, cost_usd: f64) -> Result<()> {
         self.record_spend_attributed("muse", "chat", cost_usd)
     }
@@ -467,12 +488,22 @@ impl BudgetManager {
             .map(|(day, amount_usd)| UsageDailyPoint { day, amount_usd })
             .collect();
 
+        let (chatgpt_allowance_requests, chatgpt_allowance_tokens) = {
+            let daily = self.daily.lock();
+            (
+                daily.chatgpt_allowance_requests,
+                daily.chatgpt_allowance_tokens,
+            )
+        };
+
         Ok(UsageBreakdown {
             daily_spent_usd: daily_spent,
             weekly_spent_usd: weekly_spent,
             daily_cap_usd: self.config.daily_spend_cap_usd,
             per_job_cap_usd: self.config.per_job_spend_cap_usd,
             max_daily_notifications: self.config.max_daily_notifications,
+            chatgpt_allowance_requests,
+            chatgpt_allowance_tokens,
             by_bot,
             by_source,
             daily_series,

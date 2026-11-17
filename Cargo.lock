@@ -2678,10 +2678,12 @@ name = "gm-llm"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "axum",
  "base64 0.22.1",
  "chrono",
  "darius-daemon",
  "gm-core",
+ "hex",
  "keyring",
  "parking_lot",
  "reqwest",
@@ -2689,6 +2691,7 @@ dependencies = [
  "security-framework",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tracing",
  "uuid",

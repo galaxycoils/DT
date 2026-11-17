@@ -3685,6 +3685,145 @@ impl DaemonControlServerState {
                     )
                     .await?;
                 }
+                DaemonRequest::GetProviderSettings => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        Ok::<_, GmError>(serde_json::to_value(sup.providers_config())?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SaveProviderProfile {
+                    profile,
+                    api_key,
+                    revalidate_credentials,
+                    workspace_default_profile_id,
+                    account_default_profile_id,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let saved = sup.upsert_provider_profile(
+                            *profile,
+                            api_key.as_deref(),
+                            revalidate_credentials,
+                        )?;
+                        if workspace_default_profile_id.is_some()
+                            || account_default_profile_id.is_some()
+                        {
+                            sup.set_default_provider_profiles(
+                                workspace_default_profile_id,
+                                account_default_profile_id,
+                            )?;
+                        }
+                        let providers = gm_openbot::persist_providers_config(
+                            &self.shared_config,
+                            self.config_path.as_deref(),
+                            sup,
+                        )?;
+                        let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                            reason: "providers_updated".into(),
+                        });
+                        Ok::<_, GmError>(serde_json::json!({
+                            "profile": saved,
+                            "providers": providers,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::DiscoverProviderModels { profile_id } => {
+                    let result = match self.openbot.as_ref() {
+                        Some(sup) => match sup.discover_provider_models(&profile_id).await {
+                            Ok(models) => {
+                                let providers = gm_openbot::persist_providers_config(
+                                    &self.shared_config,
+                                    self.config_path.as_deref(),
+                                    sup,
+                                )?;
+                                Ok(serde_json::json!({
+                                    "profile_id": profile_id,
+                                    "models": models,
+                                    "providers": providers,
+                                }))
+                            }
+                            Err(e) => Err(e),
+                        },
+                        None => Err(GmError::Config("Task runtime is unavailable".into())),
+                    };
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ProviderOAuthAction {
+                    profile_id,
+                    op,
+                    payload: op_payload,
+                } => {
+                    let result = match self.openbot.as_ref() {
+                        Some(sup) => {
+                            let res = sup
+                                .oauth_action_for_profile(&profile_id, &op, &op_payload)
+                                .await?;
+                            let _ = gm_openbot::persist_providers_config(
+                                &self.shared_config,
+                                self.config_path.as_deref(),
+                                sup,
+                            );
+                            let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                reason: "providers_updated".into(),
+                            });
+                            Ok(res)
+                        }
+                        None => Err(GmError::Config("Task runtime is unavailable".into())),
+                    };
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
                 DaemonRequest::SubscribeEvents => {
                     let mut rx = self.event_tx.subscribe();
                     let ack = IpcMessage {

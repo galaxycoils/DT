@@ -1,8 +1,14 @@
 use crate::budget::BudgetManager;
 use crate::circuit_breaker::CircuitBreaker;
+use crate::providers_oauth::{load_oauth_bundle, refresh_oauth_bundle};
+use crate::responses_api::{
+    build_responses_body, parse_responses_json, parse_responses_sse_stream,
+};
 use crate::router::{ModelTarget, ProviderKind};
+use crate::secrets::{KeychainSecrets, VaultSecretResolver};
 use async_trait::async_trait;
 use base64::Engine;
+use gm_core::config::{ProviderAuthMode, ProviderPreset, WireProtocol, extract_provider_origin};
 use gm_core::error::{GmError, Result};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -131,6 +137,23 @@ pub fn estimate_api_cost_usd(model: &str, prompt: u32, completion: u32, images: 
         completion,
         images,
     )
+}
+
+pub fn estimate_cost_for_target(
+    target: &ModelTarget,
+    prompt: u32,
+    completion: u32,
+    images: usize,
+) -> f64 {
+    match target.provider {
+        ProviderKind::ChatGpt | ProviderKind::Claude | ProviderKind::Codex => 0.0,
+        _ if target.api_base.starts_with("http://127.0.0.1")
+            || target.api_base.starts_with("http://localhost") =>
+        {
+            0.0
+        }
+        _ => estimate_api_cost_usd(&target.model, prompt, completion, images),
+    }
 }
 
 #[async_trait]
@@ -287,6 +310,7 @@ pub struct ReqwestLlmBackend {
     client: reqwest::Client,
     meta_api_key: Option<String>,
     xai_api_key: Option<String>,
+    secrets: KeychainSecrets,
 }
 
 impl Default for ReqwestLlmBackend {
@@ -300,7 +324,15 @@ impl ReqwestLlmBackend {
         let secrets = crate::secrets::KeychainSecrets::default();
         let meta_api_key = secrets.get_meta_key().ok();
         let xai_api_key = secrets.get_xai_key().ok();
-        Self::with_keys(meta_api_key, xai_api_key)
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
+            meta_api_key,
+            xai_api_key,
+            secrets,
+        }
     }
 
     pub fn with_keys(meta_key: Option<String>, xai_key: Option<String>) -> Self {
@@ -311,13 +343,138 @@ impl ReqwestLlmBackend {
                 .unwrap_or_default(),
             meta_api_key: meta_key,
             xai_api_key: xai_key,
+            secrets: KeychainSecrets::default(),
         }
     }
 
     pub fn with_secrets(secrets: &crate::secrets::KeychainSecrets) -> Self {
         let meta_api_key = secrets.get_meta_key().ok();
         let xai_api_key = secrets.get_xai_key().ok();
-        Self::with_keys(meta_api_key, xai_api_key)
+        Self {
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
+            meta_api_key,
+            xai_api_key,
+            secrets: secrets.clone(),
+        }
+    }
+
+    fn oauth_preset(provider: &ProviderKind) -> Option<ProviderPreset> {
+        match provider {
+            ProviderKind::ChatGpt => Some(ProviderPreset::ChatGpt),
+            ProviderKind::NousPortal => Some(ProviderPreset::NousPortal),
+            _ => None,
+        }
+    }
+
+    fn verify_destination_origin(&self, target: &ModelTarget) -> Result<()> {
+        let origin = extract_provider_origin(&target.api_base)?;
+        if target.credential_ref.is_some()
+            && target.validated_origin.as_deref() != Some(origin.as_str())
+        {
+            return Err(GmError::Config(format!(
+                "Provider destination changed to '{origin}'; revalidate credentials before sending secrets"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn resolve_bearer_token(&self, target: &ModelTarget) -> Result<Option<String>> {
+        self.verify_destination_origin(target)?;
+        match target.auth_mode {
+            ProviderAuthMode::None => return Ok(None),
+            ProviderAuthMode::Cli => return Ok(None),
+            ProviderAuthMode::ChatGptOAuth | ProviderAuthMode::NousPortalOAuth => {
+                let Some(ref secret_ref) = target.credential_ref else {
+                    return Err(GmError::Config(format!(
+                        "Provider '{:?}' is not signed in. Please connect an account first.",
+                        target.provider
+                    )));
+                };
+                let mut bundle = load_oauth_bundle(&self.secrets, secret_ref)?;
+                if bundle.is_expiring_soon()
+                    && let Some(preset) = Self::oauth_preset(&target.provider)
+                {
+                    bundle = refresh_oauth_bundle(&self.client, &self.secrets, preset, secret_ref)
+                        .await?;
+                }
+                return Ok(Some(bundle.access_token));
+            }
+            ProviderAuthMode::ApiKey => {}
+        }
+
+        if let Some(ref secret_ref) = target.credential_ref {
+            let resolver = VaultSecretResolver::new(self.secrets.clone());
+            if let Ok(leased) = resolver.resolve(secret_ref) {
+                return Ok(Some(leased.value));
+            }
+        }
+
+        let fallback = match target.provider {
+            ProviderKind::Meta => self
+                .meta_api_key
+                .clone()
+                .or_else(|| self.secrets.get_meta_key().ok()),
+            ProviderKind::Xai => self
+                .xai_api_key
+                .clone()
+                .or_else(|| self.secrets.get_xai_key().ok()),
+            ProviderKind::KiloGateway => self.secrets.get_secret("kilo_api_key").ok(),
+            ProviderKind::OpenRouter => self.secrets.get_secret("openrouter_api_key").ok(),
+            ProviderKind::Custom => None,
+            _ => None,
+        };
+        if let Some(val) = fallback {
+            return Ok(Some(val));
+        }
+        if target.provider == ProviderKind::Custom && target.credential_ref.is_none() {
+            return Ok(None);
+        }
+        Err(GmError::Config(format!(
+            "No API key configured for provider '{:?}'. Please configure it in OS Keychain or via environment variable.",
+            target.provider
+        )))
+    }
+
+    pub async fn discover_models(
+        &self,
+        base_url: &str,
+        bearer: Option<&str>,
+    ) -> Result<Vec<String>> {
+        let _ = extract_provider_origin(base_url)?;
+        let url = format!("{}/models", base_url.trim_end_matches('/'));
+        let mut req = self.client.get(&url);
+        if let Some(tok) = bearer.filter(|s| !s.trim().is_empty()) {
+            req = req.bearer_auth(tok);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| GmError::Provider(format!("Model discovery failed at {url}: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(GmError::Provider(format!(
+                "Model discovery returned {status}: {text}"
+            )));
+        }
+        let val: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| GmError::Provider(format!("Invalid /models JSON: {e}")))?;
+        let mut models = Vec::new();
+        if let Some(arr) = val["data"].as_array() {
+            for item in arr {
+                if let Some(id) = item["id"].as_str()
+                    && !id.trim().is_empty()
+                {
+                    models.push(id.trim().to_string());
+                }
+            }
+        }
+        Ok(models)
     }
 
     /// Dedicated OpenAI wire request serializer:
@@ -360,13 +517,22 @@ impl ReqwestLlmBackend {
     async fn send_with_retries(
         &self,
         url: &str,
-        key: &str,
+        key: Option<&str>,
+        provider: &ProviderKind,
         body: &serde_json::Value,
     ) -> Result<reqwest::Response> {
         let max_retries = 2;
         let mut attempt = 0;
         loop {
-            let req = self.client.post(url).json(body).bearer_auth(key);
+            let mut req = self.client.post(url).json(body);
+            if let Some(k) = key.filter(|s| !s.is_empty()) {
+                req = req.bearer_auth(k);
+            }
+            if *provider == ProviderKind::OpenRouter {
+                req = req
+                    .header("HTTP-Referer", "https://github.com/galaxycoils/grok-muse")
+                    .header("X-Title", "Grok-Muse");
+            }
             match req.send().await {
                 Ok(resp) => {
                     let status = resp.status();
@@ -419,17 +585,7 @@ impl LlmBackend for ReqwestLlmBackend {
         target: &ModelTarget,
         messages: &[ChatMessage],
     ) -> Result<ChatCompletionResponse> {
-        let api_key = match target.provider {
-            crate::router::ProviderKind::Meta => self.meta_api_key.clone().or_else(|| {
-                crate::secrets::KeychainSecrets::default()
-                    .get_meta_key()
-                    .ok()
-            }),
-            crate::router::ProviderKind::Xai => self.xai_api_key.clone().or_else(|| {
-                crate::secrets::KeychainSecrets::default()
-                    .get_xai_key()
-                    .ok()
-            }),
+        match target.provider {
             crate::router::ProviderKind::Claude => {
                 let driver =
                     crate::cli_driver::CliDriver::new(crate::cli_driver::CliProvider::Claude);
@@ -444,25 +600,62 @@ impl LlmBackend for ReqwestLlmBackend {
                     .complete(target, messages)
                     .await;
             }
+            _ => {}
+        }
+
+        let mut key = self.resolve_bearer_token(target).await?;
+        let endpoint = if target.protocol == WireProtocol::Responses {
+            "responses"
+        } else {
+            "chat/completions"
+        };
+        let url = format!("{}/{endpoint}", target.api_base.trim_end_matches('/'));
+        let body = if target.protocol == WireProtocol::Responses {
+            build_responses_body(
+                &target.model,
+                messages,
+                None,
+                Some(0.2),
+                false,
+                target.allow_vision,
+            )
+        } else {
+            let safe_msgs: Vec<ChatMessage> = if target.allow_vision {
+                messages.to_vec()
+            } else {
+                messages
+                    .iter()
+                    .map(|m| {
+                        let mut c = m.clone();
+                        c.images.clear();
+                        c
+                    })
+                    .collect()
+            };
+            serde_json::json!({
+                "model": target.model,
+                "messages": Self::serialize_openai_messages(&safe_msgs),
+                "temperature": 0.2,
+            })
         };
 
-        let Some(key) = api_key else {
-            return Err(GmError::Config(format!(
-                "No API key configured for provider '{:?}'. Please configure it in macOS Keychain or via environment variable.",
-                target.provider
-            )));
-        };
+        let mut resp = self
+            .send_with_retries(&url, key.as_deref(), &target.provider, &body)
+            .await?;
 
-        let url = format!("{}/chat/completions", target.api_base.trim_end_matches('/'));
-        let serialized_messages = Self::serialize_openai_messages(messages);
-
-        let body = serde_json::json!({
-            "model": target.model,
-            "messages": serialized_messages,
-            "temperature": 0.2,
-        });
-
-        let resp = self.send_with_retries(&url, &key, &body).await?;
+        if resp.status().as_u16() == 401
+            && let (Some(preset), Some(secret_ref)) = (
+                Self::oauth_preset(&target.provider),
+                target.credential_ref.as_deref(),
+            )
+        {
+            let refreshed =
+                refresh_oauth_bundle(&self.client, &self.secrets, preset, secret_ref).await?;
+            key = Some(refreshed.access_token);
+            resp = self
+                .send_with_retries(&url, key.as_deref(), &target.provider, &body)
+                .await?;
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -476,6 +669,23 @@ impl LlmBackend for ReqwestLlmBackend {
             .json()
             .await
             .map_err(|e| GmError::Provider(format!("Failed to parse response JSON: {e}")))?;
+
+        let image_count = if target.allow_vision {
+            messages.iter().map(|m| m.images.len()).sum()
+        } else {
+            0
+        };
+
+        if target.protocol == WireProtocol::Responses {
+            let mut parsed = parse_responses_json(&val, &target.model, 0.0);
+            parsed.estimated_cost_usd = estimate_cost_for_target(
+                target,
+                parsed.prompt_tokens,
+                parsed.completion_tokens,
+                image_count,
+            );
+            return Ok(parsed);
+        }
 
         let content = val["choices"][0]["message"]["content"]
             .as_str()
@@ -491,9 +701,8 @@ impl LlmBackend for ReqwestLlmBackend {
         let completion_tokens = val["usage"]["completion_tokens"]
             .as_u64()
             .unwrap_or(content.len() as u64) as u32;
-        let image_count = messages.iter().map(|m| m.images.len()).sum();
         let estimated_cost_usd =
-            estimate_api_cost_usd(&target.model, prompt_tokens, completion_tokens, image_count);
+            estimate_cost_for_target(target, prompt_tokens, completion_tokens, image_count);
 
         Ok(ChatCompletionResponse {
             id: val["id"].as_str().unwrap_or("resp").to_string(),
@@ -513,43 +722,70 @@ impl LlmBackend for ReqwestLlmBackend {
         temperature: f32,
         delta_tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<LlmResponse> {
-        let api_key = match target.provider {
-            crate::router::ProviderKind::Meta => self.meta_api_key.clone().or_else(|| {
-                crate::secrets::KeychainSecrets::default()
-                    .get_meta_key()
-                    .ok()
-            }),
-            crate::router::ProviderKind::Xai => self.xai_api_key.clone().or_else(|| {
-                crate::secrets::KeychainSecrets::default()
-                    .get_xai_key()
-                    .ok()
-            }),
-            crate::router::ProviderKind::Claude | crate::router::ProviderKind::Codex => {
-                let resp = self.complete(target, messages).await?;
-                let _ = delta_tx.send(resp.content.clone()).await;
-                return Ok(resp);
-            }
+        if matches!(
+            target.provider,
+            crate::router::ProviderKind::Claude | crate::router::ProviderKind::Codex
+        ) {
+            let resp = self.complete(target, messages).await?;
+            let _ = delta_tx.send(resp.content.clone()).await;
+            return Ok(resp);
+        }
+
+        let mut key = self.resolve_bearer_token(target).await?;
+        let endpoint = if target.protocol == WireProtocol::Responses {
+            "responses"
+        } else {
+            "chat/completions"
+        };
+        let url = format!("{}/{endpoint}", target.api_base.trim_end_matches('/'));
+        let body = if target.protocol == WireProtocol::Responses {
+            build_responses_body(
+                &target.model,
+                messages,
+                Some(max_tokens),
+                Some(temperature),
+                true,
+                target.allow_vision,
+            )
+        } else {
+            let safe_msgs: Vec<ChatMessage> = if target.allow_vision {
+                messages.to_vec()
+            } else {
+                messages
+                    .iter()
+                    .map(|m| {
+                        let mut c = m.clone();
+                        c.images.clear();
+                        c
+                    })
+                    .collect()
+            };
+            serde_json::json!({
+                "model": target.model,
+                "messages": Self::serialize_openai_messages(&safe_msgs),
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "stream": true,
+            })
         };
 
-        let Some(key) = api_key else {
-            return Err(GmError::Config(format!(
-                "No API key configured for provider '{:?}'. Please configure it in macOS Keychain or via environment variable.",
-                target.provider
-            )));
-        };
+        let mut resp = self
+            .send_with_retries(&url, key.as_deref(), &target.provider, &body)
+            .await?;
 
-        let url = format!("{}/chat/completions", target.api_base.trim_end_matches('/'));
-        let serialized_messages = Self::serialize_openai_messages(messages);
-
-        let body = serde_json::json!({
-            "model": target.model,
-            "messages": serialized_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": true,
-        });
-
-        let mut resp = self.send_with_retries(&url, &key, &body).await?;
+        if resp.status().as_u16() == 401
+            && let (Some(preset), Some(secret_ref)) = (
+                Self::oauth_preset(&target.provider),
+                target.credential_ref.as_deref(),
+            )
+        {
+            let refreshed =
+                refresh_oauth_bundle(&self.client, &self.secrets, preset, secret_ref).await?;
+            key = Some(refreshed.access_token);
+            resp = self
+                .send_with_retries(&url, key.as_deref(), &target.provider, &body)
+                .await?;
+        }
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -557,6 +793,23 @@ impl LlmBackend for ReqwestLlmBackend {
             return Err(GmError::Provider(format!(
                 "API returned error {status}: {text}"
             )));
+        }
+
+        let image_count = if target.allow_vision {
+            messages.iter().map(|m| m.images.len()).sum()
+        } else {
+            0
+        };
+
+        if target.protocol == WireProtocol::Responses {
+            return parse_responses_sse_stream(
+                resp,
+                &target.model,
+                messages,
+                delta_tx,
+                |pt, ct| estimate_cost_for_target(target, pt, ct, image_count),
+            )
+            .await;
         }
 
         let mut full_text = String::new();
@@ -647,9 +900,8 @@ impl LlmBackend for ReqwestLlmBackend {
                 .sum::<usize>()
                 .min(u32::MAX as usize) as u32
         });
-        let image_count = messages.iter().map(|m| m.images.len()).sum();
         let estimated_cost_usd =
-            estimate_api_cost_usd(&target.model, prompt_tokens, completion_tokens, image_count);
+            estimate_cost_for_target(target, prompt_tokens, completion_tokens, image_count);
 
         Ok(ChatCompletionResponse {
             id: "live_stream_resp".into(),
@@ -842,7 +1094,7 @@ impl HybridLlmClient {
         let estimate = if self.backend.is_mock() {
             0.0
         } else {
-            estimate_api_cost_usd(&target.model, input, max_tokens, images)
+            estimate_cost_for_target(target, input, max_tokens, images)
         };
         self.budget.reserve_attributed(bot_id, source, estimate)
     }
@@ -905,6 +1157,11 @@ impl HybridLlmClient {
                 match self.backend.complete(fb, &prepared_fb).await {
                     Ok(resp) => {
                         self.circuit_breaker.record_success(fb.provider.clone());
+                        if fb.provider == ProviderKind::ChatGpt {
+                            self.budget.record_chatgpt_allowance(
+                                (resp.prompt_tokens + resp.completion_tokens) as u64,
+                            );
+                        }
                         reservation.settle(resp.estimated_cost_usd)?;
                         return Ok(resp);
                     }
@@ -927,6 +1184,11 @@ impl HybridLlmClient {
             Ok(resp) => {
                 self.circuit_breaker
                     .record_success(primary.provider.clone());
+                if primary.provider == ProviderKind::ChatGpt {
+                    self.budget.record_chatgpt_allowance(
+                        (resp.prompt_tokens + resp.completion_tokens) as u64,
+                    );
+                }
                 reservation.settle(resp.estimated_cost_usd)?;
                 Ok(resp)
             }
@@ -1024,6 +1286,11 @@ impl HybridLlmClient {
                 {
                     Ok(resp) => {
                         self.circuit_breaker.record_success(fb.provider.clone());
+                        if fb.provider == ProviderKind::ChatGpt {
+                            self.budget.record_chatgpt_allowance(
+                                (resp.prompt_tokens + resp.completion_tokens) as u64,
+                            );
+                        }
                         reservation.settle(resp.estimated_cost_usd)?;
                         return Ok(resp);
                     }
@@ -1062,6 +1329,11 @@ impl HybridLlmClient {
             Ok(resp) => {
                 self.circuit_breaker
                     .record_success(primary.provider.clone());
+                if primary.provider == ProviderKind::ChatGpt {
+                    self.budget.record_chatgpt_allowance(
+                        (resp.prompt_tokens + resp.completion_tokens) as u64,
+                    );
+                }
                 reservation.settle(resp.estimated_cost_usd)?;
                 Ok(resp)
             }
@@ -1217,12 +1489,12 @@ mod tests {
         let budget = Arc::new(BudgetManager::new(BudgetConfig::default()));
         let client = HybridLlmClient::new(mock_backend.clone(), budget);
 
-        let mut target = ModelTarget {
-            provider: ProviderKind::Meta,
-            api_base: "https://api.meta.internal".into(),
-            model: "muse-spark".into(),
-            allow_vision: false, // Egress NOT allowed!
-        };
+        let mut target = ModelTarget::simple(
+            ProviderKind::Meta,
+            "https://api.meta.internal",
+            "muse-spark",
+            false, // Egress NOT allowed!
+        );
 
         let dummy_jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
         let msgs = vec![ChatMessage::with_jpeg(

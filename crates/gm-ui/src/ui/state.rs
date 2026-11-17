@@ -397,6 +397,11 @@ pub struct GrokUiState {
     pub applied_style_key: String,
     pub media_zoom: f32,
 
+    pub provider_selected_id: String,
+    pub provider_api_key_draft: Zeroizing<String>,
+    pub provider_oauth_token_draft: Zeroizing<String>,
+    pub provider_revalidate_check: bool,
+
     pub cards: InlineCardUiState,
 }
 
@@ -499,6 +504,10 @@ impl Default for GrokUiState {
             attachment_path: String::new(),
             applied_style_key: String::new(),
             media_zoom: 1.0,
+            provider_selected_id: "xai-default".into(),
+            provider_api_key_draft: Zeroizing::new(String::new()),
+            provider_oauth_token_draft: Zeroizing::new(String::new()),
+            provider_revalidate_check: false,
             cards: InlineCardUiState::default(),
         }
     }
@@ -533,6 +542,8 @@ impl GrokUiState {
             self.vault_secret_draft.zeroize();
             self.connector_secret_draft.zeroize();
             self.vault_csv_draft.zeroize();
+            self.provider_api_key_draft.zeroize();
+            self.provider_oauth_token_draft.zeroize();
             for secret in self.revealed_secrets.values_mut() {
                 secret.zeroize();
             }

@@ -691,11 +691,325 @@ pub fn draw_active_modal(
                                 });
                                 let daily = usage_data["daily_spent_usd"].as_f64().unwrap_or(0.0);
                                 let total = usage_data["weekly_spent_usd"].as_f64().unwrap_or(0.0);
+                                let cgpt_req = usage_data["chatgpt_allowance_requests"]
+                                    .as_u64()
+                                    .unwrap_or(0);
+                                let cgpt_tok = usage_data["chatgpt_allowance_tokens"]
+                                    .as_u64()
+                                    .unwrap_or(0);
                                 ui.label(format!(
-                                    "Today: ${daily:.4} · Weekly Total: ${total:.4}"
+                                    "API Spend · Today: ${daily:.4} · Weekly Total: ${total:.4}"
                                 ));
-                                for key in ["by_bot","by_source"]{ui.collapsing(key,|ui|{ui.monospace(serde_json::to_string_pretty(&usage_data[key]).unwrap_or_default());});}
-                                ui.label("Provider bases & models");
+                                ui.small(format!(
+                                    "ChatGPT Included Allowance (separate from USD spend): {cgpt_req} requests · {cgpt_tok} tokens"
+                                ));
+                                for key in ["by_bot", "by_source"] {
+                                    ui.collapsing(key, |ui| {
+                                        ui.monospace(
+                                            serde_json::to_string_pretty(&usage_data[key])
+                                                .unwrap_or_default(),
+                                        );
+                                    });
+                                }
+
+                                ui.separator();
+                                ui.strong("LLM Provider Profiles (ChatGPT OAuth, Kilo, OpenRouter, Nous, Custom)");
+                                if settings_config.providers.profiles.is_empty() {
+                                    settings_config.providers.profiles =
+                                        gm_core::config::default_provider_profiles();
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label("Workspace default:");
+                                    let ws_curr = settings_config
+                                        .providers
+                                        .workspace_default_profile_id
+                                        .clone()
+                                        .unwrap_or_else(|| "(auto)".into());
+                                    egui::ComboBox::from_id_salt("ws_default_provider")
+                                        .selected_text(&ws_curr)
+                                        .show_ui(ui, |ui| {
+                                            for p in &settings_config.providers.profiles {
+                                                let selected = settings_config
+                                                    .providers
+                                                    .workspace_default_profile_id
+                                                    .as_deref()
+                                                    == Some(p.id.as_str());
+                                                if ui
+                                                    .selectable_label(selected, &p.display_name)
+                                                    .clicked()
+                                                {
+                                                    settings_config
+                                                        .providers
+                                                        .workspace_default_profile_id =
+                                                        Some(p.id.clone());
+                                                }
+                                            }
+                                        });
+                                    ui.label("Account default:");
+                                    let acc_curr = settings_config
+                                        .providers
+                                        .account_default_profile_id
+                                        .clone()
+                                        .unwrap_or_else(|| "(auto)".into());
+                                    egui::ComboBox::from_id_salt("acc_default_provider")
+                                        .selected_text(&acc_curr)
+                                        .show_ui(ui, |ui| {
+                                            for p in &settings_config.providers.profiles {
+                                                let selected = settings_config
+                                                    .providers
+                                                    .account_default_profile_id
+                                                    .as_deref()
+                                                    == Some(p.id.as_str());
+                                                if ui
+                                                    .selectable_label(selected, &p.display_name)
+                                                    .clicked()
+                                                {
+                                                    settings_config
+                                                        .providers
+                                                        .account_default_profile_id =
+                                                        Some(p.id.clone());
+                                                }
+                                            }
+                                        });
+                                });
+
+                                ui.horizontal_wrapped(|ui| {
+                                    for p in &settings_config.providers.profiles {
+                                        let state_dot = match p.connection_state {
+                                            gm_core::config::ProviderConnectionState::Connected => "●",
+                                            gm_core::config::ProviderConnectionState::NeedsRevalidation => "⚠",
+                                            gm_core::config::ProviderConnectionState::Error => "✕",
+                                            gm_core::config::ProviderConnectionState::Unconfigured
+                                            | gm_core::config::ProviderConnectionState::AuthExpired => "○",
+                                        };
+                                        if ui
+                                            .selectable_label(
+                                                ui_state.provider_selected_id == p.id,
+                                                format!("{state_dot} {}", p.display_name),
+                                            )
+                                            .clicked()
+                                        {
+                                            ui_state.provider_selected_id = p.id.clone();
+                                            ui_state.provider_revalidate_check = false;
+                                        }
+                                    }
+                                    if ui.small_button("+ Custom").clicked() {
+                                        let id = format!(
+                                            "custom-{}",
+                                            settings_config.providers.profiles.len() + 1
+                                        );
+                                        settings_config.providers.profiles.push(
+                                            gm_core::config::ProviderProfileConfig {
+                                                id: id.clone(),
+                                                display_name: format!("Custom ({id})"),
+                                                preset: gm_core::config::ProviderPreset::Custom,
+                                                protocol: gm_core::config::WireProtocol::ChatCompletions,
+                                                auth_mode: gm_core::config::ProviderAuthMode::ApiKey,
+                                                base_url: "https://api.example.com/v1".into(),
+                                                selected_model: "gpt-4o-mini".into(),
+                                                ..Default::default()
+                                            },
+                                        );
+                                        ui_state.provider_selected_id = id;
+                                    }
+                                });
+
+                                if let Some(idx) = settings_config
+                                    .providers
+                                    .profiles
+                                    .iter()
+                                    .position(|p| p.id == ui_state.provider_selected_id)
+                                {
+                                    let prof = &mut settings_config.providers.profiles[idx];
+                                    ui.group(|ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.strong(&prof.display_name);
+                                            ui.small(format!(
+                                                "({:?} / {:?} / {:?})",
+                                                prof.preset, prof.auth_mode, prof.connection_state
+                                            ));
+                                        });
+                                        if let Some(ref err) = prof.last_error {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(0xEF, 0x44, 0x44),
+                                                err,
+                                            );
+                                        }
+                                        if matches!(
+                                            prof.connection_state,
+                                            gm_core::config::ProviderConnectionState::NeedsRevalidation
+                                        ) {
+                                            ui.colored_label(
+                                                egui::Color32::from_rgb(0xF5, 0x9E, 0x0B),
+                                                "Endpoint origin changed: revalidate credentials before sending requests.",
+                                            );
+                                            ui.checkbox(
+                                                &mut ui_state.provider_revalidate_check,
+                                                "Revalidate credentials for new endpoint origin",
+                                            );
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.label("Base URL:");
+                                            ui.text_edit_singleline(&mut prof.base_url);
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.label("Selected model:");
+                                            ui.text_edit_singleline(&mut prof.selected_model);
+                                            if matches!(
+                                                prof.preset,
+                                                gm_core::config::ProviderPreset::Custom
+                                            ) {
+                                                let proto_lbl = match prof.protocol {
+                                                    gm_core::config::WireProtocol::Responses => "Responses (/responses)",
+                                                    gm_core::config::WireProtocol::ChatCompletions => "ChatCompletions",
+                                                    gm_core::config::WireProtocol::Cli => "CLI",
+                                                };
+                                                egui::ComboBox::from_id_salt("custom_proto")
+                                                    .selected_text(proto_lbl)
+                                                    .show_ui(ui, |ui| {
+                                                        ui.selectable_value(
+                                                            &mut prof.protocol,
+                                                            gm_core::config::WireProtocol::ChatCompletions,
+                                                            "ChatCompletions",
+                                                        );
+                                                        ui.selectable_value(
+                                                            &mut prof.protocol,
+                                                            gm_core::config::WireProtocol::Responses,
+                                                            "Responses (/responses)",
+                                                        );
+                                                    });
+                                            }
+                                        });
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(
+                                                &mut prof.allow_screenshot_egress,
+                                                "Allow screenshot egress to this provider",
+                                            );
+                                        });
+                                        if matches!(
+                                            prof.auth_mode,
+                                            gm_core::config::ProviderAuthMode::ChatGptOAuth
+                                                | gm_core::config::ProviderAuthMode::NousPortalOAuth
+                                        ) {
+                                            ui.horizontal(|ui| {
+                                                if ui.button("Start OAuth Sign-In").clicked() {
+                                                    send(DaemonRequest::ProviderOAuthAction {
+                                                        profile_id: prof.id.clone(),
+                                                        op: "start".into(),
+                                                        payload: serde_json::json!({}),
+                                                    });
+                                                }
+                                                if prof.credential_ref.is_some()
+                                                    && ui.button("Disconnect OAuth").clicked()
+                                                {
+                                                    send(DaemonRequest::ProviderOAuthAction {
+                                                        profile_id: prof.id.clone(),
+                                                        op: "disconnect".into(),
+                                                        payload: serde_json::json!({}),
+                                                    });
+                                                }
+                                            });
+                                            if let Some(auth_url) = ui_state.responses
+                                                ["provider_oauth"]["authorize_url"]
+                                                .as_str()
+                                            {
+                                                ui.hyperlink_to(
+                                                    "Open Sign-In Window in Browser",
+                                                    auth_url,
+                                                );
+                                            }
+                                            ui.horizontal(|ui| {
+                                                ui.label("OAuth token:");
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut *ui_state.provider_oauth_token_draft,
+                                                    )
+                                                    .password(true)
+                                                    .desired_width(210.0)
+                                                    .hint_text("Access token from callback"),
+                                                );
+                                                if ui
+                                                    .add_enabled(
+                                                        !ui_state
+                                                            .provider_oauth_token_draft
+                                                            .trim()
+                                                            .is_empty(),
+                                                        egui::Button::new("Connect OAuth"),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    let tok = std::mem::take(
+                                                        &mut *ui_state.provider_oauth_token_draft,
+                                                    );
+                                                    send(DaemonRequest::ProviderOAuthAction {
+                                                        profile_id: prof.id.clone(),
+                                                        op: "save_bundle".into(),
+                                                        payload: serde_json::json!({
+                                                            "access_token": tok,
+                                                        }),
+                                                    });
+                                                }
+                                            });
+                                        } else {
+                                            ui.horizontal(|ui| {
+                                                ui.label("API Key / Token:");
+                                                ui.add(
+                                                    egui::TextEdit::singleline(
+                                                        &mut *ui_state.provider_api_key_draft,
+                                                    )
+                                                    .password(true)
+                                                    .desired_width(210.0)
+                                                    .hint_text("Stored in OS Keychain"),
+                                                );
+                                            });
+                                        }
+                                        ui.horizontal(|ui| {
+                                            if ui.button("Save Provider Profile").clicked() {
+                                                let key = std::mem::take(
+                                                    &mut *ui_state.provider_api_key_draft,
+                                                );
+                                                let api_key = if key.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(key)
+                                                };
+                                                send(DaemonRequest::SaveProviderProfile {
+                                                    profile: Box::new(prof.clone()),
+                                                    api_key,
+                                                    revalidate_credentials: ui_state
+                                                        .provider_revalidate_check,
+                                                    workspace_default_profile_id: settings_config
+                                                        .providers
+                                                        .workspace_default_profile_id
+                                                        .clone(),
+                                                    account_default_profile_id: settings_config
+                                                        .providers
+                                                        .account_default_profile_id
+                                                        .clone(),
+                                                });
+                                                ui_state.provider_revalidate_check = false;
+                                            }
+                                            if ui.button("Discover Models").clicked() {
+                                                send(DaemonRequest::DiscoverProviderModels {
+                                                    profile_id: prof.id.clone(),
+                                                });
+                                            }
+                                        });
+                                        if !prof.discovered_models.is_empty() {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.small("Discovered:");
+                                                for m in prof.discovered_models.iter().take(10) {
+                                                    if ui.small_button(m).clicked() {
+                                                        prof.selected_model = m.clone();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    });
+                                }
+
+                                ui.separator();
+                                ui.label("Legacy Meta / xAI endpoints & models");
                                 ui.text_edit_singleline(&mut settings_config.providers.meta_api_base);
                                 ui.text_edit_singleline(&mut settings_config.providers.meta_reasoning_model);
                                 ui.text_edit_singleline(&mut settings_config.providers.xai_api_base);

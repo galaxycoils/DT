@@ -535,6 +535,10 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
         .route("/api/system/kill", post(system_kill_route))
         .route("/api/system/updates/check", post(system_updates_check_route))
         .route("/api/system/updates/download", post(system_updates_download_route))
+        .route("/api/system/providers", get(system_providers_get_route))
+        .route("/api/system/providers/profile", post(system_provider_profile_route))
+        .route("/api/system/providers/:id/discover-models", post(system_provider_discover_models_route))
+        .route("/api/system/providers/:id/oauth/:op", post(system_provider_oauth_route))
         .route("/api/system/providers/key", post(system_provider_key_route))
         .route(
             "/api/system/support-bundle",
@@ -3483,6 +3487,8 @@ async fn get_usage_route(
         daily_cap_usd: budget_cfg.daily_spend_cap_usd,
         per_job_cap_usd: budget_cfg.per_job_spend_cap_usd,
         max_daily_notifications: budget_cfg.max_daily_notifications,
+        chatgpt_allowance_requests: 0,
+        chatgpt_allowance_tokens: 0,
         by_bot: Vec::new(),
         by_source: Vec::new(),
         daily_series: Vec::new(),
@@ -3564,6 +3570,18 @@ async fn upsert_routine_route(
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(ToString::to_string);
+    let preferred_provider = body
+        .get("preferred_provider")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let preferred_model = body
+        .get("preferred_model")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
     let enabled = body
         .get("enabled")
         .and_then(|v| v.as_bool())
@@ -3581,6 +3599,8 @@ async fn upsert_routine_route(
         quiet_hours,
         interval_minutes,
         webhook_secret_ref,
+        preferred_provider,
+        preferred_model,
         enabled,
     };
     state
@@ -4235,6 +4255,139 @@ async fn system_provider_key_route(
         "provider": provider,
         "configured": !api_key.is_empty(),
     })))
+}
+
+async fn system_providers_get_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    Ok(Json(state.supervisor.providers_config()))
+}
+
+async fn system_provider_profile_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    if body.get("profile").is_none()
+        && (body.get("workspace_default_profile_id").is_some()
+            || body.get("account_default_profile_id").is_some())
+    {
+        let ws_def = body
+            .get("workspace_default_profile_id")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        let acc_def = body
+            .get("account_default_profile_id")
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string);
+        state
+            .supervisor
+            .set_default_provider_profiles(ws_def, acc_def)
+            .map_err(map_gm_error)?;
+        let cfg = crate::persist_providers_config(
+            &state.shared_config,
+            state.config_path.as_deref(),
+            &state.supervisor,
+        )
+        .map_err(map_gm_error)?;
+        return Ok(Json(serde_json::json!({ "providers": cfg })));
+    }
+
+    let profile_val = body.get("profile").cloned().unwrap_or_else(|| body.clone());
+    let profile: gm_core::config::ProviderProfileConfig = serde_json::from_value(profile_val)
+        .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid profile: {e}")))?;
+    let api_key = body
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    if let Some(ref k) = api_key {
+        state
+            .supervisor
+            .scrubber()
+            .register(format!("profile_{}", profile.id), k);
+    }
+    let revalidate = body
+        .get("revalidate_credentials")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let saved = state
+        .supervisor
+        .upsert_provider_profile(profile, api_key.as_deref(), revalidate)
+        .map_err(map_gm_error)?;
+    let ws_def = body
+        .get("workspace_default_profile_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    let acc_def = body
+        .get("account_default_profile_id")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+    if ws_def.is_some() || acc_def.is_some() {
+        state
+            .supervisor
+            .set_default_provider_profiles(ws_def, acc_def)
+            .map_err(map_gm_error)?;
+    }
+    let cfg = crate::persist_providers_config(
+        &state.shared_config,
+        state.config_path.as_deref(),
+        &state.supervisor,
+    )
+    .map_err(map_gm_error)?;
+    Ok(Json(serde_json::json!({
+        "profile": saved,
+        "providers": cfg,
+    })))
+}
+
+async fn system_provider_discover_models_route(
+    headers: HeaderMap,
+    Path(profile_id): Path<String>,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let models = state
+        .supervisor
+        .discover_provider_models(&profile_id)
+        .await
+        .map_err(map_gm_error)?;
+    let cfg = crate::persist_providers_config(
+        &state.shared_config,
+        state.config_path.as_deref(),
+        &state.supervisor,
+    )
+    .map_err(map_gm_error)?;
+    Ok(Json(serde_json::json!({
+        "profile_id": profile_id,
+        "models": models,
+        "providers": cfg,
+    })))
+}
+
+async fn system_provider_oauth_route(
+    headers: HeaderMap,
+    Path((profile_id, op)): Path<(String, String)>,
+    State(state): State<CompanionWebState>,
+    body: Option<Json<serde_json::Value>>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let payload = body.map(|b| b.0).unwrap_or_else(|| serde_json::json!({}));
+    let out = state
+        .supervisor
+        .oauth_action_for_profile(&profile_id, &op, &payload)
+        .await
+        .map_err(map_gm_error)?;
+    let _ = crate::persist_providers_config(
+        &state.shared_config,
+        state.config_path.as_deref(),
+        &state.supervisor,
+    );
+    Ok(Json(out))
 }
 
 async fn system_support_bundle_route(
@@ -4921,6 +5074,96 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(tpl_exp.status(), 200);
+
+        let prov_get = client
+            .get(format!("{base}/api/system/providers"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(prov_get.status(), 200);
+        let prov_body: serde_json::Value = prov_get.json().await.unwrap();
+        assert!(
+            prov_body["profiles"]
+                .as_array()
+                .is_some_and(|arr| arr.iter().any(|p| p["id"] == "chatgpt-default"))
+        );
+
+        let oauth_start = client
+            .post(format!("{base}/api/system/providers/chatgpt-default/oauth/start"))
+            .bearer_auth("secret-token")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(oauth_start.status(), 200);
+        let start_json: serde_json::Value = oauth_start.json().await.unwrap();
+        assert!(
+            start_json["authorize_url"]
+                .as_str()
+                .is_some_and(|s| s.contains("code_challenge_method=S256"))
+        );
+
+        let oauth_save = client
+            .post(format!(
+                "{base}/api/system/providers/chatgpt-default/oauth/save_bundle"
+            ))
+            .bearer_auth("secret-token")
+            .json(&serde_json::json!({
+                "access_token": "tok-live-secret",
+                "account_id": "acct-test",
+                "account_label": "Darius ChatGPT"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(oauth_save.status(), 200);
+        let save_json: serde_json::Value = oauth_save.json().await.unwrap();
+        assert_eq!(save_json["connected"], true);
+
+        let custom_save = client
+            .post(format!("{base}/api/system/providers/profile"))
+            .bearer_auth("secret-token")
+            .json(&serde_json::json!({
+                "profile": {
+                    "id": "custom-gw",
+                    "display_name": "Custom Gateway",
+                    "preset": "custom",
+                    "protocol": "responses",
+                    "auth_mode": "api_key",
+                    "base_url": "https://api-a.example.com/v1",
+                    "default_model": "gpt-4o",
+                    "allow_screenshot_egress": false,
+                    "enabled": true
+                },
+                "api_key": "sk-custom-secret",
+                "workspace_default_profile_id": "custom-gw"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(custom_save.status(), 200);
+        let cs_json: serde_json::Value = custom_save.json().await.unwrap();
+        assert_eq!(cs_json["profile"]["connection_state"], "connected");
+        assert_eq!(
+            cs_json["providers"]["workspace_default_profile_id"],
+            "custom-gw"
+        );
+
+        let oauth_disc = client
+            .post(format!(
+                "{base}/api/system/providers/chatgpt-default/oauth/disconnect"
+            ))
+            .bearer_auth("secret-token")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(oauth_disc.status(), 200);
+        assert_eq!(
+            oauth_disc.json::<serde_json::Value>().await.unwrap()["connected"],
+            false
+        );
 
         comp_handle.abort();
         spaces_handle.abort();

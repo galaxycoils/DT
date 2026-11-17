@@ -206,6 +206,10 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
         DaemonRequest::ImportMemory { .. } => PendingKind::ImportMemory,
         DaemonRequest::ForgetPlan { .. } => PendingKind::ForgetPlan,
         DaemonRequest::ForgetConfirm { .. } => PendingKind::ForgetConfirm,
+        DaemonRequest::GetProviderSettings
+        | DaemonRequest::SaveProviderProfile { .. }
+        | DaemonRequest::DiscoverProviderModels { .. } => PendingKind::ToolResult("providers".into()),
+        DaemonRequest::ProviderOAuthAction { .. } => PendingKind::ToolResult("provider_oauth".into()),
         DaemonRequest::UpdateDiscretion { .. } => PendingKind::UpdateDiscretion,
         _ => PendingKind::Other,
     }
@@ -367,6 +371,10 @@ impl ViewState {
         self.bot_statuses = value["bot_statuses"].clone();
         self.connected_app_count = value["connected_app_count"].as_u64().unwrap_or(0);
         self.version = value["version"].as_str().unwrap_or_default().to_string();
+        if !value["providers"].is_null() {
+            self.tool_results
+                .insert("providers".into(), value["providers"].clone());
+        }
         if let Some(arr) = value["goals"].as_array() {
             self.goals = arr.clone();
         }
@@ -880,6 +888,20 @@ impl eframe::App for NativeApp {
                         );
                     }
                 } else {
+                    if key == "providers" || key == "provider_oauth" {
+                        let candidate = value.get("providers").unwrap_or(&value);
+                        if let Ok(parsed) =
+                            serde_json::from_value::<gm_core::config::ProvidersConfig>(candidate.clone())
+                        {
+                            self.settings_config.providers = parsed;
+                        } else if let Some(prof_val) = value.get("profile")
+                            && let Ok(prof) = serde_json::from_value::<
+                                gm_core::config::ProviderProfileConfig,
+                            >(prof_val.clone())
+                        {
+                            let _ = self.settings_config.providers.upsert_profile(prof, false);
+                        }
+                    }
                     self.ui_state.responses[key] = value;
                 }
             }

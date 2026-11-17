@@ -383,12 +383,12 @@ mod tests {
         assert_eq!(bridge.config().device, VlmDevice::Metal);
 
         let adapter = LocalVlmLlmAdapter::new(bridge);
-        let target = ModelTarget {
-            provider: crate::router::ProviderKind::Meta,
-            api_base: "local://vlm".into(),
-            model: "qwen2-vl-2b-metal".into(),
-            allow_vision: true,
-        };
+        let target = ModelTarget::simple(
+            crate::router::ProviderKind::Meta,
+            "local://vlm",
+            "qwen2-vl-2b-metal",
+            true,
+        );
         let messages = vec![ChatMessage::text("user", "Click button")];
 
         let resp = adapter.complete(&target, &messages).await.unwrap();
@@ -408,12 +408,12 @@ mod tests {
         let budget = Arc::new(BudgetManager::new(BudgetConfig::default()));
         let hybrid = HybridLlmClient::new(adapter, budget.clone());
 
-        let target = ModelTarget {
-            provider: crate::router::ProviderKind::Meta,
-            api_base: "local://vlm".into(),
-            model: "smolvlm-instruct-mlx".into(),
-            allow_vision: true,
-        };
+        let target = ModelTarget::simple(
+            crate::router::ProviderKind::Meta,
+            "local://vlm",
+            "smolvlm-instruct-mlx",
+            true,
+        );
         let messages = vec![ChatMessage::text("user", "Locate Submit button")];
 
         let resp = hybrid

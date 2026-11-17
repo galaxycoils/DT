@@ -2,6 +2,8 @@ pub mod budget;
 pub mod circuit_breaker;
 pub mod cli_driver;
 pub mod client;
+pub mod providers_oauth;
+pub mod responses_api;
 pub mod router;
 pub mod secrets;
 
@@ -12,6 +14,8 @@ pub use budget::*;
 pub use circuit_breaker::*;
 pub use cli_driver::*;
 pub use client::*;
+pub use providers_oauth::*;
+pub use responses_api::*;
 pub use router::*;
 pub use secrets::*;
 

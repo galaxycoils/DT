@@ -162,6 +162,9 @@ impl GmConfig {
                 "ui.computer_execution_mode must be one of: ask, always, never".into(),
             ));
         }
+        for profile in &self.providers.profiles {
+            let _ = extract_provider_origin(&profile.base_url)?;
+        }
         Ok(())
     }
     pub fn save(&self, path: &Path) -> crate::error::Result<()> {
@@ -242,6 +245,255 @@ impl Default for GmConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderPreset {
+    Meta,
+    Xai,
+    Claude,
+    Codex,
+    ChatGpt,
+    KiloGateway,
+    OpenRouter,
+    NousPortal,
+    #[default]
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WireProtocol {
+    #[default]
+    ChatCompletions,
+    Responses,
+    Cli,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderAuthMode {
+    #[default]
+    ApiKey,
+    ChatGptOAuth,
+    NousPortalOAuth,
+    Cli,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderConnectionState {
+    #[default]
+    Unconfigured,
+    Connected,
+    NeedsRevalidation,
+    AuthExpired,
+    Error,
+}
+
+pub fn extract_provider_origin(raw_url: &str) -> crate::error::Result<String> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() || trimmed.contains(char::is_whitespace) {
+        return Err(crate::error::GmError::Config(
+            "Provider base_url cannot be empty or contain whitespace".into(),
+        ));
+    }
+    let (scheme, rest) = trimmed.split_once("://").ok_or_else(|| {
+        crate::error::GmError::Config(format!(
+            "Provider base_url '{trimmed}' must include scheme (https:// or loopback http://)"
+        ))
+    })?;
+    let scheme_lower = scheme.to_ascii_lowercase();
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() || authority.contains('@') {
+        return Err(crate::error::GmError::Config(format!(
+            "Provider base_url '{trimmed}' has invalid authority"
+        )));
+    }
+    let host_only = if authority.starts_with('[') {
+        authority
+            .split(']')
+            .next()
+            .map(|h| h.trim_start_matches('['))
+            .unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let is_loopback = matches!(
+        host_only.to_ascii_lowercase().as_str(),
+        "127.0.0.1" | "localhost" | "::1"
+    );
+    match scheme_lower.as_str() {
+        "https" => Ok(format!("https://{}", authority.to_ascii_lowercase())),
+        "http" if is_loopback => Ok(format!("http://{}", authority.to_ascii_lowercase())),
+        "http" => Err(crate::error::GmError::SafetyViolation(format!(
+            "RULE-NET-001: Plaintext http:// provider base_url is allowed only for loopback hosts, got '{trimmed}'"
+        ))),
+        "cli" => Ok(format!("cli://{}", authority.to_ascii_lowercase())),
+        _ => Err(crate::error::GmError::Config(format!(
+            "Unsupported provider URL scheme in '{trimmed}'"
+        ))),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderProfileConfig {
+    pub id: String,
+    pub display_name: String,
+    pub preset: ProviderPreset,
+    pub protocol: WireProtocol,
+    pub auth_mode: ProviderAuthMode,
+    pub base_url: String,
+    pub validated_origin: Option<String>,
+    pub selected_model: String,
+    pub discovered_models: Vec<String>,
+    pub credential_ref: Option<String>,
+    pub account_id: Option<String>,
+    pub account_label: Option<String>,
+    pub allow_screenshot_egress: bool,
+    pub fallback_profile_id: Option<String>,
+    pub connection_state: ProviderConnectionState,
+    pub last_error: Option<String>,
+}
+
+impl Default for ProviderProfileConfig {
+    fn default() -> Self {
+        Self {
+            id: "custom-local".into(),
+            display_name: "Custom OpenAI-Compatible".into(),
+            preset: ProviderPreset::Custom,
+            protocol: WireProtocol::ChatCompletions,
+            auth_mode: ProviderAuthMode::None,
+            base_url: "http://127.0.0.1:1234/v1".into(),
+            validated_origin: None,
+            selected_model: "local-model".into(),
+            discovered_models: Vec::new(),
+            credential_ref: None,
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: None,
+            connection_state: ProviderConnectionState::Unconfigured,
+            last_error: None,
+        }
+    }
+}
+
+pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
+    vec![
+        ProviderProfileConfig {
+            id: "meta-default".into(),
+            display_name: "Meta Muse".into(),
+            preset: ProviderPreset::Meta,
+            protocol: WireProtocol::ChatCompletions,
+            auth_mode: ProviderAuthMode::ApiKey,
+            base_url: "https://api.meta.ai/v1".into(),
+            validated_origin: Some("https://api.meta.ai".into()),
+            selected_model: "muse-spark".into(),
+            discovered_models: vec!["muse-spark".into(), "muse-wonder".into()],
+            credential_ref: Some("secret://keychain/meta_api_key".into()),
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: Some("xai-default".into()),
+            connection_state: ProviderConnectionState::Unconfigured,
+            last_error: None,
+        },
+        ProviderProfileConfig {
+            id: "xai-default".into(),
+            display_name: "xAI Grok".into(),
+            preset: ProviderPreset::Xai,
+            protocol: WireProtocol::ChatCompletions,
+            auth_mode: ProviderAuthMode::ApiKey,
+            base_url: "https://api.x.ai/v1".into(),
+            validated_origin: Some("https://api.x.ai".into()),
+            selected_model: "grok-4".into(),
+            discovered_models: vec!["grok-4".into(), "grok-4-fast".into()],
+            credential_ref: Some("secret://keychain/xai_api_key".into()),
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: None,
+            connection_state: ProviderConnectionState::Unconfigured,
+            last_error: None,
+        },
+        ProviderProfileConfig {
+            id: "chatgpt-default".into(),
+            display_name: "ChatGPT (Sign in with ChatGPT)".into(),
+            preset: ProviderPreset::ChatGpt,
+            protocol: WireProtocol::Responses,
+            auth_mode: ProviderAuthMode::ChatGptOAuth,
+            base_url: "https://api.openai.com/v1".into(),
+            validated_origin: Some("https://api.openai.com".into()),
+            selected_model: "gpt-5".into(),
+            discovered_models: vec!["gpt-5".into(), "gpt-5-mini".into(), "o3".into()],
+            credential_ref: None,
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: None,
+            connection_state: ProviderConnectionState::Unconfigured,
+            last_error: None,
+        },
+        ProviderProfileConfig {
+            id: "kilo-default".into(),
+            display_name: "Kilo Gateway".into(),
+            preset: ProviderPreset::KiloGateway,
+            protocol: WireProtocol::ChatCompletions,
+            auth_mode: ProviderAuthMode::ApiKey,
+            base_url: "https://api.kilo.ai/api/gateway/v1".into(),
+            validated_origin: Some("https://api.kilo.ai".into()),
+            selected_model: "anthropic/claude-sonnet-4".into(),
+            discovered_models: vec![],
+            credential_ref: Some("secret://keychain/kilo_api_key".into()),
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: None,
+            connection_state: ProviderConnectionState::Unconfigured,
+            last_error: None,
+        },
+        ProviderProfileConfig {
+            id: "openrouter-default".into(),
+            display_name: "OpenRouter".into(),
+            preset: ProviderPreset::OpenRouter,
+            protocol: WireProtocol::ChatCompletions,
+            auth_mode: ProviderAuthMode::ApiKey,
+            base_url: "https://openrouter.ai/api/v1".into(),
+            validated_origin: Some("https://openrouter.ai".into()),
+            selected_model: "openai/gpt-4.1".into(),
+            discovered_models: vec![],
+            credential_ref: Some("secret://keychain/openrouter_api_key".into()),
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: None,
+            connection_state: ProviderConnectionState::Unconfigured,
+            last_error: None,
+        },
+        ProviderProfileConfig {
+            id: "nous-default".into(),
+            display_name: "Nous Portal".into(),
+            preset: ProviderPreset::NousPortal,
+            protocol: WireProtocol::ChatCompletions,
+            auth_mode: ProviderAuthMode::NousPortalOAuth,
+            base_url: "https://inference-api.nousresearch.com/v1".into(),
+            validated_origin: Some("https://inference-api.nousresearch.com".into()),
+            selected_model: "Hermes-3-Llama-3.1-70B".into(),
+            discovered_models: vec!["Hermes-3-Llama-3.1-70B".into()],
+            credential_ref: None,
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: None,
+            connection_state: ProviderConnectionState::Unconfigured,
+            last_error: None,
+        },
+        ProviderProfileConfig::default(),
+    ]
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProvidersConfig {
@@ -252,6 +504,57 @@ pub struct ProvidersConfig {
     pub xai_model: String,
     pub allow_screenshot_egress_meta: bool,
     pub allow_screenshot_egress_xai: bool,
+    #[serde(default = "default_provider_profiles")]
+    pub profiles: Vec<ProviderProfileConfig>,
+    #[serde(default)]
+    pub workspace_default_profile_id: Option<String>,
+    #[serde(default)]
+    pub account_default_profile_id: Option<String>,
+}
+
+impl ProvidersConfig {
+    pub fn profile_by_id(&self, id: &str) -> Option<&ProviderProfileConfig> {
+        self.profiles.iter().find(|p| p.id == id)
+    }
+
+    pub fn profile_by_id_mut(&mut self, id: &str) -> Option<&mut ProviderProfileConfig> {
+        self.profiles.iter_mut().find(|p| p.id == id)
+    }
+
+    pub fn upsert_profile(
+        &mut self,
+        mut incoming: ProviderProfileConfig,
+        revalidate_credentials: bool,
+    ) -> crate::error::Result<ProviderProfileConfig> {
+        let origin = extract_provider_origin(&incoming.base_url)?;
+        incoming.id = incoming.id.trim().to_string();
+        if incoming.id.is_empty() {
+            return Err(crate::error::GmError::Config(
+                "Provider profile ID cannot be empty".into(),
+            ));
+        }
+        if let Some(existing) = self.profile_by_id(&incoming.id).cloned() {
+            let old_origin = extract_provider_origin(&existing.base_url).ok();
+            let origin_changed = old_origin.as_deref() != Some(origin.as_str());
+            if origin_changed && incoming.credential_ref.is_some() && !revalidate_credentials {
+                incoming.validated_origin = existing.validated_origin;
+                incoming.connection_state = ProviderConnectionState::NeedsRevalidation;
+            } else if revalidate_credentials {
+                incoming.validated_origin = Some(origin);
+            }
+            if let Some(slot) = self.profile_by_id_mut(&incoming.id) {
+                *slot = incoming.clone();
+            }
+        } else {
+            if incoming.validated_origin.is_none()
+                && (revalidate_credentials || incoming.credential_ref.is_none())
+            {
+                incoming.validated_origin = Some(origin);
+            }
+            self.profiles.push(incoming.clone());
+        }
+        Ok(incoming)
+    }
 }
 
 impl Default for ProvidersConfig {
@@ -264,6 +567,9 @@ impl Default for ProvidersConfig {
             xai_model: "grok-4".into(),
             allow_screenshot_egress_meta: false,
             allow_screenshot_egress_xai: false,
+            profiles: default_provider_profiles(),
+            workspace_default_profile_id: None,
+            account_default_profile_id: None,
         }
     }
 }
@@ -600,6 +906,59 @@ mod tests {
         let mut bad_exec = GmConfig::default();
         bad_exec.ui.computer_execution_mode = "yolo".into();
         assert!(bad_exec.validate().is_err());
+    }
+
+    #[test]
+    fn test_provider_profiles_and_destination_revalidation() {
+        let mut cfg = ProvidersConfig::default();
+        assert!(cfg.profile_by_id("chatgpt-default").is_some());
+        assert!(cfg.profile_by_id("kilo-default").is_some());
+        assert!(cfg.profile_by_id("openrouter-default").is_some());
+        assert!(cfg.profile_by_id("nous-default").is_some());
+        assert!(cfg.profile_by_id("custom-local").is_some());
+
+        // Loopback HTTP is permitted
+        assert_eq!(
+            extract_provider_origin("http://127.0.0.1:1234/v1").unwrap(),
+            "http://127.0.0.1:1234"
+        );
+        assert_eq!(
+            extract_provider_origin("http://localhost:8080/v1").unwrap(),
+            "http://localhost:8080"
+        );
+        // Remote HTTP is rejected
+        assert!(extract_provider_origin("http://example.com/v1").is_err());
+
+        // Changing destination origin with a saved credential triggers NeedsRevalidation
+        let mut custom = ProviderProfileConfig {
+            id: "custom-remote".into(),
+            display_name: "My Custom".into(),
+            preset: ProviderPreset::Custom,
+            protocol: WireProtocol::Responses,
+            auth_mode: ProviderAuthMode::ApiKey,
+            base_url: "https://llm-a.example.com/v1".into(),
+            validated_origin: Some("https://llm-a.example.com".into()),
+            selected_model: "model-a".into(),
+            discovered_models: vec![],
+            credential_ref: Some("secret://keychain/custom_a".into()),
+            account_id: None,
+            account_label: None,
+            allow_screenshot_egress: false,
+            fallback_profile_id: None,
+            connection_state: ProviderConnectionState::Connected,
+            last_error: None,
+        };
+        cfg.upsert_profile(custom.clone(), true).unwrap();
+        custom.base_url = "https://llm-b.example.com/v1".into();
+        let updated = cfg.upsert_profile(custom, false).unwrap();
+        assert_eq!(
+            updated.connection_state,
+            ProviderConnectionState::NeedsRevalidation
+        );
+        assert_eq!(
+            updated.validated_origin.as_deref(),
+            Some("https://llm-a.example.com")
+        );
     }
 }
 

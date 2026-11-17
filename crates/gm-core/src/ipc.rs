@@ -418,6 +418,27 @@ pub enum DaemonRequest {
         #[serde(default)]
         payload: serde_json::Value,
     },
+    GetProviderSettings,
+    SaveProviderProfile {
+        profile: Box<crate::config::ProviderProfileConfig>,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        revalidate_credentials: bool,
+        #[serde(default)]
+        workspace_default_profile_id: Option<String>,
+        #[serde(default)]
+        account_default_profile_id: Option<String>,
+    },
+    DiscoverProviderModels {
+        profile_id: String,
+    },
+    ProviderOAuthAction {
+        profile_id: String,
+        op: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
