@@ -99,6 +99,14 @@ pub struct BuiltInIntegrationStatus {
     pub supports_multi_account: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityProbeResult {
+    pub id: String,
+    pub status: String,
+    pub reachable: bool,
+    pub detail: String,
+}
+
 #[derive(Clone)]
 pub struct ConnectorStore {
     conn: Arc<Mutex<Connection>>,
@@ -329,8 +337,13 @@ impl ConnectorStore {
             self.list_connectors()
                 .ok()
                 .map(|list| {
-                    list.iter()
-                        .any(|c| c.enabled && c.id.to_ascii_lowercase().contains(needle))
+                    list.iter().any(|c| {
+                        c.enabled
+                            && c.id.to_ascii_lowercase().contains(needle)
+                            && (c.has_secret
+                                || c.status_text.to_ascii_lowercase().contains("verified")
+                                || c.status_text.to_ascii_lowercase().contains("connected"))
+                    })
                 })
                 .unwrap_or(false)
         };
@@ -489,6 +502,117 @@ impl ConnectorStore {
                 supports_multi_account: false,
             },
         ]
+    }
+
+    /// Probes an integration or connector for real readiness (`"connected"`, `"degraded"`, or `"setup_required"`),
+    /// never reporting `"connected"` without a verified secret, CLI check, or HTTP reachability probe.
+    pub async fn probe_integration_capability(
+        &self,
+        cfg: &GmConfig,
+        integration_id: &str,
+    ) -> CapabilityProbeResult {
+        let needle = integration_id.trim().to_ascii_lowercase();
+        if needle == "1password" {
+            let ok = std::process::Command::new("op")
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success());
+            return CapabilityProbeResult {
+                id: integration_id.to_string(),
+                status: if ok { "connected" } else { "setup_required" }.into(),
+                reachable: ok,
+                detail: if ok {
+                    "1Password CLI (`op`) available".into()
+                } else {
+                    "1Password CLI (`op`) not installed".into()
+                },
+            };
+        }
+
+        let matches = self
+            .list_connectors()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c.enabled && c.id.to_ascii_lowercase().contains(&needle))
+            .collect::<Vec<_>>();
+        if let Some(conn) = matches.first() {
+            if matches!(conn.transport, ConnectorTransport::RemoteHttps) {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build()
+                    .unwrap_or_else(|_| reqwest::Client::new());
+                let mut req = client.get(&conn.url_or_command);
+                if conn.has_secret
+                    && let Some(ref sref) = conn.secret_ref
+                    && let Some(account) = sref.strip_prefix("secret://keychain/")
+                    && let Some(ref backend) = self.secrets
+                    && let Ok(secret) = backend.get_secret(account)
+                {
+                    let header = conn.auth_header_name.as_deref().unwrap_or("Authorization");
+                    req = req.header(header, secret);
+                }
+                match req.send().await {
+                    Ok(resp) if resp.status().as_u16() < 500 => {
+                        let status = if resp.status().is_success() {
+                            "connected"
+                        } else {
+                            "degraded"
+                        };
+                        return CapabilityProbeResult {
+                            id: integration_id.to_string(),
+                            status: status.into(),
+                            reachable: true,
+                            detail: format!("HTTP {} from {}", resp.status(), conn.url_or_command),
+                        };
+                    }
+                    Ok(resp) => {
+                        return CapabilityProbeResult {
+                            id: integration_id.to_string(),
+                            status: "degraded".into(),
+                            reachable: false,
+                            detail: format!("HTTP {} from {}", resp.status(), conn.url_or_command),
+                        };
+                    }
+                    Err(err) => {
+                        return CapabilityProbeResult {
+                            id: integration_id.to_string(),
+                            status: "degraded".into(),
+                            reachable: false,
+                            detail: format!("Unreachable: {err}"),
+                        };
+                    }
+                }
+            }
+            return CapabilityProbeResult {
+                id: integration_id.to_string(),
+                status: "connected".into(),
+                reachable: true,
+                detail: format!("Stdio connector '{}'", conn.url_or_command),
+            };
+        }
+
+        let b = &cfg.openbot.bridges;
+        let bridge_ok = match needle.as_str() {
+            "slack" => b.slack_enabled && !b.slack_allowed_channel_ids.is_empty(),
+            "telegram" => b.telegram_enabled && !b.telegram_allowed_chat_ids.is_empty(),
+            "discord" => b.discord_enabled && !b.discord_allowed_channel_ids.is_empty(),
+            _ => false,
+        };
+        CapabilityProbeResult {
+            id: integration_id.to_string(),
+            status: if bridge_ok {
+                "connected"
+            } else {
+                "setup_required"
+            }
+            .into(),
+            reachable: bridge_ok,
+            detail: if bridge_ok {
+                "Bridge enabled with allowlist".into()
+            } else {
+                "Missing verified connector or credentials".into()
+            },
+        }
     }
 }
 

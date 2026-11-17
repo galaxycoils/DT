@@ -1,0 +1,17 @@
+{
+  "name": "@grok-muse/mobile",
+  "version": "0.6.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "scripts": {
+    "start": "expo start",
+    "test": "node --test tests/mobile-contract.test.mjs"
+  },
+  "dependencies": {
+    "expo": "^52.0.0",
+    "expo-router": "^4.0.0",
+    "react": "^19.0.0",
+    "react-native": "^0.77.0",
+    "zod": "4.6.6"
+  }
+}

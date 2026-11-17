@@ -1,12 +1,160 @@
 use crate::supervisor::OpenBotSupervisor;
+use chrono::Utc;
 use gm_core::config::ChatBridgesConfig;
 use gm_core::error::{GmError, Result};
 use gm_core::ipc::QueueControlAction;
 use gm_muse::directives::{RenderSurface, parse_directives, render_plain};
 use gm_safety::{AuditCategory, format_external_content_fence};
+use parking_lot::Mutex;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BridgeChannelMapping {
+    pub platform: String,
+    pub external_channel_id: String,
+    pub internal_channel_id: String,
+    #[serde(default)]
+    pub space_id: Option<String>,
+    #[serde(default)]
+    pub bot_id: Option<String>,
+    pub enabled: bool,
+    pub updated_at: String,
+}
+
+#[derive(Clone)]
+pub struct BridgeMappingStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl BridgeMappingStore {
+    pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
+        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        Self::init(conn)
+    }
+
+    pub fn in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()
+            .map_err(|e| GmError::Platform(format!("Bridge mapping DB error: {e}")))?;
+        Self::init(conn)
+    }
+
+    fn init(conn: Connection) -> Result<Self> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS bridge_channel_mappings_v1 (
+                platform TEXT NOT NULL,
+                external_channel_id TEXT NOT NULL,
+                internal_channel_id TEXT NOT NULL,
+                space_id TEXT,
+                bot_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (platform, external_channel_id)
+            );
+            CREATE TABLE IF NOT EXISTS bridge_inbound_dedup_v1 (
+                platform TEXT NOT NULL,
+                delivery_id TEXT NOT NULL,
+                seen_at TEXT NOT NULL,
+                PRIMARY KEY (platform, delivery_id)
+            );",
+        )
+        .map_err(|e| GmError::Platform(format!("Bridge mapping schema error: {e}")))?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    pub fn upsert_mapping(&self, mapping: &BridgeChannelMapping) -> Result<BridgeChannelMapping> {
+        let platform = mapping.platform.trim().to_ascii_lowercase();
+        let ext = mapping.external_channel_id.trim().to_string();
+        let internal = mapping.internal_channel_id.trim().to_string();
+        if platform.is_empty() || ext.is_empty() || internal.is_empty() {
+            return Err(GmError::Config(
+                "Bridge mapping platform, external_channel_id, and internal_channel_id cannot be empty"
+                    .into(),
+            ));
+        }
+        let updated_at = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO bridge_channel_mappings_v1
+             (platform, external_channel_id, internal_channel_id, space_id, bot_id, enabled, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(platform, external_channel_id) DO UPDATE SET
+               internal_channel_id = excluded.internal_channel_id,
+               space_id = excluded.space_id,
+               bot_id = excluded.bot_id,
+               enabled = excluded.enabled,
+               updated_at = excluded.updated_at",
+            params![
+                platform,
+                ext,
+                internal,
+                mapping.space_id,
+                mapping.bot_id,
+                if mapping.enabled { 1i64 } else { 0i64 },
+                updated_at,
+            ],
+        )
+        .map_err(|e| GmError::Platform(format!("Bridge mapping save error: {e}")))?;
+        Ok(BridgeChannelMapping {
+            platform,
+            external_channel_id: ext,
+            internal_channel_id: internal,
+            space_id: mapping.space_id.clone(),
+            bot_id: mapping.bot_id.clone(),
+            enabled: mapping.enabled,
+            updated_at,
+        })
+    }
+
+    pub fn get_mapping(
+        &self,
+        platform: &str,
+        external_channel_id: &str,
+    ) -> Result<Option<BridgeChannelMapping>> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT platform, external_channel_id, internal_channel_id, space_id, bot_id, enabled, updated_at
+             FROM bridge_channel_mappings_v1 WHERE platform = ?1 AND external_channel_id = ?2",
+            params![platform.trim().to_ascii_lowercase(), external_channel_id.trim()],
+            |r| {
+                Ok(BridgeChannelMapping {
+                    platform: r.get(0)?,
+                    external_channel_id: r.get(1)?,
+                    internal_channel_id: r.get(2)?,
+                    space_id: r.get(3)?,
+                    bot_id: r.get(4)?,
+                    enabled: r.get::<_, i64>(5)? != 0,
+                    updated_at: r.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| GmError::Platform(format!("Bridge mapping lookup error: {e}")))
+    }
+
+    /// Returns `true` if `delivery_id` is new, `false` if already seen.
+    pub fn mark_delivery_seen(&self, platform: &str, delivery_id: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        let inserted = conn
+            .execute(
+                "INSERT OR IGNORE INTO bridge_inbound_dedup_v1 (platform, delivery_id, seen_at)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    platform.trim().to_ascii_lowercase(),
+                    delivery_id.trim(),
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .map_err(|e| GmError::Platform(format!("Bridge dedup write error: {e}")))?;
+        Ok(inserted > 0)
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeInboundMessage {
@@ -159,11 +307,43 @@ impl BridgeRouter {
     }
 
     pub fn handle_inbound(&self, msg: &BridgeInboundMessage) -> Result<BridgeDispatchReply> {
-        if !self.is_channel_allowed(&msg.platform, &msg.external_channel_id) {
+        self.handle_inbound_with_mapping(msg, None)
+    }
+
+    pub fn handle_inbound_with_mapping(
+        &self,
+        msg: &BridgeInboundMessage,
+        mappings: Option<&BridgeMappingStore>,
+    ) -> Result<BridgeDispatchReply> {
+        let mapped = match mappings {
+            Some(store) => store.get_mapping(&msg.platform, &msg.external_channel_id)?,
+            None => None,
+        };
+        let mapped_enabled = mapped.as_ref().is_some_and(|m| m.enabled);
+        if !mapped_enabled && !self.is_channel_allowed(&msg.platform, &msg.external_channel_id) {
             return Err(GmError::SafetyViolation(format!(
                 "External bridge '{}' channel '{}' is not enabled or not in allowlist",
                 msg.platform, msg.external_channel_id
             )));
+        }
+
+        let target_channel = mapped
+            .as_ref()
+            .filter(|m| m.enabled)
+            .map(|m| m.internal_channel_id.as_str())
+            .unwrap_or("general");
+        if self
+            .supervisor
+            .channels()
+            .get_channel(target_channel)?
+            .is_none()
+        {
+            let _ = self.supervisor.channels().create_channel(
+                target_channel,
+                target_channel,
+                mapped.as_ref().and_then(|m| m.bot_id.as_deref()),
+                &[],
+            );
         }
 
         let trimmed = msg.text.trim();
@@ -232,7 +412,7 @@ impl BridgeRouter {
         let author = format!("{}:{}", msg.platform, msg.sender_name);
         let (_, spawned) =
             self.supervisor
-                .post_channel_message("general", &author, None, &inbound_content)?;
+                .post_channel_message(target_channel, &author, None, &inbound_content)?;
         let ids: Vec<String> = spawned.iter().map(|t| t.id.clone()).collect();
 
         Ok(BridgeDispatchReply {

@@ -1,0 +1,31 @@
+export const darkTokens = {
+  background: "#141414",
+  dialog: "#1E1E1E",
+  foreground: "#FFFFFF",
+  card: "#202020",
+  chatUser: "#5C5C5C",
+  chatUserForeground: "#FFFFFF",
+  mutedForeground: "#EBEBF599",
+  destructive: "#FF9592",
+  border: "#38383A",
+  unread: "#0A84FF",
+  workingDot: "#30D158",
+  success: "#30D158",
+  warning: "#FF9F0A",
+} as const;
+
+export const lightTokens = {
+  background: "#FFFFFF",
+  dialog: "#FFFFFF",
+  foreground: "#000000",
+  card: "#F2F2F7",
+  chatUser: "#1C1C1C",
+  chatUserForeground: "#FFFFFF",
+  mutedForeground: "#3C3C4399",
+  destructive: "#FF3B30",
+  border: "#C6C6C8",
+  unread: "#007AFF",
+  workingDot: "#34C759",
+  success: "#34C759",
+  warning: "#FF9500",
+} as const;

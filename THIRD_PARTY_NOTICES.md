@@ -35,6 +35,16 @@ Portions copyright (c) 2025-2026 Darius Maintainers.
 
 ---
 
+### Rakazo (`elie222/rakazo`) UI Tokens, Parity Patterns & Component Attribution
+
+Grok Muse incorporates and adapts UI design tokens, styling contracts, and workflow parity components inspired by or adapted from Rakazo (`https://github.com/elie222/rakazo`, commit `3b4faf19540e2883a4bd2833f6c65339e8f7d3f3`), licensed under the **Apache License, Version 2.0**.
+
+Per Rakazo's `NOTICE`:
+- Portions derived from `OpenMausBot` (`https://github.com/milind-soni/OpenMausBot`), Copyright 2026 Milind Soni and OpenMausBot contributors, licensed under the **Apache License, Version 2.0**.
+- Portions derived from `hermes-official-plugins` (`https://github.com/NousResearch/hermes-official-plugins`), Copyright (c) 2026 Nous Research, licensed under the **MIT License**.
+
+---
+
 ### Bundled Upstream Reference Texts (`crates/gm-muse/assets/upstream/`)
 
 Grok-Muse bundles the published `Meta/muse-agent` system prompt, workspace templates, documentation files, and core workflow skills verbatim (with the sole removal of the repository uploader's personal name from `USER.md`) under `crates/gm-muse/assets/upstream/` for local prompt fidelity and runtime bootstrapping.
