@@ -1,5 +1,6 @@
 mod muse_render;
 mod native;
+mod ui;
 use clap::{Parser, Subcommand};
 use gm_core::config::GmConfig;
 use gm_core::error::Result;
@@ -308,6 +309,7 @@ fn handle_daemon_event(ev: DaemonEvent) {
                 gm_ui_append_chat_message(role.as_ptr(), msg.as_ptr());
             }
         }
+        _ => {}
     }
     #[cfg(not(target_os = "macos"))]
     {

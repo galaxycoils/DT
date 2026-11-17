@@ -1,10 +1,16 @@
 use crate::a2a::A2aCoordinator;
-use crate::channels::{ChannelInfo, ChannelMessageRecord, ChannelStore};
+use crate::channels::{ChannelInfo, ChannelMessageRecord, ChannelStore, MessageReactionRecord};
 use crate::compaction::ContextCompactor;
+use crate::connectors::ConnectorStore;
+use crate::direct_chat::{DirectChatStore, DirectMessageRecord};
 use crate::discretion::DiscretionStore;
+use crate::library::{LibraryFilter, LibraryPage, LibraryStore};
 use crate::queue::{DurableTaskQueue, QueuedTask};
 use crate::roster::{BotProfile, BotRoster};
+use crate::rules::ApprovalRulesStore;
+use crate::sections::SectionStore;
 use crate::spaces::{SpaceKind, SpacesManager};
+use crate::vault::{KeychainSecretBackend, SecretBackend, VaultStore};
 use gm_agent::{
     AgentCapabilities, AgentLoop, AgentLoopConfig, DirectiveKind, GoalOpKind, InteractionHandler,
     MuseWorkflowDelegate, NonInteractiveHandler, SpaceOpKind,
@@ -39,18 +45,34 @@ pub struct AgUiEvent {
     pub payload: serde_json::Value,
 }
 
+/// Structured result of a direct 1:1 DM turn (`chat` reply or `/do`/`queue` task handoff).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectChatDispatchOutcome {
+    pub user_message: DirectMessageRecord,
+    pub assistant_message: DirectMessageRecord,
+    pub queued_task: Option<QueuedTask>,
+}
+
 /// Coordinates the multi-bot roster, durable SQLite FIFO task queues, shared channels,
 /// A2A handoffs, `GuiSeatMutex` serialization, Muse Stores (`SpacesManager`, `DiscretionStore`,
 /// `ProvenanceStore`, `FeedStore`), and AG-UI / DaemonEvent broadcasting.
 #[derive(Clone)]
 pub struct OpenBotSupervisor {
     pub(crate) config: GmConfig,
+    ui_override: Arc<parking_lot::RwLock<gm_core::config::UiConfig>>,
+    host_desktop_override: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) runtime_demo: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) runtime_paused: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) runtime_active: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) roster: BotRoster,
     pub(crate) queue: DurableTaskQueue,
     channels: ChannelStore,
+    sections: SectionStore,
+    direct_chat: DirectChatStore,
+    vault: VaultStore,
+    rules: ApprovalRulesStore,
+    connectors: ConnectorStore,
+    library: LibraryStore,
     a2a: A2aCoordinator,
     compactor: ContextCompactor,
     feed_store: Arc<gm_goals::FeedStore>,
@@ -69,9 +91,23 @@ pub struct OpenBotSupervisor {
 
 impl OpenBotSupervisor {
     pub fn open(
+        config: GmConfig,
+        audit: Arc<AuditLogger>,
+        daemon_events_tx: broadcast::Sender<DaemonEvent>,
+    ) -> Result<Self> {
+        Self::open_with_secret_backend(
+            config,
+            audit,
+            daemon_events_tx,
+            Arc::new(KeychainSecretBackend::default()),
+        )
+    }
+
+    pub fn open_with_secret_backend(
         mut config: GmConfig,
         audit: Arc<AuditLogger>,
         daemon_events_tx: broadcast::Sender<DaemonEvent>,
+        secret_backend: Arc<dyn SecretBackend>,
     ) -> Result<Self> {
         let defaults = GmConfig::default();
         if config.storage_dir != defaults.storage_dir
@@ -84,6 +120,12 @@ impl OpenBotSupervisor {
         let db_path = config.storage_dir.join("openbot.sqlite");
         let queue = DurableTaskQueue::open(&db_path)?;
         let channels = ChannelStore::open(&db_path)?;
+        let sections = SectionStore::open(&db_path)?;
+        let direct_chat = DirectChatStore::open(&db_path)?;
+        let vault = VaultStore::open_with_backend(&db_path, Arc::clone(&secret_backend))?;
+        let rules = ApprovalRulesStore::open(&db_path)?;
+        let connectors = ConnectorStore::open_with_backend(&db_path, Some(secret_backend))?;
+        let library = LibraryStore::open(&db_path)?;
         let feed_store = Arc::new(gm_goals::FeedStore::open(
             config.storage_dir.join("feed.sqlite"),
         )?);
@@ -125,15 +167,27 @@ impl OpenBotSupervisor {
             4,
         );
         let (agui_events_tx, _) = broadcast::channel(512);
+        let ui_override = Arc::new(parking_lot::RwLock::new(config.ui.clone()));
+        let host_desktop_override = Arc::new(std::sync::atomic::AtomicBool::new(
+            config.safety.allow_host_desktop,
+        ));
 
         Ok(Self {
             config,
+            ui_override,
+            host_desktop_override,
             runtime_demo: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             runtime_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             runtime_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             roster,
             queue,
             channels,
+            sections,
+            direct_chat,
+            vault,
+            rules,
+            connectors,
+            library,
             a2a,
             compactor,
             feed_store,
@@ -169,7 +223,7 @@ impl OpenBotSupervisor {
             "demo_mode": self.runtime_demo.load(std::sync::atomic::Ordering::SeqCst),
             "protocol_version": 1,
             "worker_running": self.runtime_active.load(std::sync::atomic::Ordering::SeqCst),
-            "host_desktop_opt_in": self.config.safety.allow_host_desktop,
+            "host_desktop_opt_in": self.allow_host_desktop(),
             "shell_environment": if self.config.workspace_vm.enabled { "offline_vm_configured_unverified" } else { "unavailable" },
             "platform": std::env::consts::OS,
             "companion_port": self.companion_port(),
@@ -182,6 +236,22 @@ impl OpenBotSupervisor {
 
     pub fn config(&self) -> &GmConfig {
         &self.config
+    }
+
+    pub fn ui_config(&self) -> gm_core::config::UiConfig {
+        self.ui_override.read().clone()
+    }
+
+    pub fn set_ui_config(&self, ui: gm_core::config::UiConfig) {
+        *self.ui_override.write() = ui;
+    }
+
+    pub fn allow_host_desktop(&self) -> bool {
+        self.host_desktop_override.load(Ordering::SeqCst)
+    }
+
+    pub fn set_allow_host_desktop(&self, enabled: bool) {
+        self.host_desktop_override.store(enabled, Ordering::SeqCst);
     }
 
     pub fn shared_paths(&self) -> MuseRuntimePaths {
@@ -198,6 +268,30 @@ impl OpenBotSupervisor {
 
     pub fn channels(&self) -> &ChannelStore {
         &self.channels
+    }
+
+    pub fn sections(&self) -> &SectionStore {
+        &self.sections
+    }
+
+    pub fn direct_chat(&self) -> &DirectChatStore {
+        &self.direct_chat
+    }
+
+    pub fn vault(&self) -> &VaultStore {
+        &self.vault
+    }
+
+    pub fn rules(&self) -> &ApprovalRulesStore {
+        &self.rules
+    }
+
+    pub fn connectors(&self) -> &ConnectorStore {
+        &self.connectors
+    }
+
+    pub fn library(&self) -> &LibraryStore {
+        &self.library
     }
 
     pub fn a2a(&self) -> &A2aCoordinator {
@@ -292,6 +386,205 @@ impl OpenBotSupervisor {
         self.daemon_events_tx.clone()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn post_direct_chat(
+        &self,
+        bot_id: &str,
+        role: &str,
+        author: &str,
+        content: &str,
+        reply_to_id: Option<&str>,
+        thread_id: Option<&str>,
+        card: Option<&serde_json::Value>,
+        request_id: Option<&str>,
+    ) -> Result<DirectMessageRecord> {
+        if self.roster.get_bot(bot_id).is_none() {
+            return Err(GmError::Config(format!("Unknown bot '{bot_id}'")));
+        }
+        let rec = self.direct_chat.append_message(
+            bot_id,
+            role,
+            author,
+            content,
+            reply_to_id,
+            thread_id,
+            card,
+            request_id,
+        )?;
+        let val = serde_json::to_value(&rec).unwrap_or_default();
+        let _ = self.daemon_events_tx.send(DaemonEvent::DirectMessageAdded {
+            bot_id: rec.bot_id.clone(),
+            message: val.clone(),
+        });
+        self.emit_agui(
+            "DIRECT_MESSAGE_ADDED",
+            &rec.id,
+            &rec.bot_id,
+            val,
+        );
+        Ok(rec)
+    }
+
+    pub fn toggle_message_reaction(
+        &self,
+        chat_kind: &str,
+        message_id: &str,
+        emoji: &str,
+        actor: &str,
+    ) -> Result<(String, Vec<MessageReactionRecord>)> {
+        let kind = chat_kind.trim().to_ascii_lowercase();
+        let (chat_id, reactions) = if kind == "dm" {
+            self.direct_chat.toggle_reaction(message_id, emoji, actor)?
+        } else {
+            self.channels.toggle_reaction(message_id, emoji, actor)?
+        };
+        let rx_val = serde_json::to_value(&reactions).unwrap_or_default();
+        let _ = self
+            .daemon_events_tx
+            .send(DaemonEvent::MessageReactionUpdated {
+                chat_kind: kind.clone(),
+                chat_id: chat_id.clone(),
+                message_id: message_id.to_string(),
+                reactions: rx_val.clone(),
+            });
+        self.emit_agui(
+            "REACTION_UPDATED",
+            message_id,
+            &chat_id,
+            serde_json::json!({
+                "chat_kind": kind,
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reactions": rx_val,
+            }),
+        );
+        Ok((chat_id, reactions))
+    }
+
+    pub fn list_library_page(
+        &self,
+        bot_id: &str,
+        filter: &str,
+        cursor: usize,
+        limit: usize,
+    ) -> Result<LibraryPage> {
+        self.library.query(
+            bot_id,
+            LibraryFilter::parse(filter),
+            cursor,
+            limit,
+            &self.roster,
+            &self.direct_chat,
+            &self.spaces,
+            &self.connectors,
+            &self.config,
+        )
+    }
+
+    pub fn bootstrap_snapshot(
+        &self,
+        daily_spent_usd: f64,
+        paused: bool,
+        helper_connected: bool,
+    ) -> serde_json::Value {
+        let bots = self.roster.list_bots();
+        let sections = self.sections.list_sections().unwrap_or_default();
+        let channels = self.channels.list_channels(true).unwrap_or_default();
+        let tasks = self
+            .queue
+            .list_tasks(None)
+            .unwrap_or_default()
+            .into_iter()
+            .take(100)
+            .collect::<Vec<_>>();
+        let routines = self.queue.list_routines().unwrap_or_default();
+        let unread_counts = self.direct_chat.unread_counts().unwrap_or_default();
+        let bot_statuses = self.direct_chat.list_bot_statuses().unwrap_or_default();
+        let integrations = self.connectors.builtin_integrations(&self.config);
+        let connected_app_count = integrations
+            .iter()
+            .filter(|i| i.status == "connected")
+            .count()
+            + self
+                .connectors
+                .list_connectors()
+                .unwrap_or_default()
+                .iter()
+                .filter(|c| c.enabled)
+                .count();
+        let feed_posts = self.feed_store.list_posts(30).unwrap_or_default();
+        let feed_ideas: Vec<gm_goals::ProactiveIdea> = {
+            let custom_path = self.shared_paths().storage_dir().join("workspace/custom_ideas.json");
+            SharedFileStore::global()
+                .read_text_with_sha256(&custom_path)
+                .ok()
+                .flatten()
+                .and_then(|(raw, _)| serde_json::from_str::<Vec<gm_goals::ProactiveIdea>>(&raw).ok())
+                .unwrap_or_default()
+        };
+        let goals = self
+            .goal_manager()
+            .list_goals()
+            .unwrap_or_default();
+        let spaces = self
+            .spaces
+            .list_spaces()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| {
+                let url = self
+                    .spaces
+                    .mint_url_for_slug(&s.slug, self.spaces_port())
+                    .unwrap_or_default();
+                serde_json::json!({ "meta": s, "url": url })
+            })
+            .collect::<Vec<_>>();
+        let skills = self
+            .skill_registry()
+            .ok()
+            .map(|reg| reg.skills().to_vec())
+            .unwrap_or_default();
+
+        let custom_connectors = self.connectors.list_connectors().unwrap_or_default();
+
+        let brief_prompt = self
+            .feed_store
+            .get_brief_prompt()
+            .ok()
+            .filter(|s| !s.is_empty());
+
+        serde_json::json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "status": {
+                "helper_connected": helper_connected,
+                "paused": paused,
+                "daily_spend_usd": daily_spent_usd,
+                "daily_cap_usd": self.config.budget.daily_spend_cap_usd,
+                "per_job_cap_usd": self.config.budget.per_job_spend_cap_usd,
+                "companion_port": self.companion_port(),
+                "spaces_port": self.spaces_port(),
+                "allow_host_desktop": self.allow_host_desktop(),
+            },
+            "ui": self.ui_config(),
+            "bots": bots,
+            "sections": sections,
+            "channels": channels,
+            "recent_tasks": tasks,
+            "routines": routines,
+            "unread_counts": unread_counts,
+            "bot_statuses": bot_statuses,
+            "connected_app_count": connected_app_count,
+            "integrations": integrations,
+            "custom_connectors": custom_connectors,
+            "feed": { "posts": feed_posts, "ideas": feed_ideas, "brief_prompt": brief_prompt },
+            "goals": goals,
+            "spaces": spaces,
+            "skills": skills,
+            "custom_rules": self.rules.list_rules().unwrap_or_default(),
+            "vault_items": self.vault.list_items(None).unwrap_or_default(),
+        })
+    }
+
     pub fn emit_agui(
         &self,
         event_type: impl Into<String>,
@@ -317,6 +610,290 @@ impl OpenBotSupervisor {
             }
             Err(error) => tracing::error!(%error, "Failed to persist runtime event"),
         }
+    }
+
+    /// Broadcast an ephemeral high-frequency AG-UI delta (e.g. token stream) without hitting SQLite per token.
+    pub fn emit_agui_ephemeral(
+        &self,
+        event_type: impl Into<String>,
+        run_id: impl Into<String>,
+        bot_id: impl Into<String>,
+        payload: serde_json::Value,
+    ) {
+        let evt = AgUiEvent {
+            sequence: 0,
+            event_type: event_type.into(),
+            run_id: run_id.into(),
+            bot_id: bot_id.into(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            payload,
+        };
+        let _ = self.agui_events_tx.send(evt);
+    }
+
+    /// Delete a sidebar section folder and clear `section_id` on any bots previously assigned to it.
+    pub fn delete_section_and_clear_bots(&self, section_id: &str) -> Result<bool> {
+        let clean = section_id.trim();
+        let deleted = self.sections.delete_section(clean)?;
+        if deleted {
+            for bot in self.roster.list_bots() {
+                if bot.section_id.as_deref() == Some(clean) {
+                    let _ = self
+                        .roster
+                        .save_bot_ui_prefs(&bot.id, &serde_json::json!({ "section_id": null }));
+                    let _ = self.daemon_events_tx.send(DaemonEvent::BotUpdated {
+                        bot_id: bot.id.clone(),
+                    });
+                }
+            }
+            let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+                reason: "sections_updated".into(),
+            });
+            self.emit_agui(
+                "SECTION_DELETED",
+                clean,
+                "",
+                serde_json::json!({ "id": clean }),
+            );
+        }
+        Ok(deleted)
+    }
+
+    /// Unified 1:1 DM dispatcher shared by IPC (`DaemonControlServer`) and Web (`CompanionWebServer`).
+    /// Routes `/do <cmd>` / `/task <cmd>` (or bots configured with `task_mode_default == "queue"`) to
+    /// the durable FIFO task queue; otherwise streams a contextual Muse DM turn and records the reply.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn dispatch_direct_chat(
+        &self,
+        bot_id: &str,
+        content: &str,
+        reply_to_id: Option<&str>,
+        thread_id: Option<&str>,
+        llm_client: &HybridLlmClient,
+        router: &LlmRouter,
+        budget: Option<&gm_llm::BudgetManager>,
+        kill_switch: Option<&KillSwitch>,
+        shared_cfg: Option<&GmConfig>,
+    ) -> Result<DirectChatDispatchOutcome> {
+        let clean_bot = bot_id.trim().to_ascii_lowercase();
+        let profile = self
+            .roster
+            .get_bot(&clean_bot)
+            .ok_or_else(|| GmError::Config(format!("Unknown bot '{bot_id}'")))?;
+        let trimmed = content.trim();
+        if trimmed.is_empty() || content.len() > 64 * 1024 {
+            return Err(GmError::Config(
+                "Direct message cannot be empty or exceed 64 KiB".into(),
+            ));
+        }
+        if kill_switch.is_some_and(|ks| ks.is_triggered()) {
+            return Err(GmError::SafetyViolation(
+                "Emergency stop is active; restart the runtime to resume".into(),
+            ));
+        }
+
+        let user_msg = self.post_direct_chat(
+            &clean_bot,
+            "user",
+            "You",
+            content,
+            reply_to_id,
+            thread_id,
+            None,
+            None,
+        )?;
+        let _ = self.direct_chat.mark_chat_read("dm", &clean_bot);
+
+        let explicit_task = trimmed
+            .strip_prefix("/do ")
+            .or_else(|| trimmed.strip_prefix("/task "))
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let explicit_chat = trimmed
+            .strip_prefix("/chat ")
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let task_instruction = if let Some(inst) = explicit_task {
+            Some(inst.to_string())
+        } else if explicit_chat.is_none() && profile.task_mode_default == "queue" {
+            Some(trimmed.to_string())
+        } else {
+            None
+        };
+
+        if let Some(instruction) = task_instruction {
+            let task = self.submit_task(Some(&clean_bot), None, &instruction, 5)?;
+            let card = serde_json::json!({
+                "kind": "task_status",
+                "status": "queued",
+                "task_id": task.id,
+                "bot_id": clean_bot,
+                "instruction": instruction,
+            });
+            let assistant_msg = self.post_direct_chat(
+                &clean_bot,
+                "assistant",
+                &profile.display_name,
+                &format!("Queued task `{}`: {}", task.id, instruction),
+                Some(&user_msg.id),
+                thread_id,
+                Some(&card),
+                Some(&task.id),
+            )?;
+            return Ok(DirectChatDispatchOutcome {
+                user_message: user_msg,
+                assistant_message: assistant_msg,
+                queued_task: Some(task),
+            });
+        }
+
+        let prompt_text = explicit_chat.unwrap_or(trimmed);
+        let cfg = shared_cfg.unwrap_or(&self.config);
+        let routed_router = router.clone().with_preference(
+            profile.preferred_provider.as_deref(),
+            profile.preferred_model.as_deref(),
+        )?;
+        let (primary, fallback) = routed_router.route(TaskType::Planning);
+
+        let bot_paths = self.roster.runtime_paths_for_bot(&clean_bot);
+        let sys_msgs = if cfg.muse.enable_muse_prompt {
+            let identity_existing = bot_paths
+                .identity_md()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .unwrap_or_default();
+            let profile_trimmed = profile.system_prompt.trim();
+            let persona_note = (!profile_trimmed.is_empty()
+                && !identity_existing.contains(profile_trimmed))
+            .then(|| {
+                format!(
+                    "## Bot Profile ({})\n{}",
+                    profile.display_name, profile_trimmed
+                )
+            });
+            let mut input =
+                PromptInput::new(PromptSurface::MainChat, &bot_paths, &cfg.muse, &primary.model);
+            input.allow_host_desktop = self.allow_host_desktop();
+            input.workspace_vm_enabled = cfg.workspace_vm.enabled;
+            input.channel_instructions = persona_note.as_deref();
+            MusePromptBuilder::build_messages(&input).unwrap_or_else(|_| {
+                vec![gm_llm::ChatMessage::text(
+                    "system",
+                    &profile.system_prompt,
+                )]
+            })
+        } else {
+            vec![gm_llm::ChatMessage::text("system", &profile.system_prompt)]
+        };
+
+        let mut messages = sys_msgs;
+        let prior = self
+            .direct_chat
+            .list_messages(&clean_bot, Some(user_msg.seq), 16)?;
+        let mut hist_bytes = 0usize;
+        for m in prior {
+            if !matches!(m.role.as_str(), "user" | "assistant") || m.content.trim().is_empty() {
+                continue;
+            }
+            if hist_bytes + m.content.len() > 48 * 1024 {
+                break;
+            }
+            hist_bytes += m.content.len();
+            messages.push(gm_llm::ChatMessage::text(&m.role, &m.content));
+        }
+        messages.push(gm_llm::ChatMessage::text("user", prompt_text));
+
+        let _ = self
+            .direct_chat
+            .set_bot_status(&clean_bot, Some("Thinking..."), false);
+        let _ = self.daemon_events_tx.send(DaemonEvent::BotStatusPhrase {
+            bot_id: clean_bot.clone(),
+            phrase: Some("Thinking...".into()),
+            needs_attention: false,
+        });
+
+        let stream_msg_id = format!("dmstream-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
+        let sup_stream = self.clone();
+        let stream_bot = clean_bot.clone();
+        let stream_id = stream_msg_id.clone();
+        let forward_task = tokio::spawn(async move {
+            while let Some(delta) = delta_rx.recv().await {
+                let _ = sup_stream
+                    .daemon_events_tx
+                    .send(DaemonEvent::ChatTokenV1 {
+                        message_id: stream_id.clone(),
+                        delta: delta.clone(),
+                        done: false,
+                    });
+                sup_stream.emit_agui_ephemeral(
+                    "TEXT_MESSAGE_CONTENT",
+                    &stream_id,
+                    &stream_bot,
+                    serde_json::json!({ "delta": delta }),
+                );
+            }
+        });
+
+        let scoped = llm_client.scoped_job();
+        let stream_res = if let Some(ks) = kill_switch {
+            let mut kill_events = ks.subscribe();
+            tokio::select! {
+                biased;
+                _ = kill_events.recv() => Err(GmError::SafetyViolation("DM chat stopped by emergency stop".into())),
+                res = scoped.complete_stream_attributed(&primary, fallback.as_ref(), &messages, 1024, 0.2, delta_tx, &clean_bot, "dm") => res,
+            }
+        } else {
+            scoped
+                .complete_stream_attributed(
+                    &primary,
+                    fallback.as_ref(),
+                    &messages,
+                    1024,
+                    0.2,
+                    delta_tx,
+                    &clean_bot,
+                    "dm",
+                )
+                .await
+        };
+
+        let _ = forward_task.await;
+        let _ = self.direct_chat.set_bot_status(&clean_bot, None, false);
+        let _ = self.daemon_events_tx.send(DaemonEvent::BotStatusPhrase {
+            bot_id: clean_bot.clone(),
+            phrase: None,
+            needs_attention: false,
+        });
+
+        let completion = stream_res?;
+        let _ = self.daemon_events_tx.send(DaemonEvent::ChatTokenV1 {
+            message_id: stream_msg_id,
+            delta: String::new(),
+            done: true,
+        });
+
+        let assistant_msg = self.post_direct_chat(
+            &clean_bot,
+            "assistant",
+            &profile.display_name,
+            &completion.content,
+            Some(&user_msg.id),
+            thread_id,
+            None,
+            None,
+        )?;
+        if let Some(b) = budget {
+            let _ = self.daemon_events_tx.send(DaemonEvent::BudgetUpdated {
+                daily_spent_usd: b.get_daily_spent(),
+                daily_cap_usd: cfg.budget.daily_spend_cap_usd,
+            });
+        }
+
+        Ok(DirectChatDispatchOutcome {
+            user_message: user_msg,
+            assistant_message: assistant_msg,
+            queued_task: None,
+        })
     }
 
     /// Submit a task into a bot's durable FIFO queue and emit `QueueUpdated`.
@@ -535,7 +1112,7 @@ impl OpenBotSupervisor {
         let checkpoint_task = task.id.clone();
         let queue_for_mutation = self.queue.clone();
         let mutation_id = task.id.clone();
-        let allow_gui = profile.allow_gui && self.config.safety.allow_host_desktop;
+        let allow_gui = profile.allow_gui && self.allow_host_desktop();
         let (primary_target, _) = router.route(if allow_gui {
             TaskType::CuAxStep
         } else {
@@ -793,6 +1370,254 @@ impl OpenBotSupervisor {
     ) -> Result<bool> {
         self.channels
             .update_channel_instructions(channel_id, instructions)
+    }
+
+    pub fn update_channel_metadata(
+        &self,
+        channel_id: &str,
+        topic: Option<&str>,
+        instructions: Option<&str>,
+        paused: Option<bool>,
+        archived: Option<bool>,
+    ) -> Result<Option<ChannelInfo>> {
+        let updated = self.channels.update_channel_metadata(
+            channel_id,
+            topic,
+            instructions,
+            paused,
+            archived,
+        )?;
+        if let Some(ref info) = updated {
+            let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+                reason: "channel_updated".into(),
+            });
+            self.emit_agui(
+                "CHANNEL_UPDATED",
+                &info.id,
+                "",
+                serde_json::to_value(info).unwrap_or_default(),
+            );
+        }
+        Ok(updated)
+    }
+
+    pub fn delete_custom_skill(&self, name: &str) -> Result<bool> {
+        let clean = name.trim();
+        if !gm_muse::skills::is_valid_custom_skill_name(clean) {
+            return Err(GmError::Config(format!(
+                "Invalid custom skill name '{clean}': must match ^[a-z0-9][a-z0-9-]{{0,63}}$"
+            )));
+        }
+        let reg = self.skill_registry()?;
+        if reg
+            .skills()
+            .iter()
+            .any(|s| s.bundled && (s.dir_name == clean || s.manifest.name == clean))
+        {
+            return Err(GmError::Config(format!(
+                "Cannot delete bundled system skill '{clean}'"
+            )));
+        }
+        let base_dir = self.shared_paths().custom_skills_dir();
+        let dir = base_dir.join(clean);
+        let meta = match std::fs::symlink_metadata(&dir) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(GmError::SafetyViolation(
+                "RULE-PATH-002: Refusing symlink custom skill directory".into(),
+            ));
+        }
+        std::fs::remove_dir_all(&dir)?;
+        let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+            reason: "skill_deleted".into(),
+        });
+        self.emit_agui(
+            "SKILL_DELETED",
+            clean,
+            "",
+            serde_json::json!({ "name": clean }),
+        );
+        Ok(true)
+    }
+
+    fn custom_ideas_path(&self) -> std::path::PathBuf {
+        self.shared_paths()
+            .storage_dir()
+            .join("workspace/custom_ideas.json")
+    }
+
+    pub fn load_custom_ideas(&self) -> Result<Vec<gm_goals::ProactiveIdea>> {
+        let path = self.custom_ideas_path();
+        let Some((raw, _)) = SharedFileStore::global().read_text_with_sha256(&path)? else {
+            return Ok(Vec::new());
+        };
+        if raw.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(serde_json::from_str(&raw)?)
+    }
+
+    pub fn create_custom_idea(
+        &self,
+        title: &str,
+        description: Option<&str>,
+        action_prompt: Option<&str>,
+    ) -> Result<gm_goals::ProactiveIdea> {
+        let clean_title = title.trim();
+        if clean_title.is_empty() {
+            return Err(GmError::Config("Idea title cannot be empty".into()));
+        }
+        let idea = gm_goals::ProactiveIdea {
+            id: format!("idea-{}", uuid::Uuid::new_v4()),
+            title: clean_title.to_string(),
+            description: description
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| "Custom proactive idea added by operator".into()),
+            source: gm_goals::IdeaSource::Hybrid,
+            action_prompt: action_prompt
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| Some(clean_title.to_string())),
+            confidence: 0.90,
+            created_at: chrono::Utc::now(),
+        };
+        let path = self.custom_ideas_path();
+        let idea_for_save = idea.clone();
+        SharedFileStore::global().update_sync(&path, None, move |existing| {
+            let mut list: Vec<gm_goals::ProactiveIdea> = if existing.trim().is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(existing).unwrap_or_default()
+            };
+            list.push(idea_for_save);
+            Ok(serde_json::to_string_pretty(&list)?)
+        })?;
+        let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+            reason: "idea_created".into(),
+        });
+        self.emit_agui(
+            "IDEA_CREATED",
+            &idea.id,
+            "",
+            serde_json::to_value(&idea).unwrap_or_default(),
+        );
+        Ok(idea)
+    }
+
+    pub async fn collect_effective_ideas(&self) -> Result<Vec<gm_goals::ProactiveIdea>> {
+        let default_bot = self.config.openbot.default_bot_id.clone();
+        let memory = self.roster.memory_store(&default_bot)?;
+        let mut ideas = gm_goals::generate_ideas_with_llm(
+            Option::<&gm_platform::MockPlatform>::None,
+            &memory,
+            None,
+            chrono::Utc::now(),
+        )
+        .await?;
+
+        let mut seen_ids: std::collections::BTreeSet<String> =
+            ideas.iter().map(|i| i.id.clone()).collect();
+        for custom in self.load_custom_ideas()? {
+            if seen_ids.insert(custom.id.clone()) {
+                ideas.push(custom);
+            }
+        }
+
+        if ideas.is_empty() {
+            let now = chrono::Utc::now();
+            ideas.push(gm_goals::ProactiveIdea {
+                id: "idea-starter-goal-review".into(),
+                title: "Review active goals & morning brief".into(),
+                description:
+                    "Check due milestones across your Goals workspace and summarize next steps."
+                        .into(),
+                source: gm_goals::IdeaSource::Hybrid,
+                action_prompt: Some(
+                    "Review my active goals and suggest the top next step.".into(),
+                ),
+                confidence: 0.72,
+                created_at: now,
+            });
+            ideas.push(gm_goals::ProactiveIdea {
+                id: "idea-starter-memory-sync".into(),
+                title: "Import portable context into MEMORY.md".into(),
+                description: "Bring over recurring preferences or background notes using the two-step safe importer.".into(),
+                source: gm_goals::IdeaSource::Memory,
+                action_prompt: Some("Help me organize key preferences into MEMORY.md.".into()),
+                confidence: 0.68,
+                created_at: now,
+            });
+        }
+
+        let prefs = self.prefs_store().load()?;
+        let dismissed: std::collections::BTreeSet<String> = prefs
+            .one_time_dismissals
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        let opted_out: Vec<String> = prefs
+            .never_tell_me_about
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        ideas.retain(|idea| {
+            let lower_id = idea.id.to_lowercase();
+            if dismissed.contains(&lower_id) || dismissed.contains(&format!("idea:{lower_id}")) {
+                return false;
+            }
+            let haystack = format!("{} {}", idea.title, idea.description).to_lowercase();
+            !opted_out.iter().any(|topic| haystack.contains(topic))
+        });
+
+        Ok(ideas)
+    }
+
+    pub async fn run_idea(
+        &self,
+        id: &str,
+        bot_id: Option<&str>,
+        channel_id: Option<&str>,
+        instruction_override: Option<&str>,
+    ) -> Result<QueuedTask> {
+        let ideas = self.collect_effective_ideas().await?;
+        let matched = ideas.into_iter().find(|i| i.id == id.trim());
+        let override_instr = instruction_override
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let instruction = match (override_instr, matched) {
+            (Some(instr), _) => instr.to_string(),
+            (None, Some(idea)) => idea
+                .action_prompt
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(idea.title),
+            (None, None) => {
+                return Err(GmError::Config(format!("Idea '{id}' not found")));
+            }
+        };
+        let chan = channel_id.or(Some("general"));
+        self.submit_task(bot_id, chan, &instruction, 5)
+    }
+
+    pub fn dismiss_idea(&self, id: &str) -> Result<bool> {
+        let clean = id.trim();
+        if clean.is_empty() {
+            return Err(GmError::Config("Idea ID is required".into()));
+        }
+        // One-time dismissal MUST write to FEEDBACK.md without adding a permanent opt-out.
+        self.prefs_store()
+            .add_one_time_dismissal(&format!("idea:{clean}"))?;
+        let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
+            reason: "idea_dismissed".into(),
+        });
+        Ok(true)
     }
 
     pub fn build_task_system_messages(

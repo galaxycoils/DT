@@ -1,5 +1,7 @@
 //! One user-selected monitor is shared by capture and input. No XWayland fallback.
-use super::{error, now};
+use super::error;
+#[cfg(feature = "wayland-pipewire")]
+use super::now;
 use ashpd::desktop::{
     PersistMode, Session,
     remote_desktop::{Axis, DeviceType, KeyState, RemoteDesktop},
@@ -342,6 +344,22 @@ fn keysym(name: &str) -> Result<i32> {
     })
 }
 
+#[cfg(not(feature = "wayland-pipewire"))]
+fn pipewire_frame(
+    _fd: std::os::fd::OwnedFd,
+    _node: u32,
+    _bounds: Rect,
+    _edge: Option<u32>,
+    _quality: Option<u8>,
+    _cancel: &AtomicBool,
+    _live: &AtomicBool,
+) -> Result<FrameCapture> {
+    Err(error(
+        "Wayland PipeWire screen capture requires compiling gm-platform with the 'wayland-pipewire' feature",
+    ))
+}
+
+#[cfg(feature = "wayland-pipewire")]
 fn pipewire_frame(
     fd: std::os::fd::OwnedFd,
     node: u32,

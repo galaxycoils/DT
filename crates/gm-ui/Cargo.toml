@@ -8,13 +8,19 @@ license.workspace = true
 name = "gm-ui"
 path = "src/main.rs"
 
+[features]
+default = []
+hardware-wgpu = ["eframe/wgpu", "dep:wgpu"]
+
 [dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 gm-llm = { workspace = true }
 zeroize = "1"
 uuid = { workspace = true }
-# eframe with default features disabled needs explicit native WGPU backends.
-wgpu = { version = "27", default-features = false, features = ["std", "parking_lot", "dx12", "metal", "gles", "vulkan", "wgsl"] }
-eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "wgpu", "x11", "wayland", "accesskit"] }
+# Opt-in hardware WGPU backend; default renderer is ultra-lightweight glow.
+wgpu = { version = "27", optional = true, default-features = false, features = ["std", "parking_lot", "dx12", "metal", "gles", "vulkan", "wgsl"] }
+eframe = { version = "=0.33.3", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "accesskit"] }
 gm-core = { workspace = true }
 gm-platform = { workspace = true }
 clap = { workspace = true }

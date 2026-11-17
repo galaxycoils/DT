@@ -250,6 +250,51 @@ impl ChannelStore {
         Ok(rows > 0)
     }
 
+    pub fn update_channel_metadata(
+        &self,
+        channel_id: &str,
+        topic: Option<&str>,
+        instructions: Option<&str>,
+        paused: Option<bool>,
+        archived: Option<bool>,
+    ) -> Result<Option<ChannelInfo>> {
+        let clean = normalize_channel_id(channel_id);
+        if self.get_channel(&clean)?.is_none() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock();
+        if let Some(t) = topic {
+            conn.execute(
+                "UPDATE channels SET topic = ?1 WHERE id = ?2",
+                params![t.trim(), clean],
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        }
+        if let Some(instr) = instructions {
+            conn.execute(
+                "UPDATE channels SET instructions = ?1 WHERE id = ?2",
+                params![instr, clean],
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        }
+        if let Some(p) = paused {
+            conn.execute(
+                "UPDATE channels SET paused = ?1 WHERE id = ?2",
+                params![p as i32, clean],
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        }
+        if let Some(a) = archived {
+            conn.execute(
+                "UPDATE channels SET archived = ?1 WHERE id = ?2",
+                params![a as i32, clean],
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        }
+        drop(conn);
+        self.get_channel(&clean)
+    }
+
     pub fn get_channel(&self, channel_id: &str) -> Result<Option<ChannelInfo>> {
         let clean = normalize_channel_id(channel_id);
         self.conn
@@ -455,6 +500,66 @@ impl ChannelStore {
         .map_err(|e| GmError::Platform(e.to_string()))?;
 
         Self::list_reactions_with_conn(&conn, clean_msg)
+    }
+
+    pub fn toggle_reaction(
+        &self,
+        message_id: &str,
+        emoji: &str,
+        actor: &str,
+    ) -> Result<(String, Vec<MessageReactionRecord>)> {
+        let clean_msg = message_id.trim();
+        let clean_emoji = emoji.trim();
+        let clean_actor = if actor.trim().is_empty() {
+            "operator"
+        } else {
+            actor.trim()
+        };
+        if clean_msg.is_empty() {
+            return Err(GmError::Config("Message ID cannot be empty".into()));
+        }
+        if clean_emoji.is_empty() || clean_emoji.chars().count() > 32 || clean_emoji.contains('\n')
+        {
+            return Err(GmError::Config(
+                "Reaction emoji must be 1-32 characters".into(),
+            ));
+        }
+
+        let conn = self.conn.lock();
+        let chan_id: Option<String> = conn
+            .query_row(
+                "SELECT channel_id FROM channel_messages WHERE id = ?1",
+                params![clean_msg],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let Some(chan_id) = chan_id else {
+            return Err(GmError::Config(format!(
+                "Unknown channel message '{clean_msg}'"
+            )));
+        };
+
+        let deleted = conn
+            .execute(
+                "DELETE FROM message_reactions_v1 WHERE message_id = ?1 AND emoji = ?2 AND actor = ?3",
+                params![clean_msg, clean_emoji, clean_actor],
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+
+        if deleted == 0 {
+            let id = format!("rxn-{}", uuid::Uuid::new_v4());
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                r#"INSERT OR IGNORE INTO message_reactions_v1 (id, message_id, emoji, actor, created_at)
+                   VALUES (?1, ?2, ?3, ?4, ?5)"#,
+                params![id, clean_msg, clean_emoji, clean_actor, now],
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        }
+
+        let list = Self::list_reactions_with_conn(&conn, clean_msg)?;
+        Ok((chan_id, list))
     }
 
     pub fn set_channel_paused(&self, channel_id: &str, paused: bool) -> Result<bool> {

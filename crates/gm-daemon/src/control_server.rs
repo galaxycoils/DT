@@ -9,6 +9,7 @@ use gm_platform::{IpcPlatformClient, Platform};
 use gm_safety::{AuditLogger, BlocklistManager, KillSwitch};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,10 +27,13 @@ pub enum ControlRequestEnvelope {
     Raw(DaemonRequest),
 }
 
-/// Daemon interaction handler that routes approval requests to the UI / NSAlert sheet via IPC
+/// Daemon interaction handler that routes approval & question requests to UI/Web cards via IPC & SSE.
 #[derive(Clone)]
 pub struct DaemonApprovalHandler {
     pending_approvals: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    pending_questions: Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>,
+    openbot: Option<gm_openbot::OpenBotSupervisor>,
+    blocklist: BlocklistManager,
     event_tx: broadcast::Sender<DaemonEvent>,
     timeout: std::time::Duration,
 }
@@ -42,9 +46,67 @@ impl DaemonApprovalHandler {
     ) -> Self {
         Self {
             pending_approvals,
+            pending_questions: Arc::new(Mutex::new(HashMap::new())),
+            openbot: None,
+            blocklist: BlocklistManager::default(),
             event_tx,
             timeout,
         }
+    }
+
+    pub fn with_pending_questions(
+        mut self,
+        pending_questions: Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>,
+    ) -> Self {
+        self.pending_questions = pending_questions;
+        self
+    }
+
+    pub fn with_openbot(mut self, openbot: Option<gm_openbot::OpenBotSupervisor>) -> Self {
+        self.openbot = openbot;
+        self
+    }
+
+    pub fn with_blocklist(mut self, blocklist: BlocklistManager) -> Self {
+        self.blocklist = blocklist;
+        self
+    }
+
+    fn update_dm_card_status(
+        &self,
+        request_id: &str,
+        status: &str,
+        extra: Option<serde_json::Value>,
+    ) {
+        if let Some(ref sup) = self.openbot {
+            update_dm_card_status_for_sup(sup, &self.event_tx, request_id, status, extra);
+        }
+    }
+}
+
+fn update_dm_card_status_for_sup(
+    sup: &gm_openbot::OpenBotSupervisor,
+    event_tx: &broadcast::Sender<DaemonEvent>,
+    request_id: &str,
+    status: &str,
+    extra: Option<serde_json::Value>,
+) {
+    if let Ok(Some(updated)) = sup
+        .direct_chat()
+        .update_card_by_request_id(request_id, status, extra)
+        && let Some(card) = updated.card
+    {
+        let _ = event_tx.send(DaemonEvent::MessageCardUpdated {
+            bot_id: updated.bot_id.clone(),
+            message_id: updated.id.clone(),
+            card: card.clone(),
+        });
+        sup.emit_agui(
+            "CARD_UPDATED",
+            request_id,
+            &updated.bot_id,
+            serde_json::json!({ "message_id": updated.id, "card": card }),
+        );
     }
 }
 
@@ -70,9 +132,52 @@ impl Drop for PendingApprovalGuard {
     }
 }
 
+struct PendingQuestionGuard {
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<Option<String>>>>>,
+    request_id: String,
+}
+impl Drop for PendingQuestionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.try_lock() {
+            pending.remove(&self.request_id);
+        } else if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let pending = self.pending.clone();
+            let id = self.request_id.clone();
+            runtime.spawn(async move {
+                pending.lock().await.remove(&id);
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl gm_agent::InteractionHandler for DaemonApprovalHandler {
     async fn request_approval(&self, req: &gm_agent::ApprovalRequest) -> Result<bool> {
+        let bot_id = self
+            .openbot
+            .as_ref()
+            .and_then(|s| s.queue().get_task(&req.task_id).ok().flatten())
+            .map(|t| t.bot_id)
+            .unwrap_or_else(|| "muse".to_string());
+        let tier = gm_safety::ActionTier::classify(&req.action, req.target_label.as_deref());
+        let target_str = req.target_label.as_deref().unwrap_or("");
+        let blocklisted = self.blocklist.is_blocked(target_str, &req.reason);
+        let action_text = format!("{:?} {} {}", req.action, target_str, req.reason);
+
+        // Enforce RULE-TIER-003: Custom Allow rules and auto-review NEVER bypass blocklisted targets
+        // or `ActionTier::Irreversible`.
+        if !blocklisted
+            && tier != gm_safety::ActionTier::Irreversible
+            && let Some(ref sup) = self.openbot
+        {
+            match sup.rules().evaluate(&bot_id, &action_text) {
+                Some(gm_openbot::RuleMode::Allow) => return Ok(true),
+                Some(gm_openbot::RuleMode::AskFirst) => {}
+                None if sup.ui_config().auto_review_approvals => return Ok(true),
+                None => {}
+            }
+        }
+
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         let _guard = PendingApprovalGuard {
@@ -94,6 +199,30 @@ impl gm_agent::InteractionHandler for DaemonApprovalHandler {
             req.reason
         );
 
+        if let Some(ref sup) = self.openbot {
+            let card = serde_json::json!({
+                "kind": "approval",
+                "request_id": request_id,
+                "task_id": req.task_id,
+                "bot_id": bot_id,
+                "title": title,
+                "details": details,
+                "tier": format!("{tier:?}"),
+                "blocklisted": blocklisted,
+                "status": "pending",
+            });
+            let _ = sup.post_direct_chat(
+                &bot_id,
+                "assistant",
+                &bot_id,
+                &details,
+                None,
+                None,
+                Some(&card),
+                Some(&request_id),
+            );
+        }
+
         let _ = self.event_tx.send(DaemonEvent::ApprovalRequested {
             request_id: request_id.clone(),
             title,
@@ -101,10 +230,24 @@ impl gm_agent::InteractionHandler for DaemonApprovalHandler {
         });
 
         match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(approved)) => Ok(approved),
-            Ok(Err(_)) => Ok(false),
+            Ok(Ok(approved)) => {
+                self.update_dm_card_status(
+                    &request_id,
+                    if approved { "approved" } else { "denied" },
+                    None,
+                );
+                Ok(approved)
+            }
+            Ok(Err(_)) => {
+                self.update_dm_card_status(&request_id, "denied", None);
+                Ok(false)
+            }
             Err(_) => {
                 self.pending_approvals.lock().await.remove(&request_id);
+                self.update_dm_card_status(&request_id, "expired", None);
+                let _ = self.event_tx.send(DaemonEvent::ApprovalExpired {
+                    request_id: request_id.clone(),
+                });
                 warn!(
                     "Approval request {} timed out after {:?}",
                     request_id, self.timeout
@@ -114,15 +257,77 @@ impl gm_agent::InteractionHandler for DaemonApprovalHandler {
         }
     }
 
-    async fn ask_user(&self, _question: &str) -> Result<Option<String>> {
-        Ok(None)
+    async fn ask_user(&self, question: &str) -> Result<Option<String>> {
+        let request_id = format!("ask-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+        let (tx, rx) = oneshot::channel();
+        let _guard = PendingQuestionGuard {
+            pending: self.pending_questions.clone(),
+            request_id: request_id.clone(),
+        };
+        self.pending_questions
+            .lock()
+            .await
+            .insert(request_id.clone(), tx);
+
+        let bot_id = "muse".to_string();
+        if let Some(ref sup) = self.openbot {
+            let card = serde_json::json!({
+                "kind": "question",
+                "request_id": request_id,
+                "bot_id": bot_id,
+                "prompt": question,
+                "options": [],
+                "allow_multiple": false,
+                "status": "pending",
+            });
+            let _ = sup.post_direct_chat(
+                &bot_id,
+                "assistant",
+                &bot_id,
+                question,
+                None,
+                None,
+                Some(&card),
+                Some(&request_id),
+            );
+        }
+        let _ = self.event_tx.send(DaemonEvent::QuestionRequested {
+            request_id: request_id.clone(),
+            bot_id,
+            prompt: question.to_string(),
+            options: Vec::new(),
+            allow_multiple: false,
+        });
+
+        match tokio::time::timeout(self.timeout, rx).await {
+            Ok(Ok(answer)) => {
+                let status = if answer.is_some() {
+                    "answered"
+                } else {
+                    "dismissed"
+                };
+                self.update_dm_card_status(
+                    &request_id,
+                    status,
+                    answer
+                        .as_ref()
+                        .map(|a| serde_json::json!({ "answer": a })),
+                );
+                Ok(answer)
+            }
+            Ok(Err(_)) | Err(_) => {
+                self.pending_questions.lock().await.remove(&request_id);
+                self.update_dm_card_status(&request_id, "expired", None);
+                Ok(None)
+            }
+        }
     }
 
     async fn request_wheel_handoff(
         &self,
         req: &gm_agent::WheelHandoffRequest,
     ) -> Result<Option<String>> {
-        let request_id = format!("wheel_{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let request_id = format!("wheel:{}", req.task_id);
         let (tx, rx) = oneshot::channel();
         self.pending_approvals
             .lock()
@@ -130,6 +335,27 @@ impl gm_agent::InteractionHandler for DaemonApprovalHandler {
             .insert(request_id.clone(), tx);
 
         let bot_id = req.bot_id.clone().unwrap_or_else(|| "muse".to_string());
+        if let Some(ref sup) = self.openbot {
+            let card = serde_json::json!({
+                "kind": "wheel_handoff",
+                "request_id": request_id,
+                "task_id": req.task_id,
+                "bot_id": bot_id,
+                "blocker": req.blocker,
+                "instructions": req.instructions,
+                "status": "pending",
+            });
+            let _ = sup.post_direct_chat(
+                &bot_id,
+                "assistant",
+                &bot_id,
+                &req.instructions,
+                None,
+                None,
+                Some(&card),
+                Some(&request_id),
+            );
+        }
         let _ = self.event_tx.send(DaemonEvent::WheelHandoffRequested {
             task_id: req.task_id.clone(),
             bot_id,
@@ -143,10 +369,17 @@ impl gm_agent::InteractionHandler for DaemonApprovalHandler {
         });
 
         match tokio::time::timeout(self.timeout, rx).await {
-            Ok(Ok(true)) => Ok(Some("Resumed via DaemonApprovalHandler".to_string())),
-            Ok(Ok(false)) | Ok(Err(_)) => Ok(None),
+            Ok(Ok(true)) => {
+                self.update_dm_card_status(&request_id, "resumed", None);
+                Ok(Some("Resumed via DaemonApprovalHandler".to_string()))
+            }
+            Ok(Ok(false)) | Ok(Err(_)) => {
+                self.update_dm_card_status(&request_id, "denied", None);
+                Ok(None)
+            }
             Err(_) => {
                 self.pending_approvals.lock().await.remove(&request_id);
+                self.update_dm_card_status(&request_id, "expired", None);
                 Ok(None)
             }
         }
@@ -155,16 +388,18 @@ impl gm_agent::InteractionHandler for DaemonApprovalHandler {
 
 #[derive(Clone)]
 pub struct DaemonControlServer {
-    config: GmConfig,
+    shared_config: Arc<parking_lot::RwLock<GmConfig>>,
+    config_path: Option<PathBuf>,
     paused: Arc<AtomicBool>,
     active_task: Arc<Mutex<Option<String>>>,
     active_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    pending_approvals: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    interactions: gm_openbot::SharedInteractionState,
     event_tx: broadcast::Sender<DaemonEvent>,
     budget: Arc<BudgetManager>,
     llm_client: Arc<HybridLlmClient>,
     router: LlmRouter,
     kill_switch: KillSwitch,
+    audit_log: Arc<AuditLogger>,
     platform: Arc<IpcPlatformClient>,
     openbot: Option<gm_openbot::OpenBotSupervisor>,
 }
@@ -189,37 +424,71 @@ impl DaemonControlServer {
         )
         .ok();
         Self {
-            config,
+            shared_config: Arc::new(parking_lot::RwLock::new(config)),
+            config_path: None,
             paused: Arc::new(AtomicBool::new(false)),
             active_task: Arc::new(Mutex::new(None)),
             active_task_handle: Arc::new(Mutex::new(None)),
-            pending_approvals: Arc::new(Mutex::new(HashMap::new())),
+            interactions: gm_openbot::SharedInteractionState::new(),
             event_tx,
             budget,
             llm_client,
             router,
             kill_switch,
+            audit_log,
             platform,
             openbot,
         }
     }
 
+    pub fn with_config_path(mut self, path: Option<PathBuf>) -> Self {
+        self.config_path = path;
+        self
+    }
+
+    pub fn with_shared_config(mut self, cfg: Arc<parking_lot::RwLock<GmConfig>>) -> Self {
+        self.shared_config = cfg;
+        self
+    }
+
+    pub fn with_interactions(
+        mut self,
+        interactions: gm_openbot::SharedInteractionState,
+    ) -> Self {
+        self.interactions = interactions;
+        self
+    }
+
+    pub fn shared_config(&self) -> Arc<parking_lot::RwLock<GmConfig>> {
+        Arc::clone(&self.shared_config)
+    }
+
+    pub fn interactions(&self) -> gm_openbot::SharedInteractionState {
+        self.interactions.clone()
+    }
+
     pub fn start_runtime(&self) -> Result<tokio::task::JoinHandle<()>> {
-        self.openbot
+        let blocklisted = self.shared_config.read().safety.blocklisted_apps.clone();
+        let sup = self
+            .openbot
             .as_ref()
-            .ok_or_else(|| GmError::Config("Task runtime could not initialize".into()))?
-            .start_runtime(
-                self.platform.clone(),
-                self.llm_client.clone(),
-                self.router.clone(),
-                self.kill_switch.clone(),
-                BlocklistManager::new(&self.config.safety.blocklisted_apps),
-                Some(Arc::new(DaemonApprovalHandler::new(
-                    self.pending_approvals.clone(),
-                    self.event_tx.clone(),
-                    std::time::Duration::from_secs(60),
-                ))),
-            )
+            .ok_or_else(|| GmError::Config("Task runtime could not initialize".into()))?;
+        let handler = DaemonApprovalHandler::new(
+            self.interactions.pending_approvals(),
+            self.event_tx.clone(),
+            std::time::Duration::from_secs(60),
+        )
+        .with_pending_questions(self.interactions.pending_questions())
+        .with_openbot(Some(sup.clone()))
+        .with_blocklist(BlocklistManager::new(&blocklisted));
+        sup.start_runtime(
+            self.platform.clone(),
+            self.llm_client.clone(),
+            self.router.clone(),
+            self.kill_switch.clone(),
+            BlocklistManager::new(&blocklisted),
+            Some(Arc::new(handler)),
+        )
     }
 
     pub fn openbot(&self) -> Option<&gm_openbot::OpenBotSupervisor> {
@@ -235,29 +504,29 @@ impl DaemonControlServer {
     }
 
     pub fn pending_approvals(&self) -> Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>> {
-        Arc::clone(&self.pending_approvals)
+        self.interactions.pending_approvals()
     }
 
     pub async fn register_approval_request(&self, request_id: String, tx: oneshot::Sender<bool>) {
-        self.pending_approvals.lock().await.insert(request_id, tx);
+        self.interactions.register_approval(request_id, tx).await;
     }
 
     pub async fn run(&self) -> Result<()> {
-        let path = &self.config.daemon_socket_path;
+        let path = self.shared_config.read().daemon_socket_path.clone();
         #[cfg(unix)]
         {
             if path.exists() {
-                let _ = std::fs::remove_file(path);
+                let _ = std::fs::remove_file(&path);
             }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
 
-            let listener = UnixListener::bind(path)?;
+            let listener = UnixListener::bind(&path)?;
             {
                 use std::os::unix::fs::PermissionsExt;
                 let perms = std::fs::Permissions::from_mode(0o600);
-                if let Err(e) = std::fs::set_permissions(path, perms) {
+                if let Err(e) = std::fs::set_permissions(&path, perms) {
                     warn!(
                         "Failed to lock daemon socket permissions to 0o600 on {:?}: {e}",
                         path
@@ -348,16 +617,18 @@ impl DaemonControlServer {
 
     fn clone_server_state(&self) -> DaemonControlServerState {
         DaemonControlServerState {
-            config: self.config.clone(),
+            shared_config: Arc::clone(&self.shared_config),
+            config_path: self.config_path.clone(),
             paused: Arc::clone(&self.paused),
             active_task: Arc::clone(&self.active_task),
             active_task_handle: Arc::clone(&self.active_task_handle),
-            pending_approvals: Arc::clone(&self.pending_approvals),
+            interactions: self.interactions.clone(),
             event_tx: self.event_tx.clone(),
             budget: Arc::clone(&self.budget),
             llm_client: Arc::clone(&self.llm_client),
             router: self.router.clone(),
             kill_switch: self.kill_switch.clone(),
+            audit_log: Arc::clone(&self.audit_log),
             platform: Arc::clone(&self.platform),
             openbot: self.openbot.clone(),
         }
@@ -366,16 +637,18 @@ impl DaemonControlServer {
 
 #[derive(Clone)]
 struct DaemonControlServerState {
-    config: GmConfig,
+    shared_config: Arc<parking_lot::RwLock<GmConfig>>,
+    config_path: Option<PathBuf>,
     paused: Arc<AtomicBool>,
     active_task: Arc<Mutex<Option<String>>>,
     active_task_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
-    pending_approvals: Arc<Mutex<HashMap<String, oneshot::Sender<bool>>>>,
+    interactions: gm_openbot::SharedInteractionState,
     event_tx: broadcast::Sender<DaemonEvent>,
     budget: Arc<BudgetManager>,
     llm_client: Arc<HybridLlmClient>,
     router: LlmRouter,
     kill_switch: KillSwitch,
+    audit_log: Arc<AuditLogger>,
     platform: Arc<IpcPlatformClient>,
     openbot: Option<gm_openbot::OpenBotSupervisor>,
 }
@@ -465,12 +738,21 @@ fn resolve_allowed_runtime_file(
         "IDENTITY.md" => bot_paths
             .identity_md()
             .ok_or_else(|| GmError::Config("Missing bot IDENTITY.md".into()))?,
+        "AGENTS.md" => bot_paths
+            .agents_md()
+            .ok_or_else(|| GmError::Config("Missing bot AGENTS.md".into()))?,
+        "HEARTBEAT.md" => bot_paths
+            .heartbeat_md()
+            .ok_or_else(|| GmError::Config("Missing bot HEARTBEAT.md".into()))?,
+        "TOOLS.md" => bot_paths
+            .tools_md()
+            .ok_or_else(|| GmError::Config("Missing bot TOOLS.md".into()))?,
         "USER.md" => shared.user_md(),
         "MEMORY.md" => shared.memory_md(),
         "PROACTIVE_PREFERENCES.md" => shared.proactive_preferences_md(),
         _ => {
             return Err(GmError::Config(format!(
-                "Unsupported runtime file '{file}'; allowed: SOUL.md, IDENTITY.md, USER.md, MEMORY.md, PROACTIVE_PREFERENCES.md"
+                "Unsupported runtime file '{file}'; allowed: SOUL.md, IDENTITY.md, AGENTS.md, HEARTBEAT.md, TOOLS.md, USER.md, MEMORY.md, PROACTIVE_PREFERENCES.md"
             )));
         }
     };
@@ -521,7 +803,8 @@ impl DaemonControlServerState {
                         .as_ref()
                         .map(|(primary, _)| primary.model.as_str())
                         .unwrap_or("unknown");
-                    let system_msgs = build_chat_system_messages(&self.config, model_name);
+                    let cfg_snap = self.shared_config.read().clone();
+                    let system_msgs = build_chat_system_messages(&cfg_snap, model_name);
                     Some(assemble_chat_messages(text, history, system_msgs))
                 }
                 _ => None,
@@ -618,9 +901,8 @@ impl DaemonControlServerState {
                     request_id: app_id,
                     approved,
                 } => {
-                    let mut approvals = self.pending_approvals.lock().await;
-                    let resp = if let Some(tx) = approvals.remove(&app_id) {
-                        let _ = tx.send(approved);
+                    let resolved = self.interactions.resolve_approval(&app_id, approved).await;
+                    let resp = if resolved {
                         DaemonResponse::Ack
                     } else {
                         DaemonResponse::Error(format!(
@@ -887,7 +1169,13 @@ impl DaemonControlServerState {
                             .as_ref()
                             .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
                         let profile: gm_openbot::BotProfile = serde_json::from_value(profile)?;
-                        Ok::<_, GmError>(serde_json::to_value(sup.roster().upsert_bot(profile)?)?)
+                        let saved = sup.roster().upsert_bot(profile)?;
+                        let val = serde_json::to_value(&saved)?;
+                        let _ = self.event_tx.send(DaemonEvent::BotUpdated {
+                            bot_id: saved.id.clone(),
+                        });
+                        sup.emit_agui("BOT_UPDATED", &saved.id, &saved.id, val.clone());
+                        Ok::<_, GmError>(val)
                     })();
                     let payload = match result {
                         Ok(value) => DaemonResponse::JsonPayload(value),
@@ -948,19 +1236,24 @@ impl DaemonControlServerState {
                     owner_bot_id,
                     participants,
                 } => {
-                    let result = self
-                        .openbot
-                        .as_ref()
-                        .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))
-                        .and_then(|sup| {
-                            sup.create_channel(
-                                &channel_id,
-                                &topic,
-                                owner_bot_id.as_deref(),
-                                &participants,
-                            )
-                        })
-                        .and_then(|value| serde_json::to_value(value).map_err(Into::into));
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let chan = sup.create_channel(
+                            &channel_id,
+                            &topic,
+                            owner_bot_id.as_deref(),
+                            &participants,
+                        )?;
+                        let val = serde_json::to_value(&chan)?;
+                        let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                            reason: "channel_created".into(),
+                        });
+                        sup.emit_agui("CHANNEL_UPDATED", &chan.id, "", val.clone());
+                        Ok::<_, GmError>(val)
+                    })();
                     let payload = match result {
                         Ok(value) => DaemonResponse::JsonPayload(value),
                         Err(e) => DaemonResponse::Error(e.to_string()),
@@ -1002,7 +1295,15 @@ impl DaemonControlServerState {
                 DaemonRequest::QueueControl { task_id, action } => {
                     let payload = if let Some(ref sup) = self.openbot {
                         match sup.control_task(&task_id, &action) {
-                            Ok(_) => DaemonResponse::Ack,
+                            Ok(_) => {
+                                sup.emit_agui(
+                                    "TASK_UPDATED",
+                                    &task_id,
+                                    "",
+                                    serde_json::json!({ "task_id": task_id, "action": action }),
+                                );
+                                DaemonResponse::Ack
+                            }
                             Err(e) => DaemonResponse::Error(e.to_string()),
                         }
                     } else {
@@ -1054,12 +1355,32 @@ impl DaemonControlServerState {
                 }
                 DaemonRequest::TakeTheWheelResume { task_id, note } => {
                     let payload = if let Some(ref sup) = self.openbot {
+                        let bot_id = sup
+                            .queue()
+                            .get_task(&task_id)
+                            .ok()
+                            .flatten()
+                            .map(|t| t.bot_id)
+                            .unwrap_or_else(|| "muse".into());
                         match sup.queue().resume_from_human(&task_id, note.as_deref()) {
                             Ok(_) => {
+                                let wheel_req_id = format!("wheel:{task_id}");
+                                let _ = self
+                                    .interactions
+                                    .resolve_approval(&wheel_req_id, true)
+                                    .await;
+                                update_dm_card_status_for_sup(
+                                    sup,
+                                    &self.event_tx,
+                                    &wheel_req_id,
+                                    "resumed",
+                                    note.as_ref().map(|n| serde_json::json!({ "note": n })),
+                                );
                                 let _ = self.event_tx.send(DaemonEvent::WheelHandoffResumed {
                                     task_id: task_id.clone(),
-                                    bot_id: "muse".into(),
+                                    bot_id: bot_id.clone(),
                                 });
+                                sup.broadcast_queue_state(&bot_id);
                                 DaemonResponse::Ack
                             }
                             Err(e) => DaemonResponse::Error(e.to_string()),
@@ -1650,6 +1971,1747 @@ impl DaemonControlServerState {
                         );
                         Ok::<_, GmError>(serde_json::to_value(policy)?)
                     })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::GetBootstrapState => {
+                    let helper_connected = tokio::time::timeout(
+                        tokio::time::Duration::from_millis(100),
+                        self.platform.ping(),
+                    )
+                    .await
+                    .map(|r| r.is_ok())
+                    .unwrap_or(false);
+                    let result = self
+                        .openbot
+                        .as_ref()
+                        .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))
+                        .map(|sup| {
+                            sup.bootstrap_snapshot(
+                                self.budget.get_daily_spent(),
+                                self.paused.load(Ordering::SeqCst),
+                                helper_connected,
+                            )
+                        });
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::GetUiSettings => {
+                    let result = self
+                        .openbot
+                        .as_ref()
+                        .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))
+                        .map(|sup| {
+                            let cfg_snap = self.shared_config.read().clone();
+                            gm_openbot::get_ui_settings_snapshot(&cfg_snap, sup)
+                        });
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SaveUiSettings { ui } => {
+                    let result = self
+                        .openbot
+                        .as_ref()
+                        .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))
+                        .and_then(|sup| {
+                            gm_openbot::apply_and_save_ui_settings(
+                                &self.shared_config,
+                                self.config_path.as_deref(),
+                                sup,
+                                &ui,
+                            )
+                        });
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SetBotUiPrefs { bot_id, prefs } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let saved = sup.roster().save_bot_ui_prefs(&bot_id, &prefs)?;
+                        let val = serde_json::to_value(&saved)?;
+                        let _ = self.event_tx.send(DaemonEvent::BotUpdated {
+                            bot_id: saved.id.clone(),
+                        });
+                        sup.emit_agui("BOT_UPDATED", &saved.id, &saved.id, val.clone());
+                        Ok::<_, GmError>(val)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ManageBotSection {
+                    op,
+                    id,
+                    name,
+                    collapsed,
+                    sort_order,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        match op.trim().to_ascii_lowercase().as_str() {
+                            "list" => Ok(serde_json::to_value(sup.sections().list_sections()?)?),
+                            "upsert" | "create" | "update" => {
+                                let sec = sup.sections().upsert_section(
+                                    id.as_deref(),
+                                    name.as_deref().unwrap_or(""),
+                                    sort_order,
+                                    collapsed,
+                                )?;
+                                let val = serde_json::to_value(&sec)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "section_updated".into(),
+                                });
+                                sup.emit_agui("SECTION_UPDATED", &sec.id, "", val.clone());
+                                Ok(val)
+                            }
+                            "collapse" => {
+                                let target = id.as_deref().unwrap_or("");
+                                let ok = sup
+                                    .sections()
+                                    .set_collapsed(target, collapsed.unwrap_or(false))?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "section_collapsed".into(),
+                                });
+                                Ok(serde_json::json!({ "id": target, "updated": ok }))
+                            }
+                            "delete" => {
+                                let target = id.as_deref().unwrap_or("");
+                                let ok = sup.delete_section_and_clear_bots(target)?;
+                                Ok(serde_json::json!({ "id": target, "deleted": ok }))
+                            }
+                            other => Err(GmError::Config(format!(
+                                "Unsupported ManageBotSection op '{other}'"
+                            ))),
+                        }
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::GetDirectChatHistory {
+                    bot_id,
+                    before_seq,
+                    limit,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let messages = sup.direct_chat().list_messages(
+                            &bot_id,
+                            before_seq,
+                            limit.unwrap_or(100),
+                        )?;
+                        Ok::<_, GmError>(serde_json::to_value(messages)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::PostDirectChat {
+                    bot_id,
+                    content,
+                    reply_to_id,
+                    thread_id,
+                } => {
+                    let cfg_snap = self.shared_config.read().clone();
+                    let result = if let Some(ref sup) = self.openbot {
+                        sup.dispatch_direct_chat(
+                            &bot_id,
+                            &content,
+                            reply_to_id.as_deref(),
+                            thread_id.as_deref(),
+                            &self.llm_client,
+                            &self.router,
+                            Some(&self.budget),
+                            Some(&self.kill_switch),
+                            Some(&cfg_snap),
+                        )
+                        .await
+                        .and_then(|v| serde_json::to_value(v).map_err(Into::into))
+                    } else {
+                        Err(GmError::Config("Task runtime is unavailable".into()))
+                    };
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SearchMessages {
+                    query,
+                    include_older,
+                    bot_id,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let hits = sup.direct_chat().search_messages(
+                            &query,
+                            bot_id.as_deref(),
+                            include_older,
+                            50,
+                        )?;
+                        Ok::<_, GmError>(serde_json::to_value(hits)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::MarkChatRead { chat_kind, chat_id } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let seq = sup.direct_chat().mark_chat_read(&chat_kind, &chat_id)?;
+                        Ok::<_, GmError>(serde_json::json!({
+                            "chat_kind": chat_kind,
+                            "chat_id": chat_id,
+                            "last_read_seq": seq,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ToggleMessageReaction {
+                    chat_kind,
+                    message_id,
+                    emoji,
+                    actor,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let reactions = sup.toggle_message_reaction(
+                            &chat_kind,
+                            &message_id,
+                            &emoji,
+                            actor.as_deref().unwrap_or("operator"),
+                        )?;
+                        Ok::<_, GmError>(serde_json::json!({
+                            "chat_kind": chat_kind,
+                            "message_id": message_id,
+                            "reactions": reactions,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SubmitSecretPrompt {
+                    request_id: sec_req_id,
+                    bot_id,
+                    fields,
+                    save_to_vault,
+                    vault_label,
+                    domain,
+                } => {
+                    // RULE-SECRET-001: never persist or echo raw secret values in SQLite or logs.
+                    let mut vault_item_id: Option<String> = None;
+                    if let Some(ref sup) = self.openbot {
+                        for (k, v) in &fields {
+                            if !v.trim().is_empty() {
+                                let _ = sup
+                                    .vault()
+                                    .backend()
+                                    .set_secret(&format!("gm_prompt_{sec_req_id}_{k}"), v);
+                            }
+                        }
+                        if save_to_vault && !fields.is_empty() {
+                            let username = fields
+                                .iter()
+                                .find(|(k, _)| {
+                                    let kl = k.to_ascii_lowercase();
+                                    kl.contains("user") || kl.contains("email")
+                                })
+                                .map(|(_, v)| v.clone())
+                                .unwrap_or_default();
+                            let secret_val = fields.last().map(|(_, v)| v.clone());
+                            if let Ok(saved) = sup.vault().upsert_item(gm_openbot::VaultItemInput {
+                                id: None,
+                                kind: gm_openbot::VaultItemKind::Login,
+                                label: vault_label
+                                    .clone()
+                                    .unwrap_or_else(|| format!("{bot_id} credential")),
+                                subtitle_or_last4: domain.clone().unwrap_or_default(),
+                                username,
+                                domain: domain.clone().unwrap_or_default(),
+                                hint: String::new(),
+                                secret_value: secret_val,
+                                external_secret_ref: None,
+                                is_default_payment: false,
+                                bot_scope: Some(bot_id.clone()),
+                            }) {
+                                vault_item_id = Some(saved.id);
+                            }
+                        }
+                    }
+                    let cancelled = fields.is_empty();
+                    let resolved = self
+                        .interactions
+                        .resolve_secret(
+                            &sec_req_id,
+                            if cancelled {
+                                None
+                            } else {
+                                Some(fields.clone())
+                            },
+                        )
+                        .await;
+                    if let Some(ref sup) = self.openbot {
+                        update_dm_card_status_for_sup(
+                            sup,
+                            &self.event_tx,
+                            &sec_req_id,
+                            if cancelled { "cancelled" } else { "submitted" },
+                            vault_item_id
+                                .as_ref()
+                                .map(|id| serde_json::json!({ "vault_item_id": id })),
+                        );
+                    }
+                    let payload = DaemonResponse::JsonPayload(serde_json::json!({
+                        "request_id": sec_req_id,
+                        "resolved": resolved,
+                        "status": if cancelled { "cancelled" } else { "submitted" },
+                        "vault_item_id": vault_item_id,
+                    }));
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::RespondQuestion {
+                    request_id: q_req_id,
+                    answers,
+                    custom_text,
+                } => {
+                    let mut parts: Vec<String> = answers
+                        .into_iter()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect();
+                    if let Some(custom) = custom_text
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                    {
+                        parts.push(custom);
+                    }
+                    let combined = if parts.is_empty() {
+                        None
+                    } else {
+                        Some(parts.join(", "))
+                    };
+                    let resolved = self
+                        .interactions
+                        .resolve_question(&q_req_id, combined.clone())
+                        .await;
+                    if let Some(ref sup) = self.openbot {
+                        update_dm_card_status_for_sup(
+                            sup,
+                            &self.event_tx,
+                            &q_req_id,
+                            if combined.is_some() {
+                                "answered"
+                            } else {
+                                "dismissed"
+                            },
+                            combined
+                                .as_ref()
+                                .map(|a| serde_json::json!({ "answer": a })),
+                        );
+                    }
+                    let payload = DaemonResponse::JsonPayload(serde_json::json!({
+                        "request_id": q_req_id,
+                        "resolved": resolved,
+                        "answer": combined,
+                    }));
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ManageCustomRule { op, rule, id } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        match op.trim().to_ascii_lowercase().as_str() {
+                            "list" => Ok(serde_json::to_value(sup.rules().list_rules()?)?),
+                            "upsert" | "create" | "update" => {
+                                let r = rule.unwrap_or_default();
+                                let rule_id = r.get("id").and_then(|v| v.as_str());
+                                let mode = gm_openbot::RuleMode::parse(
+                                    r.get("mode").and_then(|v| v.as_str()).unwrap_or("allow"),
+                                )?;
+                                let pattern = r
+                                    .get("pattern")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let scope_bot_id = r
+                                    .get("scope_bot_id")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.trim().is_empty() && *s != "all");
+                                let description = r
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let enabled = r
+                                    .get("enabled")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                let saved = sup.rules().upsert_rule(
+                                    rule_id,
+                                    mode,
+                                    pattern,
+                                    scope_bot_id,
+                                    description,
+                                    enabled,
+                                )?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "rule_updated".into(),
+                                });
+                                Ok(serde_json::to_value(saved)?)
+                            }
+                            "delete" => {
+                                let target = id.as_deref().unwrap_or("");
+                                let deleted = sup.rules().delete_rule(target)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "rule_deleted".into(),
+                                });
+                                Ok(serde_json::json!({ "id": target, "deleted": deleted }))
+                            }
+                            other => Err(GmError::Config(format!(
+                                "Unsupported ManageCustomRule op '{other}'"
+                            ))),
+                        }
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ManageVault {
+                    op,
+                    item,
+                    id,
+                    reveal_confirmed,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        match op.trim().to_ascii_lowercase().as_str() {
+                            "list" => {
+                                let kind = match item
+                                    .as_ref()
+                                    .and_then(|v| v.get("kind"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    Some(k) => Some(gm_openbot::VaultItemKind::parse(k)?),
+                                    None => None,
+                                };
+                                Ok(serde_json::to_value(sup.vault().list_items(kind)?)?)
+                            }
+                            "upsert" | "create" | "update" => {
+                                let input: gm_openbot::VaultItemInput =
+                                    serde_json::from_value(item.unwrap_or_default())?;
+                                let saved = sup.vault().upsert_item(input)?;
+                                Ok(serde_json::to_value(saved)?)
+                            }
+                            "delete" => {
+                                let target = id.as_deref().unwrap_or("");
+                                let deleted = sup.vault().delete_item(target)?;
+                                Ok(serde_json::json!({ "id": target, "deleted": deleted }))
+                            }
+                            "reveal" => {
+                                let target = id.as_deref().unwrap_or("");
+                                let val = sup.vault().reveal_secret(
+                                    target,
+                                    sup.ui_config().hardware_security_keys,
+                                    reveal_confirmed,
+                                )?;
+                                Ok(serde_json::json!({ "id": target, "secret": val }))
+                            }
+                            "default_payment" => {
+                                let target = id.as_deref().unwrap_or("");
+                                let ok = sup.vault().set_default_payment(target)?;
+                                Ok(serde_json::json!({ "id": target, "updated": ok }))
+                            }
+                            other => Err(GmError::Config(format!(
+                                "Unsupported ManageVault op '{other}'"
+                            ))),
+                        }
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ImportVaultCsv { csv, source_hint } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let report = sup.vault().import_csv(&csv, source_hint.as_deref())?;
+                        Ok::<_, GmError>(serde_json::to_value(report)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::GetUsageBreakdown { days } => {
+                    let result = self
+                        .budget
+                        .usage_breakdown(days.unwrap_or(7))
+                        .and_then(|v| serde_json::to_value(v).map_err(Into::into));
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::TriggerRoutineTest { routine_id } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let run = sup.trigger_routine_test(&routine_id)?;
+                        Ok::<_, GmError>(serde_json::to_value(run)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::DeleteRoutine { routine_id } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let deleted = sup.delete_routine(&routine_id)?;
+                        Ok::<_, GmError>(serde_json::json!({
+                            "routine_id": routine_id,
+                            "deleted": deleted,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ListRoutineRuns { routine_id, limit } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let runs =
+                            sup.list_routine_runs(&routine_id, limit.unwrap_or(20).clamp(1, 50))?;
+                        Ok::<_, GmError>(serde_json::to_value(runs)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ListLibraryPage {
+                    bot_id,
+                    filter,
+                    cursor,
+                    limit,
+                } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let page = sup.list_library_page(
+                            &bot_id,
+                            &filter,
+                            cursor.unwrap_or(0),
+                            limit.unwrap_or(5).clamp(1, 50),
+                        )?;
+                        Ok::<_, GmError>(serde_json::to_value(page)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ListCustomConnectors => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let cfg_snap = self.shared_config.read().clone();
+                        let connectors = sup.connectors().list_connectors()?;
+                        let integrations = sup.connectors().builtin_integrations(&cfg_snap);
+                        Ok::<_, GmError>(serde_json::json!({
+                            "connectors": connectors,
+                            "integrations": integrations,
+                        }))
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::SaveCustomConnector { op, connector, id } => {
+                    let op_lower = op.trim().to_ascii_lowercase();
+                    let result = if let Some(ref sup) = self.openbot {
+                        match op_lower.as_str() {
+                            "upsert" | "create" | "update" => (|| {
+                                let input: gm_openbot::CustomConnectorInput =
+                                    serde_json::from_value(connector.unwrap_or_default())?;
+                                let saved = sup.connectors().upsert_connector(input)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "connector_updated".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::to_value(saved)?)
+                            })(),
+                            "delete" => (|| {
+                                let target = id.as_deref().unwrap_or("");
+                                let deleted = sup.connectors().delete_connector(target)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "connector_deleted".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "id": target,
+                                    "deleted": deleted,
+                                }))
+                            })(),
+                            "test" => {
+                                let target = id.as_deref().unwrap_or("");
+                                gm_openbot::probe_custom_connector(sup, target).await
+                            }
+                            other => Err(GmError::Config(format!(
+                                "Unsupported SaveCustomConnector op '{other}'"
+                            ))),
+                        }
+                    } else {
+                        Err(GmError::Config("Task runtime is unavailable".into()))
+                    };
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::CaptureComputerPreview {
+                    max_long_edge,
+                    quality,
+                } => {
+                    let result = gm_openbot::capture_preview_payload(
+                        self.platform.as_ref(),
+                        max_long_edge,
+                        quality,
+                        self.openbot.as_ref(),
+                    )
+                    .await;
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::StartTeachTask { bot_id } => {
+                    let result = self
+                        .interactions
+                        .start_teach_task(&bot_id)
+                        .and_then(|v| serde_json::to_value(v).map_err(Into::into));
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::StopTeachTask { save_skill_name } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let outcome = self.interactions.stop_teach_task(
+                            &sup.shared_paths(),
+                            save_skill_name.as_deref(),
+                        )?;
+                        Ok::<_, GmError>(serde_json::to_value(outcome)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::CheckUpdates => {
+                    let ver = env!("CARGO_PKG_VERSION");
+                    let value = match crate::updater::check_latest_release(
+                        crate::updater::DEFAULT_REPO,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(res) => serde_json::to_value(res).unwrap_or_default(),
+                        Err(e) => serde_json::json!({
+                            "current_version": ver,
+                            "update_available": false,
+                            "offline_or_error": e.to_string(),
+                        }),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload: DaemonResponse::JsonPayload(value),
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::QueryAudit {
+                    category,
+                    bot_id,
+                    limit,
+                } => {
+                    let result = (|| {
+                        match category.as_deref() {
+                            Some("report_weekly") => {
+                                let rep = self.audit_log.generate_report(
+                                    gm_safety::AuditPeriod::Weekly,
+                                    chrono::Utc::now(),
+                                );
+                                Ok::<_, GmError>(serde_json::to_value(rep)?)
+                            }
+                            Some("report_monthly") => {
+                                let rep = self.audit_log.generate_report(
+                                    gm_safety::AuditPeriod::Monthly,
+                                    chrono::Utc::now(),
+                                );
+                                Ok::<_, GmError>(serde_json::to_value(rep)?)
+                            }
+                            other => {
+                                let cat = match other {
+                                    Some("permitted") => Some(gm_safety::AuditCategory::Permitted),
+                                    Some("refused") | Some("blocked") => {
+                                        Some(gm_safety::AuditCategory::Refused)
+                                    }
+                                    Some("failed") | Some("escalated") => {
+                                        Some(gm_safety::AuditCategory::Failed)
+                                    }
+                                    _ => None,
+                                };
+                                let entries = self.audit_log.query_governance_entries(
+                                    cat,
+                                    bot_id.as_deref(),
+                                    limit.unwrap_or(100),
+                                );
+                                Ok::<_, GmError>(serde_json::to_value(entries)?)
+                            }
+                        }
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ExplainMemory { target } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let explanation = sup.provenance().explain_memory(&target)?;
+                        Ok::<_, GmError>(serde_json::to_value(explanation)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::GetDiscretion { chat_id } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let policy = sup.discretion().load_or_init(&chat_id)?;
+                        Ok::<_, GmError>(serde_json::to_value(policy)?)
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ManageSkill { op, name, payload } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let p = payload;
+                        match op.trim().to_ascii_lowercase().as_str() {
+                            "create" | "upsert" => {
+                                let skill_name = name
+                                    .as_deref()
+                                    .or_else(|| p.get("name").and_then(|v| v.as_str()))
+                                    .unwrap_or("")
+                                    .to_string();
+                                let title = p
+                                    .get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(&skill_name)
+                                    .to_string();
+                                let desc = p
+                                    .get("description")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Custom skill")
+                                    .to_string();
+                                let instructions = p
+                                    .get("instructions")
+                                    .or_else(|| p.get("body_markdown"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("# Steps\n1. Execute workflow");
+                                let mut reg = sup.skill_registry()?;
+                                let manifest = gm_muse::skills::SkillYaml {
+                                    name: skill_name.clone(),
+                                    title,
+                                    description: desc,
+                                    category: "custom".into(),
+                                    include_in_prompt: true,
+                                    skill_improvement: None,
+                                    amends: None,
+                                };
+                                let dir = reg.scaffold_custom_skill(manifest, instructions)?;
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "name": skill_name,
+                                    "path": dir.display().to_string(),
+                                }))
+                            }
+                            "amend" => {
+                                let skill_name = name
+                                    .as_deref()
+                                    .or_else(|| p.get("name").and_then(|v| v.as_str()))
+                                    .unwrap_or("");
+                                let note =
+                                    p.get("note").and_then(|v| v.as_str()).unwrap_or("");
+                                let reg = sup.skill_registry()?;
+                                let path = reg.append_amendment(
+                                    gm_muse::skills::AmendmentTarget::Skill,
+                                    skill_name,
+                                    note,
+                                )?;
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "name": skill_name,
+                                    "path": path.display().to_string(),
+                                }))
+                            }
+                            "load" => {
+                                let skill_name = name
+                                    .as_deref()
+                                    .or_else(|| p.get("name").and_then(|v| v.as_str()))
+                                    .unwrap_or("");
+                                let reg = sup.skill_registry()?;
+                                let doc = reg.load_skill(skill_name)?;
+                                Ok::<_, GmError>(serde_json::to_value(doc)?)
+                            }
+                            "delete" => {
+                                let skill_name = name
+                                    .as_deref()
+                                    .or_else(|| p.get("name").and_then(|v| v.as_str()))
+                                    .unwrap_or("")
+                                    .trim();
+                                if !gm_muse::skills::is_valid_custom_skill_name(skill_name) {
+                                    return Err(GmError::Config(format!(
+                                        "Invalid custom skill name '{skill_name}'"
+                                    )));
+                                }
+                                let dir = sup.shared_paths().custom_skills_dir().join(skill_name);
+                                if let Ok(meta) = std::fs::symlink_metadata(&dir)
+                                    && meta.file_type().is_symlink()
+                                {
+                                    return Err(GmError::SafetyViolation(
+                                        "Refusing to delete symlinked skill directory".into(),
+                                    ));
+                                }
+                                let deleted = if dir.exists() {
+                                    std::fs::remove_dir_all(&dir)?;
+                                    true
+                                } else {
+                                    false
+                                };
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "name": skill_name,
+                                    "deleted": deleted,
+                                }))
+                            }
+                            other => Err(GmError::Config(format!(
+                                "Unsupported ManageSkill op '{other}'"
+                            ))),
+                        }
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ManageSpace { op, slug, payload } => {
+                    let result = (|| {
+                        let sup = self
+                            .openbot
+                            .as_ref()
+                            .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
+                        let p = payload;
+                        match op.trim().to_ascii_lowercase().as_str() {
+                            "read" => {
+                                let rel_path = p
+                                    .get("relative_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("index.html");
+                                let file_path =
+                                    sup.spaces().resolve_asset_file(&slug, rel_path)?;
+                                let pair = gm_muse::shared_files::SharedFileStore::global()
+                                    .read_text_with_sha256(&file_path)?;
+                                let (content, sha256) = pair.unwrap_or_default();
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "slug": slug,
+                                    "relative_path": rel_path,
+                                    "content": content,
+                                    "sha256": sha256,
+                                }))
+                            }
+                            "edit" => {
+                                let rel_path = p
+                                    .get("relative_path")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("index.html");
+                                let content = p
+                                    .get("content")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let path =
+                                    sup.spaces().update_space_file(&slug, rel_path, content)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "space_edited".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "slug": slug,
+                                    "relative_path": rel_path,
+                                    "path": path.display().to_string(),
+                                }))
+                            }
+                            "publish" => {
+                                let confirmed = p
+                                    .get("confirmed")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                let space = sup.spaces().publish_space(&slug, confirmed)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "space_published".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::to_value(space)?)
+                            }
+                            "unpublish" => {
+                                let space = sup.spaces().unpublish_space(&slug)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "space_unpublished".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::to_value(space)?)
+                            }
+                            "delete" => {
+                                let confirmed = p
+                                    .get("confirmed")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(true);
+                                let deleted = sup.spaces().delete_space(&slug, confirmed)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "space_deleted".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "slug": slug,
+                                    "deleted": deleted,
+                                }))
+                            }
+                            other => Err(GmError::Config(format!(
+                                "Unsupported ManageSpace op '{other}'"
+                            ))),
+                        }
+                    })();
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ManageFeed { op, payload } => {
+                    let op_lower = op.trim().to_ascii_lowercase();
+                    let p = payload;
+                    let result = if let Some(ref sup) = self.openbot {
+                        match op_lower.as_str() {
+                            "prompt" => (|| {
+                                let prompt =
+                                    p.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                                sup.feed_store().set_brief_prompt(prompt)?;
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "brief_prompt": sup.feed_store().get_brief_prompt()?,
+                                }))
+                            })(),
+                            "post" => (|| {
+                                let id = p
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .filter(|s| !s.trim().is_empty())
+                                    .map(ToString::to_string)
+                                    .unwrap_or_else(|| {
+                                        format!("post-{}", &uuid::Uuid::new_v4().simple().to_string()[..10])
+                                    });
+                                let kicker = p
+                                    .get("kicker")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Update")
+                                    .to_string();
+                                let category = gm_goals::FeedCategory::from_db_str(
+                                    p.get("category")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("daily_brief"),
+                                );
+                                let title = p
+                                    .get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Untitled")
+                                    .to_string();
+                                let body = p
+                                    .get("body")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let post = gm_goals::FeedPost {
+                                    id,
+                                    kicker,
+                                    category,
+                                    title,
+                                    body,
+                                    signal_citations: Vec::new(),
+                                    rating: None,
+                                    user_prompt: None,
+                                    created_at: chrono::Utc::now(),
+                                };
+                                sup.feed_store().upsert_post(&post)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "feed_post_upserted".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::to_value(post)?)
+                            })(),
+                            "delete_post" | "delete" => (|| {
+                                let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let deleted = sup.feed_store().delete_post(id)?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "feed_post_deleted".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "id": id,
+                                    "deleted": deleted,
+                                }))
+                            })(),
+                            "ideas" => {
+                                let default_bot =
+                                    sup.config().openbot.default_bot_id.clone();
+                                let memory = sup.roster().memory_store(&default_bot)?;
+                                let mut ideas = gm_goals::generate_ideas_with_llm(
+                                    Option::<&gm_platform::MockPlatform>::None,
+                                    &memory,
+                                    None,
+                                    chrono::Utc::now(),
+                                )
+                                .await?;
+                                let custom_path = sup
+                                    .shared_paths()
+                                    .storage_dir()
+                                    .join("workspace/custom_ideas.json");
+                                if let Some((raw, _)) = gm_muse::shared_files::SharedFileStore::global()
+                                    .read_text_with_sha256(&custom_path)?
+                                    && let Ok(custom) =
+                                        serde_json::from_str::<Vec<gm_goals::ProactiveIdea>>(&raw)
+                                {
+                                    let mut seen: std::collections::BTreeSet<String> =
+                                        ideas.iter().map(|i| i.id.clone()).collect();
+                                    for item in custom {
+                                        if seen.insert(item.id.clone()) {
+                                            ideas.push(item);
+                                        }
+                                    }
+                                }
+                                Ok(serde_json::to_value(ideas)?)
+                            }
+                            "create_idea" => (|| {
+                                let title = p
+                                    .get("title")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Custom Idea")
+                                    .to_string();
+                                let description = p
+                                    .get("description")
+                                    .or_else(|| p.get("rationale"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("Custom proactive idea added by operator")
+                                    .to_string();
+                                let prompt = p
+                                    .get("action_prompt")
+                                    .or_else(|| p.get("prompt"))
+                                    .and_then(|v| v.as_str())
+                                    .map(ToString::to_string)
+                                    .or_else(|| Some(title.clone()));
+                                let idea = gm_goals::ProactiveIdea {
+                                    id: format!(
+                                        "idea-{}",
+                                        &uuid::Uuid::new_v4().simple().to_string()[..10]
+                                    ),
+                                    title,
+                                    description,
+                                    source: gm_goals::IdeaSource::Hybrid,
+                                    action_prompt: prompt,
+                                    confidence: 0.90,
+                                    created_at: chrono::Utc::now(),
+                                };
+                                let custom_path = sup
+                                    .shared_paths()
+                                    .storage_dir()
+                                    .join("workspace/custom_ideas.json");
+                                let idea_clone = idea.clone();
+                                gm_muse::shared_files::SharedFileStore::global().update_sync(
+                                    &custom_path,
+                                    None,
+                                    move |existing| {
+                                        let mut list: Vec<gm_goals::ProactiveIdea> =
+                                            if existing.trim().is_empty() {
+                                                Vec::new()
+                                            } else {
+                                                serde_json::from_str(existing).unwrap_or_default()
+                                            };
+                                        list.push(idea_clone);
+                                        Ok(serde_json::to_string_pretty(&list)?)
+                                    },
+                                )?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "idea_created".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::to_value(idea)?)
+                            })(),
+                            "run_idea" => (|| {
+                                let prompt = p
+                                    .get("prompt")
+                                    .or_else(|| p.get("action_prompt"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let bot_id = p.get("bot_id").and_then(|v| v.as_str());
+                                let task = sup.submit_task(bot_id, Some("general"), prompt, 5)?;
+                                Ok::<_, GmError>(serde_json::to_value(task)?)
+                            })(),
+                            "dismiss_idea" => (|| {
+                                let topic = p
+                                    .get("id")
+                                    .or_else(|| p.get("topic"))
+                                    .or_else(|| p.get("title"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                sup.prefs_store()
+                                    .add_one_time_dismissal(&format!("idea:{topic}"))?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: "idea_dismissed".into(),
+                                });
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "ok": true,
+                                    "dismissed_once": topic,
+                                }))
+                            })(),
+                            other => Err(GmError::Config(format!(
+                                "Unsupported ManageFeed op '{other}'"
+                            ))),
+                        }
+                    } else {
+                        Err(GmError::Config("Task runtime is unavailable".into()))
+                    };
+                    let payload = match result {
+                        Ok(value) => DaemonResponse::JsonPayload(value),
+                        Err(e) => DaemonResponse::Error(e.to_string()),
+                    };
+                    write_ipc_message(
+                        &mut stream,
+                        &IpcMessage {
+                            id: request_id,
+                            payload,
+                        },
+                    )
+                    .await?;
+                }
+                DaemonRequest::ManageSystem { op, payload } => {
+                    let op_lower = op.trim().to_ascii_lowercase();
+                    let p = payload;
+                    let result = match op_lower.as_str() {
+                        "health" => {
+                            let cfg_snap = self.shared_config.read().clone();
+                            let rep = crate::diagnostics::run_health_diagnostics(&cfg_snap);
+                            serde_json::to_value(rep).map_err(Into::into)
+                        }
+                        "support_bundle" => {
+                            let cfg_snap = self.shared_config.read().clone();
+                            let out = p
+                                .get("output_path")
+                                .and_then(|v| v.as_str())
+                                .map(PathBuf::from)
+                                .unwrap_or_else(|| {
+                                    cfg_snap.storage_dir.join(format!(
+                                        "support-bundle-{}.json",
+                                        chrono::Utc::now().timestamp()
+                                    ))
+                                });
+                            match crate::diagnostics::export_support_bundle(&cfg_snap, &out) {
+                                Ok(bundle) => Ok(serde_json::json!({
+                                    "output_path": out.display().to_string(),
+                                    "bundle": bundle,
+                                })),
+                                Err(e) => Err(e),
+                            }
+                        }
+                        "feedback" => (|| {
+                            let cfg_snap = self.shared_config.read().clone();
+                            let dir = cfg_snap.storage_dir.join("feedback");
+                            std::fs::create_dir_all(&dir)?;
+                            let id = format!(
+                                "fb-{}",
+                                &uuid::Uuid::new_v4().simple().to_string()[..10]
+                            );
+                            let path = dir.join(format!("{id}.json"));
+                            let entry = serde_json::json!({
+                                "id": id,
+                                "category": p.get("category").and_then(|v| v.as_str()).unwrap_or("general"),
+                                "message": p.get("message").and_then(|v| v.as_str()).unwrap_or(""),
+                                "created_at": chrono::Utc::now().to_rfc3339(),
+                            });
+                            std::fs::write(&path, serde_json::to_string_pretty(&entry)?)?;
+                            Ok::<_, GmError>(serde_json::json!({
+                                "id": id,
+                                "saved_path": path.display().to_string(),
+                            }))
+                        })(),
+                        "configure_provider_key" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let provider = p
+                                .get("provider")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim()
+                                .to_ascii_lowercase();
+                            let api_key = p
+                                .get("api_key")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            let key_name = format!("gm_provider_key_{provider}");
+                            if api_key.is_empty() {
+                                let _ = sup.vault().backend().delete_secret(&key_name);
+                            } else {
+                                sup.scrubber().register(&key_name, api_key);
+                                sup.vault().backend().set_secret(&key_name, api_key)?;
+                            }
+                            Ok::<_, GmError>(serde_json::json!({
+                                "provider": provider,
+                                "configured": !api_key.is_empty(),
+                            }))
+                        })(),
+                        "export_template" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let name = p
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Grok-Muse Team");
+                            let desc = p
+                                .get("description")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Exported team template");
+                            let tpl = gm_openbot::export_team(
+                                sup.roster(),
+                                sup.channels(),
+                                sup.queue(),
+                                name,
+                                desc,
+                            )?;
+                            Ok::<_, GmError>(serde_json::to_value(tpl)?)
+                        })(),
+                        "preview_template" => (|| {
+                            let raw = if let Some(s) = p.get("template").and_then(|v| v.as_str()) {
+                                s.to_string()
+                            } else {
+                                serde_json::to_string(p.get("template").unwrap_or(&p))?
+                            };
+                            let preview = gm_openbot::preview_template(&raw)?;
+                            Ok::<_, GmError>(serde_json::to_value(preview)?)
+                        })(),
+                        "import_template" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let tpl: gm_openbot::TeamTemplate = serde_json::from_value(
+                                p.get("template").cloned().unwrap_or_else(|| p.clone()),
+                            )?;
+                            let overwrite = p
+                                .get("overwrite")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                            let summary = gm_openbot::import_team(sup, &tpl, overwrite)?;
+                            let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                reason: "template_imported".into(),
+                            });
+                            Ok::<_, GmError>(serde_json::to_value(summary)?)
+                        })(),
+                        "delete_bot" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let bot_id =
+                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let removed = sup.roster().remove_bot(bot_id)?;
+                            let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                reason: "bot_deleted".into(),
+                            });
+                            Ok::<_, GmError>(serde_json::json!({
+                                "bot_id": bot_id,
+                                "deleted": removed,
+                            }))
+                        })(),
+                        "duplicate_bot" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let source_bot_id = p
+                                .get("source_bot_id")
+                                .or_else(|| p.get("bot_id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let new_id = p.get("new_id").and_then(|v| v.as_str());
+                            let new_name = p.get("new_name").and_then(|v| v.as_str());
+                            let dup =
+                                sup.roster().duplicate_bot(source_bot_id, new_id, new_name)?;
+                            let val = serde_json::to_value(&dup)?;
+                            let _ = self.event_tx.send(DaemonEvent::BotUpdated {
+                                bot_id: dup.id.clone(),
+                            });
+                            sup.emit_agui("BOT_UPDATED", &dup.id, &dup.id, val.clone());
+                            Ok::<_, GmError>(val)
+                        })(),
+                        "set_bot_avatar" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let bot_id =
+                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let b64 = p
+                                .get("bytes_base64")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let ext = p
+                                .get("extension")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("png");
+                            use base64::Engine as _;
+                            let bytes = base64::engine::general_purpose::STANDARD
+                                .decode(b64.trim())
+                                .map_err(|e| {
+                                    GmError::Config(format!("Invalid avatar base64: {e}"))
+                                })?;
+                            let avatar_path =
+                                sup.roster().save_bot_avatar_bytes(bot_id, ext, &bytes)?;
+                            let bot = sup.roster().get_bot(bot_id);
+                            let val = serde_json::json!({
+                                "bot_id": bot_id,
+                                "avatar_path": avatar_path,
+                                "bot": bot,
+                            });
+                            let _ = self.event_tx.send(DaemonEvent::BotUpdated {
+                                bot_id: bot_id.to_string(),
+                            });
+                            sup.emit_agui("BOT_UPDATED", bot_id, bot_id, val.clone());
+                            Ok::<_, GmError>(val)
+                        })(),
+                        "get_bot_avatar" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let bot_id =
+                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+                            use base64::Engine as _;
+                            if let Some((asset, bytes)) =
+                                sup.roster().read_bot_avatar_bytes(bot_id)?
+                            {
+                                let lower = asset.to_ascii_lowercase();
+                                let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                                    "image/jpeg"
+                                } else if lower.ends_with(".webp") {
+                                    "image/webp"
+                                } else {
+                                    "image/png"
+                                };
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "bot_id": bot_id,
+                                    "asset": asset,
+                                    "mime": mime,
+                                    "bytes_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+                                }))
+                            } else {
+                                Ok::<_, GmError>(serde_json::json!({
+                                    "bot_id": bot_id,
+                                    "bytes_base64": serde_json::Value::Null,
+                                }))
+                            }
+                        })(),
+                        "get_routine_webhook_key" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let routine_id = p
+                                .get("routine_id")
+                                .or_else(|| p.get("id"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let key = sup.get_routine_webhook_key(routine_id)?;
+                            Ok::<_, GmError>(serde_json::json!({
+                                "routine_id": routine_id,
+                                "webhook_key": key,
+                            }))
+                        })(),
+                        "update_channel" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let channel_id =
+                                p.get("channel_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let topic = p.get("topic").and_then(|v| v.as_str());
+                            let instructions = p.get("instructions").and_then(|v| v.as_str());
+                            let paused = p.get("paused").and_then(|v| v.as_bool());
+                            let archived = p.get("archived").and_then(|v| v.as_bool());
+                            let chan = sup.channels().update_channel_metadata(
+                                channel_id,
+                                topic,
+                                instructions,
+                                paused,
+                                archived,
+                            )?;
+                            let val = serde_json::to_value(&chan)?;
+                            let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                reason: "channel_updated".into(),
+                            });
+                            sup.emit_agui("CHANNEL_UPDATED", channel_id, "", val.clone());
+                            Ok::<_, GmError>(val)
+                        })(),
+                        "pin_library_item" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let bot_id =
+                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("muse");
+                            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let pinned = p
+                                .get("pinned")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                            let updated = sup.library().set_pinned(bot_id, id, pinned)?;
+                            Ok::<_, GmError>(serde_json::json!({
+                                "bot_id": bot_id,
+                                "id": id,
+                                "pinned": pinned,
+                                "updated": updated,
+                            }))
+                        })(),
+                        "record_teach_step" => (|| {
+                            let raw_step = if let Some(s) = p.get("step").and_then(|v| v.as_str()) {
+                                s.to_string()
+                            } else {
+                                let action = p
+                                    .get("action")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("click");
+                                let target =
+                                    p.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                                let detail =
+                                    p.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                                format!("{action} {target} {detail}").trim().to_string()
+                            };
+                            self.interactions.record_teach_step(&raw_step)?;
+                            Ok::<_, GmError>(serde_json::json!({ "ok": true }))
+                        })(),
+                        other => Err(GmError::Config(format!(
+                            "Unsupported ManageSystem op '{other}'"
+                        ))),
+                    };
                     let payload = match result {
                         Ok(value) => DaemonResponse::JsonPayload(value),
                         Err(e) => DaemonResponse::Error(e.to_string()),

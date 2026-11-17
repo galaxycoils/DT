@@ -1,0 +1,512 @@
+//! GrokBot UI State Machine, Adaptive Sidebar Mode Calculator, Smart Composer (`->` -> `→` + Undo + IME Guard),
+//! and 5-Tier `Escape` Dismissal Priority Stack.
+
+use serde_json::Value;
+use std::collections::HashMap;
+use zeroize::Zeroizing;
+
+/// Top-level workspace sections in the 48px left Workspace Rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkspaceSection {
+    #[default]
+    Bots,
+    Feed,
+    Goals,
+    Spaces,
+    Audit,
+}
+
+impl WorkspaceSection {
+    pub const ALL: [WorkspaceSection; 5] = [
+        WorkspaceSection::Bots,
+        WorkspaceSection::Feed,
+        WorkspaceSection::Goals,
+        WorkspaceSection::Spaces,
+        WorkspaceSection::Audit,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Bots => "Bots",
+            Self::Feed => "Feed",
+            Self::Goals => "Goals",
+            Self::Spaces => "Spaces",
+            Self::Audit => "Audit",
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        match self {
+            Self::Bots => "🤖",
+            Self::Feed => "⚡",
+            Self::Goals => "🎯",
+            Self::Spaces => "🧩",
+            Self::Audit => "🛡",
+        }
+    }
+}
+
+/// Adaptive Bot Sidebar layout mode computed from visible bot count (or user override).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarMode {
+    /// `<= 1` visible bot: sidebar auto-collapses so the main chat gets maximum width.
+    AutoCollapsed,
+    /// `2..=4` visible bots: compact `60px` icon rail with vector shape avatars + unread dots.
+    CompactRail,
+    /// `>= 5` visible bots: full `240px` sidebar with search, sections, groups, and hidden bots footer.
+    FullList,
+}
+
+impl SidebarMode {
+    pub fn from_visible_bot_count(count: usize, manual_override: Option<bool>) -> Self {
+        if let Some(expanded) = manual_override {
+            return if expanded {
+                Self::FullList
+            } else {
+                Self::AutoCollapsed
+            };
+        }
+        match count {
+            0 | 1 => Self::AutoCollapsed,
+            2..=4 => Self::CompactRail,
+            _ => Self::FullList,
+        }
+    }
+
+    pub fn width_px(&self) -> f32 {
+        match self {
+            Self::AutoCollapsed => 0.0,
+            Self::CompactRail => 60.0,
+            Self::FullList => 240.0,
+        }
+    }
+}
+
+/// Four tabs in the 340px right-hand `Bot Details` Drawer (`Cmd/Ctrl+Alt+B`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BotDetailsTab {
+    #[default]
+    Settings,
+    Computer,
+    Memory,
+    Library,
+}
+
+impl BotDetailsTab {
+    pub const ALL: [BotDetailsTab; 4] = [
+        BotDetailsTab::Settings,
+        BotDetailsTab::Computer,
+        BotDetailsTab::Memory,
+        BotDetailsTab::Library,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Settings => "Settings",
+            Self::Computer => "Computer",
+            Self::Memory => "Memory",
+            Self::Library => "Library",
+        }
+    }
+}
+
+/// Five panes in the Global Settings Modal (`Cmd/Ctrl+,`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsPane {
+    #[default]
+    General,
+    RulesAndAccess,
+    VaultAndPayments,
+    UsageAndBudget,
+    SystemAndUpdates,
+}
+
+impl SettingsPane {
+    pub const ALL: [SettingsPane; 5] = [
+        SettingsPane::General,
+        SettingsPane::RulesAndAccess,
+        SettingsPane::VaultAndPayments,
+        SettingsPane::UsageAndBudget,
+        SettingsPane::SystemAndUpdates,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::RulesAndAccess => "Rules & Access",
+            Self::VaultAndPayments => "Vault & Payments",
+            Self::UsageAndBudget => "Usage & Budget",
+            Self::SystemAndUpdates => "System & Updates",
+        }
+    }
+}
+
+/// Global modal overlays (Tier 2 of the Escape dismissal stack).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveModal {
+    CommandPalette,
+    Shortcuts,
+    Settings,
+    Studio,
+    ConnectApps,
+    CreateBot,
+    CreateChannel,
+    AvatarPicker {
+        bot_id: String,
+    },
+    Lightbox {
+        title: String,
+        uri: String,
+        mime: String,
+    },
+    ExpandedTable {
+        title: String,
+        headers: Vec<String>,
+        rows: Vec<Vec<String>>,
+        raw_markdown: String,
+    },
+}
+
+/// Target open in the right-hand Split Page / Space Canvas (Tier 3 of the Escape dismissal stack).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitPageTarget {
+    MarkdownFile {
+        bot_id: String,
+        file: String,
+        title: String,
+        editing: bool,
+    },
+    StaticSpace {
+        slug: String,
+        title: String,
+        url: Option<String>,
+        editing_html: bool,
+    },
+}
+
+/// Reply-to banner state above the Smart Composer (Tier 5 of the Escape dismissal stack).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyBanner {
+    pub message_id: String,
+    pub author: String,
+    pub snippet: String,
+}
+
+/// Transient interactive state for all 14 inline cards (keyed by `request_id` or `message_id`).
+#[derive(Default)]
+pub struct InlineCardUiState {
+    /// Approval card: whether `"Always allow"` / custom rule input is checked, plus pattern draft.
+    pub approval_remember: HashMap<String, (bool, String)>,
+    /// Secret prompt card: zeroized field values `request_id -> Vec<(field_key, Zeroizing<String>)>` + `save_to_vault`.
+    pub secret_fields: HashMap<String, (Vec<(String, Zeroizing<String>)>, bool)>,
+    /// Clarifying question card: selected option labels + `"Other"` freeform text.
+    pub question_answers: HashMap<String, (Vec<String>, String)>,
+    /// Expanded file diff / output cards (`request_id -> expanded`).
+    pub expanded_cards: HashMap<String, bool>,
+    /// Take-the-wheel handoff resume notes (`task_id -> note`).
+    pub wheel_notes: HashMap<String, String>,
+}
+
+impl InlineCardUiState {
+    /// Zeroize and drop secret prompt inputs for a given `request_id` (`RULE-SECRET-001`).
+    pub fn clear_secret(&mut self, request_id: &str) {
+        if let Some((mut fields, _)) = self.secret_fields.remove(request_id) {
+            for (_, val) in &mut fields {
+                use zeroize::Zeroize;
+                val.zeroize();
+            }
+        }
+    }
+}
+
+/// Complete GrokBot UI state held on `NativeApp`.
+pub struct GrokUiState {
+    pub section: WorkspaceSection,
+    pub sidebar_manual_override: Option<bool>,
+    pub show_hidden_bots: bool,
+    pub sidebar_search: String,
+
+    pub active_chat_kind: String, // "dm" or "channel"
+    pub details_drawer_open: bool,
+    pub details_tab: BotDetailsTab,
+    pub live_computer_open: bool,
+    pub live_computer_fullscreen: bool,
+    pub split_page: Option<SplitPageTarget>,
+    pub active_modal: Option<ActiveModal>,
+    pub settings_pane: SettingsPane,
+
+    // Tier 1 transient popovers
+    pub emoji_picker_msg: Option<String>,
+    pub mention_popup_open: bool,
+    pub slash_popup_open: bool,
+    pub context_menu_bot: Option<String>,
+    pub table_copy_menu: Option<String>,
+
+    // Tier 5 composer / search overlays
+    pub reply_to: Option<ReplyBanner>,
+    pub search_bar_open: bool,
+    pub search_older_tier2: bool,
+
+    // Smart composer state
+    pub last_auto_arrow_pos: Option<usize>,
+    pub voice_active: bool,
+    pub dictation_active: bool,
+    pub pending_attachments: Vec<String>,
+
+    // Command palette & modal drafts
+    pub command_palette_query: String,
+    pub command_palette_selected: usize,
+    pub studio_tab: String, // "templates", "skills", "routines", "sections"
+    pub template_export_name: String,
+    pub template_export_desc: String,
+    pub template_import_json: String,
+    pub template_preview: Option<Value>,
+    pub custom_skill_name: String,
+    pub custom_skill_title: String,
+    pub custom_skill_desc: String,
+    pub custom_skill_body: String,
+    pub new_section_name: String,
+
+    // Settings modal drafts
+    pub theme_pref: String,
+    pub accent_mode: String,
+    pub execution_mode: String,
+    pub sleep_prevention: bool,
+    pub wake_at_login: bool,
+    pub hardware_security_keys: bool,
+    pub voice_provider: String,
+    pub rule_mode_draft: String,
+    pub rule_pattern_draft: String,
+    pub rule_desc_draft: String,
+    pub vault_kind_draft: String,
+    pub vault_label_draft: String,
+    pub vault_username_draft: String,
+    pub vault_domain_draft: String,
+    pub vault_secret_draft: Zeroizing<String>,
+    pub vault_csv_draft: String,
+    pub revealed_secrets: HashMap<String, String>,
+
+    // Connect Apps / Custom connector drafts
+    pub connector_name_draft: String,
+    pub connector_kind_draft: String,
+    pub connector_endpoint_draft: String,
+    pub connector_secret_draft: Zeroizing<String>,
+
+    // Teach a Task state
+    pub teach_active: bool,
+    pub teach_step_draft: String,
+    pub teach_skill_name_draft: String,
+    pub teach_steps_recorded: Vec<String>,
+
+    // Library pagination state
+    pub library_filter: String,
+    pub library_cursor: usize,
+
+    // Create Bot / Avatar Picker drafts
+    pub new_bot_id: String,
+    pub new_bot_name: String,
+    pub new_bot_role: String,
+    pub new_bot_prompt: String,
+    pub avatar_shape_draft: String,
+    pub avatar_color_draft: String,
+    pub avatar_upload_path: String,
+
+    // Applied style fingerprint so `ctx.set_style` only runs on actual changes
+    pub applied_style_key: String,
+
+    pub cards: InlineCardUiState,
+}
+
+impl Default for GrokUiState {
+    fn default() -> Self {
+        Self {
+            section: WorkspaceSection::Bots,
+            sidebar_manual_override: None,
+            show_hidden_bots: false,
+            sidebar_search: String::new(),
+            active_chat_kind: "dm".into(),
+            details_drawer_open: false,
+            details_tab: BotDetailsTab::Settings,
+            live_computer_open: false,
+            live_computer_fullscreen: false,
+            split_page: None,
+            active_modal: None,
+            settings_pane: SettingsPane::General,
+            emoji_picker_msg: None,
+            mention_popup_open: false,
+            slash_popup_open: false,
+            context_menu_bot: None,
+            table_copy_menu: None,
+            reply_to: None,
+            search_bar_open: false,
+            search_older_tier2: false,
+            last_auto_arrow_pos: None,
+            voice_active: false,
+            dictation_active: false,
+            pending_attachments: Vec::new(),
+            command_palette_query: String::new(),
+            command_palette_selected: 0,
+            studio_tab: "templates".into(),
+            template_export_name: "My GrokBot Team".into(),
+            template_export_desc: "Portable multi-bot team template".into(),
+            template_import_json: String::new(),
+            template_preview: None,
+            custom_skill_name: String::new(),
+            custom_skill_title: String::new(),
+            custom_skill_desc: String::new(),
+            custom_skill_body: String::new(),
+            new_section_name: String::new(),
+            theme_pref: "dark".into(),
+            accent_mode: "bot_color".into(),
+            execution_mode: "ask".into(),
+            sleep_prevention: false,
+            wake_at_login: false,
+            hardware_security_keys: false,
+            voice_provider: "xai_realtime".into(),
+            rule_mode_draft: "allow".into(),
+            rule_pattern_draft: String::new(),
+            rule_desc_draft: String::new(),
+            vault_kind_draft: "login".into(),
+            vault_label_draft: String::new(),
+            vault_username_draft: String::new(),
+            vault_domain_draft: String::new(),
+            vault_secret_draft: Zeroizing::new(String::new()),
+            vault_csv_draft: String::new(),
+            revealed_secrets: HashMap::new(),
+            connector_name_draft: String::new(),
+            connector_kind_draft: "RemoteHttps".into(),
+            connector_endpoint_draft: String::new(),
+            connector_secret_draft: Zeroizing::new(String::new()),
+            teach_active: false,
+            teach_step_draft: String::new(),
+            teach_skill_name_draft: String::new(),
+            teach_steps_recorded: Vec::new(),
+            library_filter: "all".into(),
+            library_cursor: 0,
+            new_bot_id: String::new(),
+            new_bot_name: String::new(),
+            new_bot_role: "Specialist".into(),
+            new_bot_prompt: "You are a helpful specialist agent.".into(),
+            avatar_shape_draft: "Circle".into(),
+            avatar_color_draft: "#2F7CF6".into(),
+            avatar_upload_path: String::new(),
+            applied_style_key: String::new(),
+            cards: InlineCardUiState::default(),
+        }
+    }
+}
+
+impl GrokUiState {
+    /// Dismiss the highest-priority active UI layer according to the 5-tier GrokBot Escape stack:
+    /// Tier 1: Active transient popover (emoji picker, `@`/`/` autocomplete, context menu, table copy menu)
+    /// Tier 2: Active modal (`CommandPalette`, `Shortcuts`, `Settings`, `Studio`, `AvatarPicker`, `Lightbox`, `ExpandedTable`, etc.)
+    /// Tier 3: Active `SplitPage` or `LiveComputer` viewer
+    /// Tier 4: Open `BotDetails` drawer
+    /// Tier 5: Active `reply_to` banner or `search_bar_open`
+    pub fn dismiss_escape_layer(&mut self) -> bool {
+        // Tier 1: Popovers
+        if self.emoji_picker_msg.is_some()
+            || self.mention_popup_open
+            || self.slash_popup_open
+            || self.context_menu_bot.is_some()
+            || self.table_copy_menu.is_some()
+        {
+            self.emoji_picker_msg = None;
+            self.mention_popup_open = false;
+            self.slash_popup_open = false;
+            self.context_menu_bot = None;
+            self.table_copy_menu = None;
+            return true;
+        }
+
+        // Tier 2: Modals
+        if self.active_modal.is_some() {
+            self.active_modal = None;
+            return true;
+        }
+
+        // Tier 3: Split Page or Live Computer
+        if self.live_computer_fullscreen || self.live_computer_open {
+            self.live_computer_fullscreen = false;
+            self.live_computer_open = false;
+            return true;
+        }
+        if self.split_page.is_some() {
+            self.split_page = None;
+            return true;
+        }
+
+        // Tier 4: Bot Details Drawer
+        if self.details_drawer_open {
+            self.details_drawer_open = false;
+            return true;
+        }
+
+        // Tier 5: Reply-to banner or inline Search bar
+        if self.reply_to.is_some() {
+            self.reply_to = None;
+            return true;
+        }
+        if self.search_bar_open {
+            self.search_bar_open = false;
+            return true;
+        }
+
+        false
+    }
+
+    /// Returns true if the Live Computer viewer is currently visible on screen.
+    pub fn is_live_computer_visible(&self) -> bool {
+        self.live_computer_open
+            || self.live_computer_fullscreen
+            || (self.details_drawer_open && self.details_tab == BotDetailsTab::Computer)
+    }
+}
+
+/// Apply GrokBot Smart Composer transformations:
+/// - When `!ime_composing`, converts `"->"` into `"→"` and records the byte offset in `last_auto_arrow_pos`.
+/// - When `backspace_pressed` immediately after an auto-arrow replacement (where the `"→"` was just deleted
+///   or sits at the end), restores the literal `"->"` so a single Backspace undoes the auto-arrow.
+pub fn apply_smart_composer_edit(
+    draft: &mut String,
+    ime_composing: bool,
+    backspace_pressed: bool,
+    last_auto_arrow_pos: &mut Option<usize>,
+) -> bool {
+    if ime_composing {
+        return false;
+    }
+
+    if backspace_pressed && let Some(pos) = *last_auto_arrow_pos {
+        // Case A: egui TextEdit already deleted the '→' character at `pos` on Backspace
+        if draft.len() == pos && draft.is_char_boundary(pos) {
+            draft.push_str("->");
+            *last_auto_arrow_pos = None;
+            return true;
+        }
+        // Case B: caller invoked undo before deleting '→' at `pos`
+        let arrow_len = '→'.len_utf8();
+        if pos + arrow_len <= draft.len() && &draft[pos..pos + arrow_len] == "->" {
+            *last_auto_arrow_pos = None;
+        } else if pos + arrow_len <= draft.len() && &draft[pos..pos + arrow_len] == "→" {
+            draft.replace_range(pos..pos + arrow_len, "->");
+            *last_auto_arrow_pos = None;
+            return true;
+        }
+    }
+
+    if let Some(idx) = draft.find("->") {
+        draft.replace_range(idx..idx + 2, "→");
+        *last_auto_arrow_pos = Some(idx);
+        return true;
+    }
+
+    if !backspace_pressed
+        && let Some(pos) = *last_auto_arrow_pos
+        && !draft[pos.min(draft.len())..].starts_with('→')
+    {
+        *last_auto_arrow_pos = None;
+    }
+
+    false
+}

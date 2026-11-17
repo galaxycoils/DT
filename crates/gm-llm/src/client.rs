@@ -818,6 +818,17 @@ impl HybridLlmClient {
         messages: &[ChatMessage],
         max_tokens: u32,
     ) -> Result<crate::budget::BudgetReservation> {
+        self.reserve_request_attributed(target, messages, max_tokens, "muse", "chat")
+    }
+
+    fn reserve_request_attributed(
+        &self,
+        target: &ModelTarget,
+        messages: &[ChatMessage],
+        max_tokens: u32,
+        bot_id: &str,
+        source: &str,
+    ) -> Result<crate::budget::BudgetReservation> {
         let input = messages
             .iter()
             .map(|m| {
@@ -833,7 +844,7 @@ impl HybridLlmClient {
         } else {
             estimate_api_cost_usd(&target.model, input, max_tokens, images)
         };
-        self.budget.reserve(estimate)
+        self.budget.reserve_attributed(bot_id, source, estimate)
     }
 
     pub fn backend(&self) -> Arc<dyn LlmBackend> {
@@ -971,6 +982,31 @@ impl HybridLlmClient {
         temperature: f32,
         delta_tx: tokio::sync::mpsc::Sender<String>,
     ) -> Result<LlmResponse> {
+        self.complete_stream_attributed(
+            primary,
+            fallback,
+            messages,
+            max_tokens,
+            temperature,
+            delta_tx,
+            "muse",
+            "chat",
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn complete_stream_attributed(
+        &self,
+        primary: &ModelTarget,
+        fallback: Option<&ModelTarget>,
+        messages: &[ChatMessage],
+        max_tokens: u32,
+        temperature: f32,
+        delta_tx: tokio::sync::mpsc::Sender<String>,
+        bot_id: &str,
+        source: &str,
+    ) -> Result<LlmResponse> {
         // Check circuit breaker for primary provider
         if self.circuit_breaker.is_open(&primary.provider) {
             warn!(
@@ -979,7 +1015,8 @@ impl HybridLlmClient {
             );
             if let Some(fb) = fallback {
                 let prepared_fb = self.prepare_messages_for_target(fb, messages);
-                let reservation = self.reserve_request(fb, &prepared_fb, max_tokens)?;
+                let reservation =
+                    self.reserve_request_attributed(fb, &prepared_fb, max_tokens, bot_id, source)?;
                 match self
                     .backend
                     .complete_stream(fb, &prepared_fb, max_tokens, temperature, delta_tx)
@@ -1004,7 +1041,13 @@ impl HybridLlmClient {
         }
 
         let prepared_primary = self.prepare_messages_for_target(primary, messages);
-        let reservation = self.reserve_request(primary, &prepared_primary, max_tokens)?;
+        let reservation = self.reserve_request_attributed(
+            primary,
+            &prepared_primary,
+            max_tokens,
+            bot_id,
+            source,
+        )?;
         match self
             .backend
             .complete_stream(
