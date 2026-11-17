@@ -45,6 +45,9 @@ enum Commands {
     },
     /// Assemble a distributable macOS .dmg containing GrokMuse.app and GrokMuseCUHelper.app
     Dmg {
+        /// Package optimized release binaries.
+        #[arg(long)]
+        release: bool,
         #[arg(long)]
         identity: Option<String>,
         #[arg(long, default_value = "target/dist/Grok-Muse.dmg")]
@@ -249,6 +252,7 @@ fn create_app_bundles(release: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("==> Compiling Grok-Muse binaries for bundling (release={release})...");
     let mut args = vec![
         "build",
+        "--locked",
         "-p",
         "gm-cu-helper",
         "-p",
@@ -395,11 +399,15 @@ fn sign_bundle(
     Ok(())
 }
 
-fn assemble_dmg(id: &str, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn assemble_dmg(id: &str, output: &str, release: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("==> Assembling distributable macOS DMG with identity: {id}");
 
     // 1. Compile & assemble bundles
-    create_app_bundles(false)?;
+    println!(
+        "==> Packaging profile={} output={output}",
+        if release { "release" } else { "debug" }
+    );
+    create_app_bundles(release)?;
 
     // Packaging debug builds should not duplicate their symbol tables in the image.
     for executable in [
@@ -533,7 +541,7 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
     if !dmg_path.exists() {
         println!("DMG not found at {dmg_path_str}. Generating distribution DMG first...");
         let id = detect_identity();
-        assemble_dmg(&id, dmg_path_str)?;
+        assemble_dmg(&id, dmg_path_str, false)?;
     }
 
     #[cfg(target_os = "macos")]
@@ -899,9 +907,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("==> All artifacts signed and strictly verified.");
         }
 
-        Commands::Dmg { identity, output } => {
+        Commands::Dmg {
+            identity,
+            output,
+            release,
+        } => {
             let id = identity.unwrap_or_else(detect_identity);
-            assemble_dmg(&id, &output)?;
+            assemble_dmg(&id, &output, release)?;
         }
 
         Commands::VerifyDmg { dmg_path } => {
@@ -1762,7 +1774,7 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
     let t0 = Instant::now();
     let id = identity.unwrap_or_else(detect_identity);
     let dmg_output = "target/dist/Grok-Muse.dmg";
-    let dmg_build_res = assemble_dmg(&id, dmg_output);
+    let dmg_build_res = assemble_dmg(&id, dmg_output, false);
     let dmg_verify_res = if dmg_build_res.is_ok() {
         run_verify_dmg(dmg_output)
     } else {
@@ -2145,6 +2157,21 @@ fn run_notarize(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dmg_cli_preserves_profile_and_output_selection() {
+        use clap::Parser;
+        let parsed =
+            super::Cli::try_parse_from(["xtask", "dmg", "--release", "--output", "preview.dmg"])
+                .unwrap();
+        assert!(
+            matches!(parsed.command, super::Commands::Dmg { release: true, output, .. } if output == "preview.dmg")
+        );
+        let parsed = super::Cli::try_parse_from(["xtask", "dmg"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            super::Commands::Dmg { release: false, .. }
+        ));
+    }
 
     use super::*;
 

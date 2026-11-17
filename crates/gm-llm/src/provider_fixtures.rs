@@ -1,3 +1,9 @@
+use crate::{
+    BudgetManager, ChatMessage, HybridLlmClient, KeychainSecrets, LlmBackend, LlmRouter,
+    ModelTarget, OAuthTokenBundle, ProviderKind, ReqwestLlmBackend, TaskType,
+    build_oauth_authorize_url, disconnect_oauth_account, exchange_oauth_code, load_oauth_bundle,
+    store_oauth_bundle,
+};
 use axum::{
     Json, Router,
     extract::State,
@@ -8,12 +14,6 @@ use axum::{
 use gm_core::config::{
     BudgetConfig, ProviderAuthMode, ProviderPreset, ProviderProfileConfig, ProvidersConfig,
     WireProtocol,
-};
-use gm_llm::{
-    BudgetManager, ChatMessage, HybridLlmClient, KeychainSecrets, LlmBackend, LlmRouter,
-    ModelTarget, OAuthTokenBundle, ProviderKind, ReqwestLlmBackend, TaskType,
-    build_oauth_authorize_url, disconnect_oauth_account, exchange_oauth_code, load_oauth_bundle,
-    store_oauth_bundle,
 };
 use serde_json::{Value, json};
 use std::sync::{
@@ -168,7 +168,7 @@ async fn handle_changed_dest(
 #[tokio::test]
 async fn provider_presets_oauth_responses_discovery_and_revalidation_fixtures() {
     let (base, state) = spawn_fixture_server().await;
-    let secrets = KeychainSecrets::new("co.anysphere.grok-muse.provider-fixture-test");
+    let secrets = KeychainSecrets::in_memory();
 
     // 1. ChatGPT Sign-In PKCE -> Exchange -> Streamed /v1/responses -> Separate Allowance -> Disconnect
     let pkce = build_oauth_authorize_url(

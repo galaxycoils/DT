@@ -1,4 +1,4 @@
-# Grok-Muse Hybrid Agent (`v0.6.0` — Full Rakazo Parity & Multi-Provider Suite)
+# Grok-Muse Hybrid Agent (`v0.6.1` — Apple Silicon Preview)
 
 > **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native macOS, React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
 > Built in Rust with native Rust desktop rendering, macOS ScreenCaptureKit/Accessibility integration, scoped workspace file access, Candle model support, and multi-provider hybrid LLM routing (`ChatGPT OAuth`, `Kilo Gateway`, `OpenRouter`, `Nous Portal`, `Meta Muse`, `xAI Grok`, `Custom Responses/ChatCompletions`, and `Local VLM`).
@@ -26,7 +26,7 @@ The current branch adds a durable task dispatcher, native desktop client, persis
 
 ---
 
-## What's New in `v0.6.0` (Full Rakazo Parity)
+## What's New in `v0.6.0` (Provider and workspace additions)
 
 - **Multi-Provider OAuth, Responses API & 5-Tier Precedence (`crates/gm-llm`, `crates/gm-core`)**: Added ChatGPT PKCE OAuth (`/v1/responses` streaming + separate included-allowance tracking), Kilo Gateway, OpenRouter, Nous Portal OAuth (with 401 refresh-and-retry), Custom Chat Completions/Responses endpoints, `Routine -> Bot -> Workspace -> Account -> Legacy` precedence with fail-in-place semantics, `/models` discovery, per-profile screenshot egress gates, and origin-change `NeedsRevalidation`.
 - **Relay, Bridges, Honest Connect Apps & Voice/Meetings (`crates/gm-openbot`)**: Outbound-only HMAC-verified HTTPS relay (`relay.rs`), persisted channel mappings & deduplication (`bridges.rs`), real capability probing (`connectors.rs`), local Whisper/TTS (`voice.rs`), Asterisk ARI SIP trunk with Tier-3 carrier-cost gate (`sip_asterisk.rs`), Zoom RTMS (`meetings_zoom.rs`), and Google Meet REST/Events (`meetings_google.rs`).
@@ -156,14 +156,24 @@ cargo test -p gm-openbot --locked
 The sibling `Darius` checkout is pinned to commit `f47a4ce980abecb751c9f5c79e1c424a20100433`
 in `.github/workflows/ci.yml` and verified by `tools/bootstrap.sh` (see the [reliability review](docs/openmausbot-comparison.md)).
 
+### Apple Silicon preview
+
+`v0.6.1` provides an optimized release-profile Apple Silicon DMG and matching SHA-256 sidecar. It is ad-hoc signed and requires manual installation. Developer ID signing, notarization, signed-updater distribution, and native certification remain outstanding. Web/mobile clients and hosted adapters have source and fixture coverage; deployed end-to-end certification remains outstanding. See [release notes](docs/releases/v0.6.1.md) and [release readiness](docs/release-readiness.md).
+
+Download both assets from the [v0.6.1 prerelease](https://github.com/galaxycoils/grok-muse/releases/tag/v0.6.1) into one directory, then run:
+
+```sh
+shasum -a 256 -c GrokMuse-0.6.1-macos-aarch64-adhoc.dmg.sha256
+```
+
 ### Building the DMG
 ```bash
 # Build binaries, bundle .app packages, codesign, and create target/dist/Grok-Muse.dmg
-cargo run --package xtask -- dmg
+cargo run --locked --package xtask -- dmg --release --identity - --output target/dist/GrokMuse-0.6.1-macos-aarch64-adhoc.dmg
 ```
 
 ### Installing on macOS
-1. Open `target/dist/Grok-Muse.dmg`.
+1. Open `GrokMuse-0.6.1-macos-aarch64-adhoc.dmg` from your download or build directory.
 2. Drag `GrokMuse.app` to `/Applications`.
 3. Launch `Grok-Muse` or run the CLI onboarding:
    ```bash
@@ -422,7 +432,7 @@ cargo test --package gm-llm --features local-vlm
 
 ## Continuous Integration (CI)
 
-Grok-Muse is continuously tested on both **macOS (`macos-14`)** and **Linux (`ubuntu-latest`)** via GitHub Actions:
+GitHub Actions checks macOS, Ubuntu and Windows on branches, pull requests and version tags. Native certification is tracked separately in [release readiness](docs/release-readiness.md). Checks include:
 - `cargo fmt --all --check`
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo nextest run --workspace` (or `cargo test --workspace`)

@@ -21,3 +21,6 @@ pub use secrets::*;
 
 #[cfg(feature = "local-vlm")]
 pub use local_vlm::*;
+
+#[cfg(test)]
+mod provider_fixtures;

@@ -6,7 +6,7 @@ use std::path::Path;
 #[cfg(not(target_os = "macos"))]
 use std::{path::PathBuf, process::Command};
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(target_os = "linux", all(test, unix)))]
 pub fn linux_unit(binary: &Path, daemon: bool) -> std::result::Result<String, String> {
     let binary = binary.to_str().ok_or("Service binary path is not UTF-8")?;
     if !Path::new(binary).is_absolute() || binary.chars().any(char::is_control) {
@@ -233,6 +233,7 @@ pub fn show_services_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn linux_quotes_paths_and_rejects_directive_injection() {
         let unit = linux_unit(Path::new("/opt/My App/100%/$HOME/gm-daemon"), true).unwrap();

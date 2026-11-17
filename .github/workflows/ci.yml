@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [ "master", "main" ]
+    tags: [ "v*" ]
   pull_request:
     branches: [ "master", "main" ]
 
@@ -68,29 +69,29 @@ jobs:
       - name: Clippy check (macOS)
         if: runner.os == 'macOS'
         working-directory: grok-muse
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
-      - name: Clippy check (Linux)
+      - name: Clippy check (Linux and Windows)
         if: runner.os != 'macOS'
         working-directory: grok-muse
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Check Windows target platform foundations
         if: runner.os == 'Linux'
         working-directory: grok-muse
         run: |
           rustup target add x86_64-pc-windows-gnu
-          cargo check --target x86_64-pc-windows-gnu -p gm-platform -p gm-core -p gm-cu-helper -p gm-muse
+          cargo check --locked --target x86_64-pc-windows-gnu -p gm-platform -p gm-core -p gm-cu-helper -p gm-muse
 
       - name: Run nextest (macOS)
         if: runner.os == 'macOS'
         working-directory: grok-muse
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --locked --workspace --all-features
 
-      - name: Run nextest (Linux)
+      - name: Run nextest (Linux and Windows)
         if: runner.os != 'macOS'
         working-directory: grok-muse
-        run: cargo nextest run --workspace
+        run: cargo nextest run --locked --workspace
 
       - name: Verify workspace guest protocol
         if: runner.os == 'Linux'
@@ -108,19 +109,33 @@ jobs:
         env:
           CHROME_BIN: /usr/bin/google-chrome
         run: |
-          cargo build -p gm-daemon --bin gm-daemon
+          cargo build --locked -p gm-daemon --bin gm-daemon
           npm run smoke --prefix tools/companion
 
       - name: Run G5 eval suite gate
         working-directory: grok-muse
-        run: cargo run -p xtask -- eval
+        run: cargo run --locked -p xtask -- eval
 
       - name: Benchmark G4 LLM latency gate
         working-directory: grok-muse
-        run: cargo run -p xtask -- bench-llm
+        run: cargo run --locked -p xtask -- bench-llm
 
       - name: Verify release DMG pipeline (macOS only)
         if: runner.os == 'macOS'
         working-directory: grok-muse
-        run: cargo run -p xtask -- verify-dmg
+        run: |
+          cargo run --locked -p xtask -- verify-dmg
+          (cd target/dist && shasum -a 256 -c Grok-Muse.dmg.sha256)
+
+      - name: Verify release-profile Apple Silicon preview
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
+        working-directory: grok-muse
+        shell: bash
+        run: |
+          test "$(uname -m)" = arm64
+          VERSION="${GITHUB_REF_NAME#v}"
+          DMG="target/dist/GrokMuse-${VERSION}-macos-aarch64-adhoc.dmg"
+          cargo run --locked -p xtask -- dmg --release --identity - --output "$DMG"
+          cargo run --locked -p xtask -- verify-dmg --dmg-path "$DMG"
+          (cd target/dist && shasum -a 256 -c "$(basename "$DMG").sha256")
 
