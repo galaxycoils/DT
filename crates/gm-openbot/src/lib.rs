@@ -2,6 +2,7 @@
 
 pub mod a2a;
 pub mod attachments;
+pub mod billing;
 pub mod bridges;
 pub mod channels;
 pub mod compaction;
@@ -9,8 +10,10 @@ pub mod connectors;
 pub mod db_recovery;
 pub mod direct_chat;
 pub mod discretion;
+pub mod hosted;
 pub mod interactions;
 pub mod library;
+pub mod marketplace;
 pub mod meetings_google;
 pub mod meetings_zoom;
 pub mod queue;
@@ -29,6 +32,7 @@ pub mod voice;
 pub mod web;
 
 pub use a2a::*;
+pub use billing::*;
 pub use bridges::*;
 pub use channels::*;
 pub use compaction::*;
@@ -36,8 +40,10 @@ pub use connectors::*;
 pub use db_recovery::*;
 pub use direct_chat::*;
 pub use discretion::*;
+pub use hosted::*;
 pub use interactions::*;
 pub use library::*;
+pub use marketplace::*;
 pub use meetings_google::*;
 pub use meetings_zoom::*;
 pub use queue::*;

@@ -549,6 +549,7 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
         .route("/ag-ui/events", get(stream_agui_events))
         .route("/bridges/inbound", post(handle_bridge_inbound))
         .route("/bridges/slack/events", post(handle_slack_webhook))
+        .nest("/api/v1", api_v1_router())
         .layer(axum::middleware::from_fn(
             move |request: axum::extract::Request, next: axum::middleware::Next| {
                 let sp_atomic = Arc::clone(&spaces_port_atomic);
@@ -4390,6 +4391,259 @@ async fn system_provider_oauth_route(
     Ok(Json(out))
 }
 
+fn api_v1_router() -> Router<CompanionWebState> {
+    Router::new()
+        .route("/bootstrap", get(get_bootstrap_route))
+        .route("/workspaces/:ws_id/events", get(stream_workspace_events_v1))
+        .route("/bots", get(list_bots).post(upsert_bot_route))
+        .route("/dm/:bot_id/messages", get(list_dm_messages_route).post(post_dm_message_route))
+        .route("/channels", get(list_channels).post(create_channel))
+        .route("/channels/:id/messages", get(list_channel_messages).post(post_channel_message))
+        .route("/approvals/:id", post(respond_approval_route))
+        .route("/approvals/:id/respond", post(respond_approval_route))
+        .route("/questions/:id", post(respond_question_route))
+        .route("/questions/:id/respond", post(respond_question_route))
+        .route("/routines", get(list_routines_route).post(upsert_routine_route))
+        .route("/routines/:id/test", post(test_routine_route))
+        .route("/routines/:id/runs", get(list_routine_runs_route))
+        .route("/goals", get(list_goals_route).post(create_goal_route).patch(patch_goal_route))
+        .route("/spaces", get(list_spaces_route).post(create_space_route))
+        .route("/spaces/:slug/url", get(get_space_url_route))
+        .route("/usage", get(get_usage_route))
+        .route("/system/providers", get(system_providers_get_route))
+        .route("/system/providers/profile", post(system_provider_profile_route))
+        .route("/system/providers/:id/discover-models", post(system_provider_discover_models_route))
+        .route("/system/providers/:id/oauth/:op", post(system_provider_oauth_route))
+        .route("/connectors", get(list_connectors_route))
+        .route("/connectors/probe/:id", get(probe_connector_v1_route))
+        .route("/marketplace", get(list_marketplace_v1_route))
+        .route("/marketplace/install", post(install_marketplace_v1_route))
+        .route("/marketplace/:id/update", post(update_marketplace_v1_route))
+        .route("/marketplace/:id", axum::routing::delete(remove_marketplace_v1_route))
+        .route("/billing/status", get(billing_status_v1_route))
+        .route("/billing/checkout", post(billing_checkout_v1_route))
+        .route("/billing/webhooks/stripe", post(stripe_webhook_v1_route))
+}
+
+async fn stream_workspace_events_v1(
+    headers: HeaderMap,
+    Path(ws_id): Path<String>,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<
+    Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>,
+    ApiErr,
+> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let clean = crate::hosted::validate_workspace_slug(&ws_id).map_err(map_gm_error)?;
+    // Deny cross-tenant event streaming on non-default workspaces unless authorized.
+    let expected_ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+    if clean != expected_ws && clean != "local" {
+        return Err(ApiErr::msg(
+            StatusCode::FORBIDDEN,
+            format!("Cross-tenant SSE subscription denied for workspace '{clean}'"),
+        ));
+    }
+    let rx = state.supervisor.agui_sender().subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
+        Ok(evt) => {
+            let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".into());
+            Some(Ok(Event::default()
+                .id(evt.sequence.to_string())
+                .event(evt.event_type)
+                .data(json)))
+        }
+        Err(_) => None,
+    });
+    Ok(Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15)),
+    ))
+}
+
+async fn probe_connector_v1_route(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let cfg = state.shared_config.read().clone();
+    let result = state
+        .supervisor
+        .connectors()
+        .probe_integration_capability(&cfg, &id)
+        .await;
+    Ok(Json(result))
+}
+
+async fn list_marketplace_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let catalog = state.supervisor.marketplace().builtin_catalog();
+    let installed = state
+        .supervisor
+        .marketplace()
+        .list_installed()
+        .map_err(map_gm_error)?;
+    Ok(Json(serde_json::json!({
+        "catalog": catalog,
+        "installed": installed,
+    })))
+}
+
+async fn install_marketplace_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let confirmed_scopes: Vec<String> = body
+        .get("confirmed_scopes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let listing: crate::marketplace::MarketplaceListing = if let Some(l) = body.get("listing") {
+        serde_json::from_value(l.clone())
+            .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid listing: {e}")))?
+    } else {
+        let id = body["id"]
+            .as_str()
+            .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing plugin id or listing"))?;
+        state
+            .supervisor
+            .marketplace()
+            .builtin_catalog()
+            .into_iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| ApiErr::msg(StatusCode::NOT_FOUND, format!("Unknown plugin '{id}'")))?
+    };
+    let installed = state
+        .supervisor
+        .marketplace()
+        .install_plugin(&listing, &confirmed_scopes)
+        .map_err(map_gm_error)?;
+    Ok(Json(installed))
+}
+
+async fn update_marketplace_v1_route(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let confirmed_scopes: Vec<String> = body
+        .get("confirmed_scopes")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|s| s.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut listing: crate::marketplace::MarketplaceListing =
+        serde_json::from_value(body.get("listing").cloned().unwrap_or(body))
+            .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid listing: {e}")))?;
+    listing.id = id;
+    let updated = state
+        .supervisor
+        .marketplace()
+        .update_plugin(&listing, &confirmed_scopes)
+        .map_err(map_gm_error)?;
+    Ok(Json(updated))
+}
+
+async fn remove_marketplace_v1_route(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let removed = state
+        .supervisor
+        .marketplace()
+        .remove_plugin(&id)
+        .map_err(map_gm_error)?;
+    Ok(Json(serde_json::json!({ "id": id, "removed": removed })))
+}
+
+async fn billing_status_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let ws_id = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+    let ent = state
+        .supervisor
+        .billing()
+        .get_entitlements(&ws_id)
+        .map_err(map_gm_error)?;
+    Ok(Json(ent))
+}
+
+async fn billing_checkout_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let stripe_key = body["stripe_secret_key"]
+        .as_str()
+        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing stripe_secret_key"))?;
+    let ws_id = body["ws_id"].as_str().unwrap_or("default");
+    let success = body["success_url"].as_str().unwrap_or("https://localhost/ok");
+    let cancel = body["cancel_url"].as_str().unwrap_or("https://localhost/cancel");
+    let price_id = body["price_id"].as_str().unwrap_or("price_default");
+    let res = state
+        .supervisor
+        .billing()
+        .create_sandbox_checkout_session(stripe_key, ws_id, success, cancel, price_id)
+        .await
+        .map_err(map_gm_error)?;
+    Ok(Json(res))
+}
+
+async fn stripe_webhook_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    raw_body: String,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    let secret = state
+        .slack_signing_secret
+        .as_deref()
+        .or_else(|| {
+            std::env::var("STRIPE_WEBHOOK_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|_| "")
+        })
+        .unwrap_or("");
+    let env_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+    let active_secret = if !env_secret.trim().is_empty() {
+        env_secret.as_str()
+    } else {
+        secret
+    };
+    let sig = headers
+        .get("stripe-signature")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (applied, ent) = state
+        .supervisor
+        .billing()
+        .process_stripe_webhook(active_secret, sig, &raw_body)
+        .map_err(|e| ApiErr::msg(StatusCode::UNAUTHORIZED, e.to_string()))?;
+    Ok(Json(serde_json::json!({
+        "applied": applied,
+        "entitlements": ent,
+    })))
+}
+
 async fn system_support_bundle_route(
     headers: HeaderMap,
     State(state): State<CompanionWebState>,
@@ -5164,6 +5418,80 @@ mod tests {
             oauth_disc.json::<serde_json::Value>().await.unwrap()["connected"],
             false
         );
+
+        // Phase 4 /api/v1 checks: cross-tenant SSE denial, marketplace scope confirmation, billing, probe
+        let v1_boot = client
+            .get(format!("{base}/api/v1/bootstrap"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(v1_boot.status(), 200);
+
+        let v1_cross_sse = client
+            .get(format!("{base}/api/v1/workspaces/other-tenant/events"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(v1_cross_sse.status(), 403);
+
+        let probe_gmail = client
+            .get(format!("{base}/api/v1/connectors/probe/gmail"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(probe_gmail.status(), 200);
+        assert_eq!(
+            probe_gmail.json::<serde_json::Value>().await.unwrap()["status"],
+            "setup_required"
+        );
+
+        let mkt_list: serde_json::Value = client
+            .get(format!("{base}/api/v1/marketplace"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(!mkt_list["catalog"].as_array().unwrap().is_empty());
+
+        // Installing without confirming scopes must fail
+        let mkt_denied = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .bearer_auth("secret-token")
+            .json(&serde_json::json!({ "id": "calendar-brief", "confirmed_scopes": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(mkt_denied.status(), 400);
+
+        let mkt_ok = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .bearer_auth("secret-token")
+            .json(&serde_json::json!({
+                "id": "calendar-brief",
+                "confirmed_scopes": ["connectors.calendar.read"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(mkt_ok.status(), 200);
+
+        let bill_stat: serde_json::Value = client
+            .get(format!("{base}/api/v1/billing/status"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(bill_stat["mode"], "self_hosted_byok");
+        assert_eq!(bill_stat["byok_unrestricted"], true);
 
         comp_handle.abort();
         spaces_handle.abort();

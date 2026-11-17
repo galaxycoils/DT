@@ -32,6 +32,7 @@ rusqlite = { workspace = true }
 reqwest = { version = "0.12", features = ["json"] }
 sha2 = { workspace = true }
 sha1 = "0.10"
+aes = "0.8"
 hex = { workspace = true }
 hmac = { workspace = true }
 regex = { workspace = true }

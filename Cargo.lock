@@ -2746,6 +2746,7 @@ dependencies = [
 name = "gm-openbot"
 version = "0.5.0"
 dependencies = [
+ "aes",
  "async-trait",
  "axum",
  "base64 0.22.1",

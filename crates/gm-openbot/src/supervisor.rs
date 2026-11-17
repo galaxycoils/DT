@@ -73,6 +73,8 @@ pub struct OpenBotSupervisor {
     vault: VaultStore,
     rules: ApprovalRulesStore,
     connectors: ConnectorStore,
+    marketplace: crate::marketplace::MarketplaceStore,
+    billing: crate::billing::BillingStore,
     library: LibraryStore,
     a2a: A2aCoordinator,
     compactor: ContextCompactor,
@@ -155,6 +157,13 @@ impl OpenBotSupervisor {
             comp_port_val,
         );
         let discretion = DiscretionStore::new(shared_paths);
+        let marketplace = crate::marketplace::MarketplaceStore::open(
+            config.storage_dir.join("marketplace.sqlite"),
+        )?;
+        let billing = crate::billing::BillingStore::open(
+            config.storage_dir.join("billing.sqlite"),
+            true,
+        )?;
 
         let a2a = A2aCoordinator::new(
             roster.clone(),
@@ -190,6 +199,8 @@ impl OpenBotSupervisor {
             vault,
             rules,
             connectors,
+            marketplace,
+            billing,
             library,
             a2a,
             compactor,
@@ -603,6 +614,14 @@ impl OpenBotSupervisor {
 
     pub fn connectors(&self) -> &ConnectorStore {
         &self.connectors
+    }
+
+    pub fn marketplace(&self) -> &crate::marketplace::MarketplaceStore {
+        &self.marketplace
+    }
+
+    pub fn billing(&self) -> &crate::billing::BillingStore {
+        &self.billing
     }
 
     pub fn library(&self) -> &LibraryStore {
