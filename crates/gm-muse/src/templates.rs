@@ -271,6 +271,79 @@ pub fn bootstrap_shared_runtime_files(paths: &MuseRuntimePaths) -> Result<Bootst
     Ok(report)
 }
 
+fn format_role_section(seed: &BotSeed<'_>) -> String {
+    let role_asset = format!("grok_muse/roles/{}.md", seed.id);
+    if let Ok(built_in_role) = read_asset_str(&role_asset) {
+        format!("## Role in this team\n\n{}\n", built_in_role.trim())
+    } else {
+        format!(
+            "## Role in this team\n\n- **Bot ID:** `{}`\n- **Display Name:** {}\n- **Role:** {}\n",
+            seed.id, seed.display_name, seed.role_title
+        )
+    }
+}
+
+/// Replaces or removes the managed `## Legacy instructions` section (and updates
+/// non-built-in `## Role in this team` metadata) while preserving all authored
+/// `IDENTITY.md` content.
+pub fn sync_identity_markdown(existing: &str, seed: &BotSeed<'_>) -> String {
+    let mut kept_blocks: Vec<String> = Vec::new();
+    let mut current_heading: Option<String> = None;
+    let mut current_lines: Vec<&str> = Vec::new();
+
+    let flush_block = |heading: &Option<String>, lines: &mut Vec<&str>, out: &mut Vec<String>| {
+        if heading.is_none() && lines.is_empty() {
+            return;
+        }
+        let h_trim = heading.as_deref().unwrap_or("").trim();
+        if h_trim.eq_ignore_ascii_case("## Legacy instructions") {
+            lines.clear();
+            return;
+        }
+        if h_trim.eq_ignore_ascii_case("## Role in this team") {
+            let role_asset = format!("grok_muse/roles/{}.md", seed.id);
+            if read_asset_str(&role_asset).is_err() {
+                out.push(format_role_section(seed).trim_end().to_string());
+                lines.clear();
+                return;
+            }
+        }
+        let mut block = String::new();
+        if let Some(h) = heading {
+            block.push_str(h);
+            block.push('\n');
+        }
+        if !lines.is_empty() {
+            block.push_str(&lines.join("\n"));
+            block.push('\n');
+        }
+        out.push(block.trim_end().to_string());
+        lines.clear();
+    };
+
+    for line in existing.lines() {
+        if line.trim_start().starts_with("## ") {
+            flush_block(&current_heading, &mut current_lines, &mut kept_blocks);
+            current_heading = Some(line.to_string());
+        } else {
+            current_lines.push(line);
+        }
+    }
+    flush_block(&current_heading, &mut current_lines, &mut kept_blocks);
+
+    let mut result = kept_blocks.join("\n\n");
+    if !result.ends_with('\n') {
+        result.push('\n');
+    }
+    let legacy = seed.legacy_system_prompt.trim();
+    if !legacy.is_empty() {
+        result.push_str("\n## Legacy instructions\n\n");
+        result.push_str(legacy);
+        result.push('\n');
+    }
+    result
+}
+
 /// Materialize per-bot persona files (`SOUL.md`, `IDENTITY.md`, `AGENTS.md`,
 /// `TOOLS.md`, `HEARTBEAT.md`) and isolate workspace/inbox/outbox dirs.
 pub fn bootstrap_bot_runtime_files(
@@ -319,7 +392,14 @@ pub fn bootstrap_bot_runtime_files(
 
     if let Some(identity) = paths.identity_md() {
         if path_exists_no_follow(&identity) {
-            report.preserved.push(identity);
+            let existing = std::fs::read_to_string(&identity)?;
+            let updated = sync_identity_markdown(&existing, seed);
+            if updated != existing {
+                atomic_write_private(&identity, updated.as_bytes())?;
+                report.refreshed.push(identity);
+            } else {
+                report.preserved.push(identity);
+            }
         } else {
             let mut content = read_asset_str("upstream/IDENTITY.md")?.to_string();
             if !content.ends_with('\n') {
@@ -484,14 +564,33 @@ mod tests {
         assert!(!paths.skills_dir().join("tampered.txt").exists());
         assert!(paths.skills_dir().join("goals/SKILL.md").exists());
 
-        // Legacy prompt is seeded only once even if IDENTITY.md already exists and new seed has different legacy text
+        // User-authored sections in IDENTITY.md are preserved while migrated Legacy instructions
+        // are replaced or cleared when the bot profile changes.
+        let id_path = paths.identity_md().unwrap();
+        let mut authored = std::fs::read_to_string(&id_path).unwrap();
+        authored.push_str("\n## Authored Personality\n\nDry wit and concise summaries.\n");
+        std::fs::write(&id_path, &authored).unwrap();
+
         let seed_changed = BotSeed {
-            legacy_system_prompt: "SHOULD_NOT_BE_APPENDED_AGAIN",
+            legacy_system_prompt: "Updated inline prompt block",
             ..seed
         };
         bootstrap_bot_runtime_files(&paths, &seed_changed).unwrap();
-        let id_after = std::fs::read_to_string(paths.identity_md().unwrap()).unwrap();
-        assert!(!id_after.contains("SHOULD_NOT_BE_APPENDED_AGAIN"));
+        let id_after_replace = std::fs::read_to_string(&id_path).unwrap();
+        assert!(id_after_replace.contains("## Authored Personality"));
+        assert!(id_after_replace.contains("Dry wit and concise summaries."));
+        assert!(id_after_replace.contains("Updated inline prompt block"));
+        assert!(!id_after_replace.contains("Old inline prompt block"));
+
+        let seed_cleared = BotSeed {
+            legacy_system_prompt: "",
+            ..seed
+        };
+        bootstrap_bot_runtime_files(&paths, &seed_cleared).unwrap();
+        let id_after_clear = std::fs::read_to_string(&id_path).unwrap();
+        assert!(id_after_clear.contains("Dry wit and concise summaries."));
+        assert!(!id_after_clear.contains("## Legacy instructions"));
+        assert!(!id_after_clear.contains("Updated inline prompt block"));
 
         // Migrations are idempotent
         assert_eq!(run_migrations(&paths).unwrap(), CURRENT_SCHEMA_VERSION);

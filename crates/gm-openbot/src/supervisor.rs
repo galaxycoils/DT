@@ -331,6 +331,11 @@ impl OpenBotSupervisor {
     }
 
     pub fn skill_registry(&self) -> Result<SkillRegistry> {
+        if !self.config.muse.enable_skills {
+            return Err(GmError::Config(
+                "Skills are disabled by runtime configuration (muse.enable_skills = false)".into(),
+            ));
+        }
         SkillRegistry::open_with_scrubber(&self.shared_paths(), self.scrubber.clone())
     }
 
@@ -1144,6 +1149,7 @@ impl OpenBotSupervisor {
             blocklist,
             AgentLoopConfig {
                 trajectory_dir: Some(self.config.storage_dir.join("trajectories")),
+                enable_skills: self.config.muse.enable_skills,
                 ..Default::default()
             },
         )

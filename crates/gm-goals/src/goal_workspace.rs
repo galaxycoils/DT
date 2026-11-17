@@ -138,10 +138,28 @@ impl GoalWorkspaceManager {
         Goal::list_from_json_normalized(&raw).map_err(GmError::Json)
     }
 
-    fn save_catalog(&self, goals: &[Goal]) -> Result<()> {
-        let json = serde_json::to_string_pretty(goals)?;
-        SharedFileStore::global().write_exact_sync(self.catalog_path(), None, &json)?;
-        Ok(())
+    fn mutate_catalog<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&mut Vec<Goal>) -> Result<T>,
+    {
+        let catalog = self.catalog_path();
+        if let Some(parent) = catalog.parent() {
+            ensure_private_dir(parent)?;
+        }
+        let mut out: Option<T> = None;
+        SharedFileStore::global().update_sync(&catalog, None, |existing| {
+            let mut goals = if existing.trim().is_empty() {
+                Vec::new()
+            } else {
+                Goal::list_from_json_normalized(existing).map_err(GmError::Json)?
+            };
+            let res = f(&mut goals)?;
+            let serialized = serde_json::to_string_pretty(&goals)?;
+            let _ = Goal::list_from_json_normalized(&serialized).map_err(GmError::Json)?;
+            out = Some(res);
+            Ok(serialized)
+        })?;
+        out.ok_or_else(|| GmError::Config("Goal catalog mutation did not produce a result".into()))
     }
 
     pub fn get_goal(&self, slug_or_id: &str) -> Result<Option<Goal>> {
@@ -176,18 +194,18 @@ impl GoalWorkspaceManager {
         if trimmed_title.is_empty() {
             return Err(GmError::Config("Goal title cannot be empty".into()));
         }
-        let mut goals = self.list_goals()?;
-        let mut goal = Goal::new(trimmed_title, description);
-        goal.slug = self.next_unique_slug(trimmed_title, &goal.id, &goals);
-        goal.category = category
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        goal.stop_conditions = stop_conditions;
-        let doc_path = self.ensure_goal_scaffold(&goal)?;
-        goal.goal_doc_path = Some(doc_path);
-        goals.push(goal.clone());
-        self.save_catalog(&goals)?;
-        Ok(goal)
+        self.mutate_catalog(|goals| {
+            let mut goal = Goal::new(trimmed_title, description);
+            goal.slug = self.next_unique_slug(trimmed_title, &goal.id, goals);
+            goal.category = category
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            goal.stop_conditions = stop_conditions;
+            let doc_path = self.ensure_goal_scaffold(&goal)?;
+            goal.goal_doc_path = Some(doc_path);
+            goals.push(goal.clone());
+            Ok(goal)
+        })
     }
 
     /// Create a child subgoal under an existing top-level goal. Rejects nesting deeper than 1 level.
@@ -202,37 +220,38 @@ impl GoalWorkspaceManager {
         if trimmed_title.is_empty() {
             return Err(GmError::Config("Subgoal title cannot be empty".into()));
         }
-        let mut goals = self.list_goals()?;
-        let parent = goals
-            .iter()
-            .find(|g| g.id == parent_slug_or_id || g.slug == parent_slug_or_id)
-            .cloned()
-            .ok_or_else(|| {
-                GmError::Config(format!("Parent goal '{parent_slug_or_id}' not found"))
-            })?;
+        self.mutate_catalog(|goals| {
+            let parent = goals
+                .iter()
+                .find(|g| g.id == parent_slug_or_id || g.slug == parent_slug_or_id)
+                .cloned()
+                .ok_or_else(|| {
+                    GmError::Config(format!("Parent goal '{parent_slug_or_id}' not found"))
+                })?;
 
-        if parent.parent_goal_id.is_some() {
-            return Err(GmError::Config(
-                "Only one subgoal level is allowed: a subgoal cannot have its own subgoal".into(),
-            ));
-        }
+            if parent.parent_goal_id.is_some() {
+                return Err(GmError::Config(
+                    "Only one subgoal level is allowed: a subgoal cannot have its own subgoal"
+                        .into(),
+                ));
+            }
 
-        let mut child = Goal::new(trimmed_title, description);
-        let raw_slug = format!(
-            "{}-{}",
-            parent.slug,
-            slugify_goal_title(trimmed_title, &child.id)
-        );
-        let clipped_slug: String = raw_slug.chars().take(60).collect();
-        child.slug = self.next_unique_slug(&clipped_slug, &child.id, &goals);
-        child.category = parent.category.clone();
-        child.parent_goal_id = Some(parent.id);
-        child.stop_conditions = stop_conditions;
-        let doc_path = self.ensure_goal_scaffold(&child)?;
-        child.goal_doc_path = Some(doc_path);
-        goals.push(child.clone());
-        self.save_catalog(&goals)?;
-        Ok(child)
+            let mut child = Goal::new(trimmed_title, description);
+            let raw_slug = format!(
+                "{}-{}",
+                parent.slug,
+                slugify_goal_title(trimmed_title, &child.id)
+            );
+            let clipped_slug: String = raw_slug.chars().take(60).collect();
+            child.slug = self.next_unique_slug(&clipped_slug, &child.id, goals);
+            child.category = parent.category.clone();
+            child.parent_goal_id = Some(parent.id);
+            child.stop_conditions = stop_conditions;
+            let doc_path = self.ensure_goal_scaffold(&child)?;
+            child.goal_doc_path = Some(doc_path);
+            goals.push(child.clone());
+            Ok(child)
+        })
     }
 
     pub fn update_goal(
@@ -244,76 +263,74 @@ impl GoalWorkspaceManager {
         track_brief_schedule: Option<Option<&str>>,
         category: Option<Option<&str>>,
     ) -> Result<Goal> {
-        let mut goals = self.list_goals()?;
-        let idx = goals
-            .iter()
-            .position(|g| g.id == slug_or_id || g.slug == slug_or_id)
-            .ok_or_else(|| GmError::Config(format!("Goal '{slug_or_id}' not found")))?;
-        if let Some(t) = title
-            && !t.trim().is_empty()
-        {
-            goals[idx].title = t.trim().to_string();
-        }
-        if let Some(d) = description {
-            goals[idx].description = d.to_string();
-        }
-        if let Some(sc) = stop_conditions {
-            goals[idx].stop_conditions = sc;
-        }
-        if let Some(sched) = track_brief_schedule {
-            goals[idx].track_brief_schedule = sched.map(str::to_string);
-        }
-        if let Some(cat) = category {
-            goals[idx].category = cat.map(str::to_string);
-        }
-        goals[idx].normalize_legacy();
-        let updated = goals[idx].clone();
-        self.save_catalog(&goals)?;
-        Ok(updated)
+        self.mutate_catalog(|goals| {
+            let idx = goals
+                .iter()
+                .position(|g| g.id == slug_or_id || g.slug == slug_or_id)
+                .ok_or_else(|| GmError::Config(format!("Goal '{slug_or_id}' not found")))?;
+            if let Some(t) = title
+                && !t.trim().is_empty()
+            {
+                goals[idx].title = t.trim().to_string();
+            }
+            if let Some(d) = description {
+                goals[idx].description = d.to_string();
+            }
+            if let Some(sc) = stop_conditions {
+                goals[idx].stop_conditions = sc;
+            }
+            if let Some(sched) = track_brief_schedule {
+                goals[idx].track_brief_schedule = sched.map(str::to_string);
+            }
+            if let Some(cat) = category {
+                goals[idx].category = cat.map(str::to_string);
+            }
+            goals[idx].normalize_legacy();
+            Ok(goals[idx].clone())
+        })
     }
 
     pub fn complete_goal(&self, slug_or_id: &str, verified: bool) -> Result<Goal> {
-        let mut goals = self.list_goals()?;
-        let idx = goals
-            .iter()
-            .position(|g| g.id == slug_or_id || g.slug == slug_or_id)
-            .ok_or_else(|| GmError::Config(format!("Goal '{slug_or_id}' not found")))?;
-        goals[idx].complete(verified);
-        let out = goals[idx].clone();
-        self.save_catalog(&goals)?;
-        Ok(out)
+        self.mutate_catalog(|goals| {
+            let idx = goals
+                .iter()
+                .position(|g| g.id == slug_or_id || g.slug == slug_or_id)
+                .ok_or_else(|| GmError::Config(format!("Goal '{slug_or_id}' not found")))?;
+            goals[idx].complete(verified);
+            Ok(goals[idx].clone())
+        })
     }
 
     pub fn abandon_goal(&self, slug_or_id: &str) -> Result<Goal> {
-        let mut goals = self.list_goals()?;
-        let idx = goals
-            .iter()
-            .position(|g| g.id == slug_or_id || g.slug == slug_or_id)
-            .ok_or_else(|| GmError::Config(format!("Goal '{slug_or_id}' not found")))?;
-        goals[idx].status = GoalStatus::Abandoned;
-        let out = goals[idx].clone();
-        self.save_catalog(&goals)?;
-        Ok(out)
+        self.mutate_catalog(|goals| {
+            let idx = goals
+                .iter()
+                .position(|g| g.id == slug_or_id || g.slug == slug_or_id)
+                .ok_or_else(|| GmError::Config(format!("Goal '{slug_or_id}' not found")))?;
+            goals[idx].status = GoalStatus::Abandoned;
+            Ok(goals[idx].clone())
+        })
     }
 
     pub fn delete_goal(&self, slug_or_id: &str) -> Result<Vec<String>> {
-        let mut goals = self.list_goals()?;
-        let Some(root) = goals
-            .iter()
-            .find(|g| g.id == slug_or_id || g.slug == slug_or_id)
-            .cloned()
-        else {
-            return Err(GmError::Config(format!("Goal '{slug_or_id}' not found")));
-        };
-        let mut deleted_slugs = Vec::new();
-        goals.retain(|g| {
-            let remove = g.id == root.id || g.parent_goal_id.as_deref() == Some(&root.id);
-            if remove {
-                deleted_slugs.push(g.slug.clone());
-            }
-            !remove
-        });
-        self.save_catalog(&goals)?;
+        let deleted_slugs = self.mutate_catalog(|goals| {
+            let Some(root) = goals
+                .iter()
+                .find(|g| g.id == slug_or_id || g.slug == slug_or_id)
+                .cloned()
+            else {
+                return Err(GmError::Config(format!("Goal '{slug_or_id}' not found")));
+            };
+            let mut deleted_slugs = Vec::new();
+            goals.retain(|g| {
+                let remove = g.id == root.id || g.parent_goal_id.as_deref() == Some(&root.id);
+                if remove {
+                    deleted_slugs.push(g.slug.clone());
+                }
+                !remove
+            });
+            Ok(deleted_slugs)
+        })?;
         for slug in &deleted_slugs {
             if let Ok(doc) = self.goal_doc_path(slug)
                 && doc.exists()
@@ -355,15 +372,15 @@ impl GoalWorkspaceManager {
     }
 
     pub fn mark_checked(&self, slug_or_id: &str, next_check_at: DateTime<Utc>) -> Result<()> {
-        let mut goals = self.list_goals()?;
-        if let Some(goal) = goals
-            .iter_mut()
-            .find(|g| g.id == slug_or_id || g.slug == slug_or_id)
-        {
-            goal.next_check_at = next_check_at;
-            self.save_catalog(&goals)?;
-        }
-        Ok(())
+        self.mutate_catalog(|goals| {
+            if let Some(goal) = goals
+                .iter_mut()
+                .find(|g| g.id == slug_or_id || g.slug == slug_or_id)
+            {
+                goal.next_check_at = next_check_at;
+            }
+            Ok(())
+        })
     }
 
     pub fn write_deliverable(&self, slug: &str, rel_file: &str, content: &str) -> Result<PathBuf> {
@@ -489,5 +506,29 @@ mod tests {
             .create_subgoal(&sub.slug, "Sub-subgoal", "Should fail", vec![])
             .unwrap_err();
         assert!(err.to_string().contains("one subgoal level"));
+    }
+
+    #[test]
+    fn concurrent_goal_mutations_preserve_all_goals() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = MuseRuntimePaths::shared(dir.path());
+        let mgr = std::sync::Arc::new(GoalWorkspaceManager::new(paths));
+        let mut handles = Vec::new();
+        for idx in 0..8 {
+            let m = mgr.clone();
+            handles.push(std::thread::spawn(move || {
+                m.create_goal(
+                    &format!("Concurrent Goal {idx}"),
+                    &format!("Description {idx}"),
+                    None,
+                    vec![],
+                )
+                .unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(mgr.list_goals().unwrap().len(), 8);
     }
 }

@@ -913,10 +913,11 @@ mod tests {
         };
         cfg.openbot.bots_dir = dir.path().join("bots");
         let (tx, _) = tokio::sync::broadcast::channel(16);
-        let sup = OpenBotSupervisor::open(
+        let sup = OpenBotSupervisor::open_with_secret_backend(
             cfg,
             std::sync::Arc::new(gm_safety::AuditLogger::in_memory()),
             tx,
+            std::sync::Arc::new(crate::vault::InMemorySecretBackend::default()),
         )
         .unwrap();
 
@@ -954,10 +955,11 @@ mod tests {
         };
         cfg.openbot.bots_dir = dir.path().join("bots");
         let (tx, _) = tokio::sync::broadcast::channel(16);
-        let sup = OpenBotSupervisor::open(
+        let sup = OpenBotSupervisor::open_with_secret_backend(
             cfg,
             std::sync::Arc::new(gm_safety::AuditLogger::in_memory()),
             tx,
+            std::sync::Arc::new(crate::vault::InMemorySecretBackend::default()),
         )
         .unwrap();
 

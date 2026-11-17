@@ -66,6 +66,7 @@ pub struct AgentLoopConfig {
     pub max_history_steps: usize,
     pub sparse_ax_threshold: usize,
     pub always_include_vision: bool,
+    pub enable_skills: bool,
 }
 
 impl Default for AgentLoopConfig {
@@ -79,6 +80,7 @@ impl Default for AgentLoopConfig {
             max_history_steps: 8,
             sparse_ax_threshold: 5,
             always_include_vision: false,
+            enable_skills: true,
         }
     }
 }
@@ -1204,7 +1206,10 @@ Completion must use {{\"action\":\"Done\",\"params\":{{\"summary\":\"result and 
                         if let Some(ref cb) = self.progress_callback {
                             cb(step, &summary);
                         }
-                        let outcome = if let Some(paths) = self
+                        let outcome = if !self.config.enable_skills {
+                            "Skills are disabled by runtime configuration (muse.enable_skills = false)."
+                                .to_string()
+                        } else if let Some(paths) = self
                             .workspace_sandbox
                             .as_ref()
                             .and_then(|s| s.shared_runtime_paths())
@@ -1254,7 +1259,10 @@ Completion must use {{\"action\":\"Done\",\"params\":{{\"summary\":\"result and 
                         if let Some(ref cb) = self.progress_callback {
                             cb(step, &summary);
                         }
-                        let outcome = if let Some(paths) = self
+                        let outcome = if !self.config.enable_skills {
+                            "Skills are disabled by runtime configuration (muse.enable_skills = false)."
+                                .to_string()
+                        } else if let Some(paths) = self
                             .workspace_sandbox
                             .as_ref()
                             .and_then(|s| s.shared_runtime_paths())
@@ -1419,7 +1427,10 @@ Completion must use {{\"action\":\"Done\",\"params\":{{\"summary\":\"result and 
                         if let Some(ref cb) = self.progress_callback {
                             cb(step, &summary);
                         }
-                        let outcome = if let Some(paths) = self
+                        let outcome = if !self.config.enable_skills {
+                            "Skills are disabled by runtime configuration (muse.enable_skills = false)."
+                                .to_string()
+                        } else if let Some(paths) = self
                             .workspace_sandbox
                             .as_ref()
                             .and_then(|s| s.shared_runtime_paths())
@@ -3293,6 +3304,69 @@ mod tests {
                 .exists()
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn disabled_enable_skills_blocks_agent_skill_tools() {
+        let dir =
+            std::env::temp_dir().join(format!("agent_skills_disabled_{}", uuid::Uuid::new_v4()));
+        let storage = dir.join("storage");
+        let bot_root = storage.join("bots").join("muse");
+        let paths = gm_core::muse_paths::MuseRuntimePaths::for_bot(&storage, &bot_root, "muse");
+        gm_muse::templates::bootstrap_shared_runtime_files(&paths).unwrap();
+
+        let sandbox = BotWorkspaceSandbox::new("muse", &bot_root)
+            .unwrap()
+            .with_shared_runtime_paths(paths.clone());
+
+        let history = Arc::new(parking_lot::Mutex::new(Vec::<StepRecord>::new()));
+        let history_clone = Arc::clone(&history);
+
+        let backend = Arc::new(MockLlmBackend::new());
+        backend.queue_response(r#"{"action":"SkillSearch","params":{"query":"forget"}}"#);
+        backend.queue_response(r#"{"action":"LoadSkill","params":{"name":"forget"}}"#);
+        backend.queue_response(
+            r##"{"action":"CreateCustomSkill","params":{"name":"blocked-skill","title":"Blocked","description":"Should fail","body_markdown":"# Steps\n1. None\n"}}"##,
+        );
+        backend.queue_response(r#"{"action":"Done","params":{"summary":"Done"}}"#);
+
+        let agent = AgentLoop::new(
+            Arc::new(MockPlatform::new()),
+            Arc::new(HybridLlmClient::new(
+                backend,
+                Arc::new(BudgetManager::new(BudgetConfig::default())),
+            )),
+            LlmRouter::new(ProvidersConfig::default()),
+            KillSwitch::new(),
+            BlocklistManager::default(),
+            AgentLoopConfig {
+                enable_skills: false,
+                ..Default::default()
+            },
+        )
+        .with_workspace_sandbox(sandbox)
+        .with_checkpoint(Vec::new(), move |steps| {
+            *history_clone.lock() = steps.to_vec();
+            Ok(())
+        });
+
+        let summary = agent
+            .run_task("skills_disabled", "Use skills")
+            .await
+            .unwrap();
+        assert_eq!(summary, "Done");
+
+        let steps = history.lock();
+        assert_eq!(steps.len(), 3);
+        for s in steps.iter() {
+            assert!(
+                s.outcome.contains("Skills are disabled"),
+                "Expected skills disabled outcome, got: {}",
+                s.outcome
+            );
+        }
+        assert!(!paths.custom_skills_dir().join("blocked-skill").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

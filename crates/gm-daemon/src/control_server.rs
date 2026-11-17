@@ -3062,25 +3062,7 @@ impl DaemonControlServerState {
                                     .or_else(|| p.get("name").and_then(|v| v.as_str()))
                                     .unwrap_or("")
                                     .trim();
-                                if !gm_muse::skills::is_valid_custom_skill_name(skill_name) {
-                                    return Err(GmError::Config(format!(
-                                        "Invalid custom skill name '{skill_name}'"
-                                    )));
-                                }
-                                let dir = sup.shared_paths().custom_skills_dir().join(skill_name);
-                                if let Ok(meta) = std::fs::symlink_metadata(&dir)
-                                    && meta.file_type().is_symlink()
-                                {
-                                    return Err(GmError::SafetyViolation(
-                                        "Refusing to delete symlinked skill directory".into(),
-                                    ));
-                                }
-                                let deleted = if dir.exists() {
-                                    std::fs::remove_dir_all(&dir)?;
-                                    true
-                                } else {
-                                    false
-                                };
+                                let deleted = sup.delete_custom_skill(skill_name)?;
                                 Ok::<_, GmError>(serde_json::json!({
                                     "name": skill_name,
                                     "deleted": deleted,

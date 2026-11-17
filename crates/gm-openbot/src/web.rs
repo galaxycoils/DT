@@ -1799,11 +1799,7 @@ async fn list_skills_route(
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let reg = SkillRegistry::open_with_scrubber(
-        &state.supervisor.shared_paths(),
-        state.supervisor.scrubber().clone(),
-    )
-    .map_err(map_gm_error)?;
+    let reg = state.supervisor.skill_registry().map_err(map_gm_error)?;
     if let Some(name) = q.load.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let loaded = reg.load_skill(name).map_err(map_gm_error)?;
         return Ok(Json(serde_json::to_value(loaded).map_err(|e| {
@@ -3984,27 +3980,12 @@ async fn delete_custom_skill_route(
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let clean: String = name
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
-        .collect();
-    if clean.is_empty() {
-        return Err(ApiErr::msg(StatusCode::BAD_REQUEST, "Invalid skill name"));
-    }
-    let dir = state
+    let deleted = state
         .supervisor
-        .shared_paths()
-        .custom_skills_dir()
-        .join(&clean);
-    let deleted = if dir.exists() {
-        std::fs::remove_dir_all(&dir)
-            .map_err(|e| ApiErr::msg(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        true
-    } else {
-        false
-    };
+        .delete_custom_skill(&name)
+        .map_err(map_gm_error)?;
     Ok(Json(
-        serde_json::json!({ "name": clean, "deleted": deleted }),
+        serde_json::json!({ "name": name, "deleted": deleted }),
     ))
 }
 
