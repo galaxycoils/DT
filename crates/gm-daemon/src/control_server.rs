@@ -1094,11 +1094,17 @@ impl DaemonControlServerState {
                             .roster()
                             .workspace_sandbox(&bot_id)?
                             .preview_shared_file(&path)?;
-                        let text = String::from_utf8(bytes).map_err(|_| {
-                            GmError::Config("This binary file has no text preview".into())
-                        })?;
+                        use base64::Engine as _;
+                        let (text, encoded) = match std::str::from_utf8(&bytes).map(str::to_string)
+                        {
+                            Ok(text) => (Some(text), None),
+                            Err(_) => (
+                                None,
+                                Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
+                            ),
+                        };
                         Ok::<_, GmError>(
-                            serde_json::json!({"bot_id":bot_id,"path":path,"text":text}),
+                            serde_json::json!({"bot_id":bot_id,"path":path,"text":text,"bytes_base64":encoded}),
                         )
                     })();
                     let payload = match result {
@@ -3393,6 +3399,18 @@ impl DaemonControlServerState {
                     let op_lower = op.trim().to_ascii_lowercase();
                     let p = payload;
                     let result = match op_lower.as_str() {
+                        "install_update" => {
+                            if p["confirmed"].as_bool() != Some(true) {
+                                Err(GmError::SafetyViolation("Confirm update download".into()))
+                            } else {
+                                use gm_openbot::CompanionUpdates;
+                                let download_dir =
+                                    self.shared_config.read().storage_dir.join("updates");
+                                crate::updater::CompanionUpdateService { download_dir }
+                                    .download_verified()
+                                    .await
+                            }
+                        }
                         "health" => {
                             let cfg_snap = self.shared_config.read().clone();
                             let rep = crate::diagnostics::run_health_diagnostics(&cfg_snap);

@@ -93,6 +93,7 @@ enum PendingKind {
     Bootstrap,
     ToolResult(String),
     RevealWebhook(String),
+    Avatar(String),
     ImportAttachment,
     ListBotFiles,
     PreviewBotFile,
@@ -129,6 +130,9 @@ enum PendingKind {
 fn pending_kind(request: &DaemonRequest) -> PendingKind {
     match request {
         DaemonRequest::GetBootstrapState => PendingKind::Bootstrap,
+        DaemonRequest::ManageSystem { op, payload } if op == "get_bot_avatar" => {
+            PendingKind::Avatar(payload["bot_id"].as_str().unwrap_or_default().into())
+        }
         DaemonRequest::ListRoutineRuns { .. } => PendingKind::ToolResult("routine_runs".into()),
         DaemonRequest::QueryAudit { .. } => PendingKind::ToolResult("audit".into()),
         DaemonRequest::ExplainMemory { .. } => PendingKind::ToolResult("explain_memory".into()),
@@ -521,6 +525,8 @@ struct NativeApp {
     ui_state: GrokUiState,
     textures: BoundedTextureCache,
     layout_cache: MarkdownLayoutCache,
+    avatar_assets: std::collections::HashMap<String, String>,
+    lightbox_requested: Option<String>,
     draft: String,
     bot: String,
     task_mode: bool,
@@ -810,7 +816,24 @@ impl eframe::App for NativeApp {
                 self.ui_state.server_snapshot = snapshot;
             }
             for (key, value) in std::mem::take(&mut state.tool_results) {
-                self.ui_state.responses[key] = value;
+                if key.starts_with("avatar:") || key.starts_with("lightbox:") {
+                    if let Some(encoded) = value["bytes_base64"].as_str()
+                        && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded)
+                    {
+                        self.textures.insert_encoded(
+                            ctx,
+                            key.clone(),
+                            &bytes,
+                            if key.starts_with("avatar:") {
+                                256
+                            } else {
+                                1920
+                            },
+                        );
+                    }
+                } else {
+                    self.ui_state.responses[key] = value;
+                }
             }
         }
         let target = crate::ui::state::NavTarget {
@@ -1037,6 +1060,17 @@ impl eframe::App for NativeApp {
                 .insert_encoded(ctx, "live_computer:latest", &bytes, 1280);
         }
 
+        for bot in &bots {
+            if let (Some(id), Some(asset)) = (bot["id"].as_str(), bot["avatar_asset"].as_str())
+                && self.avatar_assets.get(id).map(String::as_str) != Some(asset)
+            {
+                self.avatar_assets.insert(id.into(), asset.into());
+                self.send(DaemonRequest::ManageSystem {
+                    op: "get_bot_avatar".into(),
+                    payload: serde_json::json!({"bot_id":id}),
+                });
+            }
+        }
         // 6. Resolve & apply GrokBot Theme Palette
         let active_bot_color_hex = bots
             .iter()
@@ -1236,6 +1270,21 @@ impl eframe::App for NativeApp {
                 }
             });
 
+        if let Some(crate::ui::state::ActiveModal::Lightbox { uri, .. }) =
+            &self.ui_state.active_modal
+        {
+            if self.lightbox_requested.as_deref() != Some(uri) {
+                self.lightbox_requested = Some(uri.clone());
+                if let Some(path) = crate::muse_render::sandbox_uri_to_bot_relpath(uri) {
+                    self.send(DaemonRequest::PreviewBotFile {
+                        bot_id: self.bot.clone(),
+                        path,
+                    });
+                }
+            }
+        } else if self.lightbox_requested.take().is_some() {
+            self.textures.evict_prefix("lightbox:");
+        }
         // 12. Global Modals (`CommandPalette`, 5-Pane `Settings`, `Studio`, `Shortcuts`, `ConnectApps`, `AvatarPicker`, `Lightbox`, `ExpandedTable`)
         let mut do_save_keys = false;
         let mut do_save_config = false;
@@ -1497,6 +1546,9 @@ async fn background(
                         }
                         s.error = None;
                         match (kind, response) {
+                            (PendingKind::Avatar(id), DaemonResponse::JsonPayload(value)) => {
+                                s.tool_results.insert(format!("avatar:{id}"), value);
+                            }
                             (PendingKind::ToolResult(key), DaemonResponse::JsonPayload(value)) => {
                                 s.tool_results.insert(key, value);
                             }
@@ -1538,7 +1590,14 @@ async fn background(
                                         &text[..end]
                                     ));
                                 }
-                                s.file_preview = value;
+                                if value["bytes_base64"].is_string() {
+                                    if let Some(path) = value["path"].as_str() {
+                                        s.tool_results
+                                            .insert(format!("lightbox:sandbox://{path}"), value);
+                                    }
+                                } else {
+                                    s.file_preview = value;
+                                }
                             }
                             (
                                 PendingKind::ChannelHistory(channel_id),
@@ -1708,6 +1767,7 @@ async fn background(
                                     .unwrap_or("Forget completed")
                                     .to_string();
                                 s.forget_notice = msg;
+                                s.tool_results.insert("forget_report".into(), value.clone());
                                 s.forget_report = Some(value);
                                 s.forget_plan = None;
                                 refresh_after = true;
@@ -1907,6 +1967,8 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
                 ui_state,
                 textures: BoundedTextureCache::new(),
                 layout_cache: MarkdownLayoutCache::default(),
+                avatar_assets: std::collections::HashMap::new(),
+                lightbox_requested: None,
                 draft: restored.draft,
                 bot: restored.bot,
                 task_mode: restored.task_mode,

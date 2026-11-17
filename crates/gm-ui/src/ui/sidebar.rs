@@ -44,9 +44,7 @@ pub fn draw_adaptive_sidebar(
                     for bot in bots.iter().filter(|b| matches_bot_filter(b, &needle)) {
                         let id = bot["id"].as_str().unwrap_or_default();
                         let unread = unread_counts[format!("dm:{id}")].as_u64().unwrap_or(0);
-                        let status = &ui_state.server_snapshot["bot_statuses"][&id];
-                        let phrase = status["status_phrase"].as_str().unwrap_or(role);
-                        let attention = status["needs_attention"].as_bool().unwrap_or(false);
+
                         if ui
                             .button(format!(
                                 "{} · {unread}",
@@ -474,6 +472,9 @@ fn draw_bot_row(
     let shape = BotAvatarShape::from_name(bot["avatar_shape"].as_str().unwrap_or("Circle"));
     let selected = ui_state.active_chat_kind == "dm" && active_bot.as_str() == id;
     let unread = unread_counts[format!("dm:{id}")].as_u64().unwrap_or(0);
+    let status = &ui_state.server_snapshot["bot_statuses"][&id];
+    let phrase = status["status_phrase"].as_str().unwrap_or(role);
+    let attention = status["needs_attention"].as_bool().unwrap_or(false);
 
     let (row_rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());

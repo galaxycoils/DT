@@ -711,7 +711,7 @@ pub fn draw_active_modal(
                                 ui.label(format!("Version {}",env!("CARGO_PKG_VERSION")));
                                 if ui.button("Check for Updates").clicked(){send(DaemonRequest::CheckUpdates);}
                                 let update=ui_state.responses["updates"].clone();
-                                if !update.is_null(){ui.monospace(serde_json::to_string_pretty(&update).unwrap_or_default());if let Some(url)=update["release_url"].as_str(){ui.hyperlink_to("Install verified release",url);}}
+                                if !update.is_null(){ui.monospace(serde_json::to_string_pretty(&update).unwrap_or_default());if let Some(url)=update["release_url"].as_str(){ui.hyperlink_to("Release notes",url);} if update["update_available"].as_bool()==Some(true)&&ui.button("Download & Verify Update").clicked(){send(DaemonRequest::ManageSystem {op:"install_update".into(),payload:serde_json::json!({"confirmed":true})});}}
                                 ui.checkbox(&mut settings_config.ui.auto_updates,"Automatic updates when idle");
                                 if ui.button("Save Update Preference").clicked(){send(DaemonRequest::SaveUiSettings {ui:serde_json::json!({"auto_updates":settings_config.ui.auto_updates})});}
                                 if ui.button("Helper Health").clicked(){send(DaemonRequest::ManageSystem {op:"health".into(),payload:Value::Null});}
@@ -719,7 +719,7 @@ pub fn draw_active_modal(
                                 ui.text_edit_multiline(&mut ui_state.feedback_note);
                                 ui.checkbox(&mut ui_state.diagnostics_consent,"Include redacted diagnostics");
                                 if ui.button("Send Feedback").clicked(){send(DaemonRequest::ManageSystem {op:"feedback".into(),payload:serde_json::json!({"note":ui_state.feedback_note,"include_diagnostics":ui_state.diagnostics_consent})});}
-                                for key in ["health","support_bundle","feedback"]{if !ui_state.responses[key].is_null(){ui.monospace(serde_json::to_string_pretty(&ui_state.responses[key]).unwrap_or_default());}}
+                                for key in ["health","support_bundle","feedback","install_update"]{if !ui_state.responses[key].is_null(){ui.monospace(serde_json::to_string_pretty(&ui_state.responses[key]).unwrap_or_default());}}
 
                                 if ui.button("Save Config File").clicked() {
                                     save_config_disk();
@@ -1383,12 +1383,29 @@ pub fn draw_active_modal(
                 .default_width(640.0)
                 .show(ctx, |ui| {
                     ui.small(format!("{mime} · {uri}"));
+                    ui.horizontal(|ui| {
+                        if ui.button("−").clicked() {
+                            ui_state.media_zoom = (ui_state.media_zoom - 0.25).max(0.25);
+                        }
+                        if ui.button("+").clicked() {
+                            ui_state.media_zoom = (ui_state.media_zoom + 0.25).min(4.0);
+                        }
+                        if ui.button("Reset Zoom").clicked() {
+                            ui_state.media_zoom = 1.0;
+                        }
+                        if ui.button("Copy Media Path").clicked() {
+                            ctx.copy_text(uri.clone());
+                        }
+                    });
                     if let Some((tex_id, [w, h])) = textures.get(&format!("lightbox:{uri}")) {
                         let avail = ui.available_width().max(240.0);
                         let aspect = (h as f32 / (w.max(1) as f32)).clamp(0.3, 1.5);
                         ui.image(egui::load::SizedTexture::new(
                             tex_id,
-                            Vec2::new(avail, avail * aspect),
+                            Vec2::new(
+                                avail * ui_state.media_zoom,
+                                avail * aspect * ui_state.media_zoom,
+                            ),
                         ));
                     } else {
                         ui.label(format!("Media URI: {uri}"));

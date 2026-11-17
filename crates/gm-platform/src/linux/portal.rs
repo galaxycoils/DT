@@ -507,6 +507,8 @@ fn pipewire_frame(
         if std::time::Instant::now() >= deadline {
             return Err(error("PipeWire capture timed out"));
         }
-        main.loop_().iterate(std::time::Duration::from_millis(30));
+        main.loop_().iterate(pw::loop_::Timeout::Finite(
+            std::time::Duration::from_millis(30),
+        ));
     }
 }

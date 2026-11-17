@@ -1645,6 +1645,9 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
             let (token, slack_secret) = companion_web_credentials(&config)?;
             let bridge = gm_openbot::BridgeRouter::new(sup.clone(), bridges_cfg);
             let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+                .with_updates(Arc::new(updater::CompanionUpdateService {
+                    download_dir: config.storage_dir.join("updates"),
+                }))
                 .with_runtime_deps(
                     control_server.interactions(),
                     control_server.shared_config(),
@@ -2724,6 +2727,9 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
     let (token, slack_secret) = companion_web_credentials(&config)?;
     let shared_config = Arc::new(parking_lot::RwLock::new(config.clone()));
     let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+        .with_updates(Arc::new(updater::CompanionUpdateService {
+            download_dir: config.storage_dir.join("updates"),
+        }))
         .with_runtime_deps(
             interactions,
             shared_config,

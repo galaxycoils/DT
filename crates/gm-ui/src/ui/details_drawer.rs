@@ -424,6 +424,7 @@ pub fn draw_bot_details_drawer(
                             if ui.small_button("Plan Erasure").clicked()
                                 && !forget_request.trim().is_empty()
                             {
+                                ui_state.forget_confirmed=false;
                                 send(DaemonRequest::ForgetPlan {
                                     bot_id: Some(active_bot.to_string()),
                                     request: forget_request.trim().to_string(),
@@ -450,6 +451,7 @@ pub fn draw_bot_details_drawer(
                                     });
                                 }
                             }
+                            if !ui_state.responses["forget_report"].is_null(){ui.monospace(serde_json::to_string_pretty(&ui_state.responses["forget_report"]).unwrap_or_default());}
                             if !forget_notice.is_empty() {
                                 ui.small(forget_notice);
                             }

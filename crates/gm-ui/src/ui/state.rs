@@ -395,6 +395,7 @@ pub struct GrokUiState {
 
     // Applied style fingerprint so `ctx.set_style` only runs on actual changes
     pub applied_style_key: String,
+    pub media_zoom: f32,
 
     pub cards: InlineCardUiState,
 }
@@ -497,6 +498,7 @@ impl Default for GrokUiState {
             avatar_upload_path: String::new(),
             attachment_path: String::new(),
             applied_style_key: String::new(),
+            media_zoom: 1.0,
             cards: InlineCardUiState::default(),
         }
     }

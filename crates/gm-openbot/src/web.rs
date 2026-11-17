@@ -95,6 +95,12 @@ fn map_gm_error(err: GmError) -> ApiErr {
     }
 }
 
+#[async_trait::async_trait]
+pub trait CompanionUpdates: Send + Sync {
+    async fn check(&self) -> gm_core::error::Result<serde_json::Value>;
+    async fn download_verified(&self) -> gm_core::error::Result<serde_json::Value>;
+}
+
 #[derive(Clone)]
 pub struct CompanionWebState {
     pub supervisor: OpenBotSupervisor,
@@ -109,6 +115,7 @@ pub struct CompanionWebState {
     pub router: Option<gm_llm::LlmRouter>,
     pub kill_switch: Option<gm_safety::KillSwitch>,
     pub platform: Option<Arc<dyn gm_platform::Platform>>,
+    pub updates: Option<Arc<dyn CompanionUpdates>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -527,6 +534,7 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
         .route("/api/system/pause", post(system_pause_route))
         .route("/api/system/kill", post(system_kill_route))
         .route("/api/system/updates/check", post(system_updates_check_route))
+        .route("/api/system/updates/download", post(system_updates_download_route))
         .route("/api/system/providers/key", post(system_provider_key_route))
         .route(
             "/api/system/support-bundle",
@@ -604,8 +612,14 @@ impl CompanionWebServer {
                 router: None,
                 kill_switch: None,
                 platform: None,
+                updates: None,
             },
         }
+    }
+
+    pub fn with_updates(mut self, updates: Arc<dyn CompanionUpdates>) -> Self {
+        self.state.updates = Some(updates);
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4171,12 +4185,36 @@ async fn system_updates_check_route(
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let ver = env!("CARGO_PKG_VERSION");
-    Ok(Json(serde_json::json!({
-        "current_version": ver,
-        "latest_version": ver,
-        "update_available": false,
-    })))
+    let Some(updates) = state.updates else {
+        return Err(ApiErr::msg(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Update service is unavailable in this standalone server",
+        ));
+    };
+    Ok(Json(updates.check().await.map_err(map_gm_error)?))
+}
+
+async fn system_updates_download_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    if body["confirmed"].as_bool() != Some(true) {
+        return Err(ApiErr::msg(
+            StatusCode::FORBIDDEN,
+            "Confirm downloading a verified update",
+        ));
+    }
+    let Some(updates) = state.updates else {
+        return Err(ApiErr::msg(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Update service unavailable",
+        ));
+    };
+    Ok(Json(
+        updates.download_verified().await.map_err(map_gm_error)?,
+    ))
 }
 
 async fn system_provider_key_route(
