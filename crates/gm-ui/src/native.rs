@@ -27,7 +27,7 @@ use gm_core::{
     ipc::*,
 };
 use serde_json::Value;
-use session::{SessionData, SessionStore};
+use session::{SessionData, SessionStore, switch_draft};
 use std::{
     path::Path,
     sync::{
@@ -247,7 +247,7 @@ struct ViewState {
     approvals: Vec<(String, String, String)>,
     connected: bool,
     sending: bool,
-    clear_draft: Option<String>,
+    clear_drafts: Vec<(String, String)>,
     active_chat: Option<String>,
     completed_chat: Option<String>,
     activity_posts: Vec<Value>,
@@ -556,9 +556,11 @@ impl Shared {
     }
 }
 
+type OutboundRequest = (DaemonRequest, Option<(String, String)>);
+
 struct NativeApp {
     shared: Shared,
-    requests: tokio::sync::mpsc::Sender<(DaemonRequest, Option<String>)>,
+    requests: tokio::sync::mpsc::Sender<OutboundRequest>,
     live_computer_active: Arc<AtomicBool>,
     live_computer_notify: Arc<tokio::sync::Notify>,
     ui_state: GrokUiState,
@@ -567,6 +569,8 @@ struct NativeApp {
     avatar_assets: std::collections::HashMap<String, String>,
     lightbox_requested: Option<String>,
     draft: String,
+    draft_target: String,
+    other_drafts: Vec<(String, String)>,
     bot: String,
     task_mode: bool,
     search: String,
@@ -595,6 +599,28 @@ struct NativeApp {
 }
 
 impl NativeApp {
+    fn sync_draft_target(&mut self) {
+        let target = if self.ui_state.active_chat_kind == "channel" {
+            format!("channel:{}", self.channel)
+        } else {
+            format!("dm:{}", self.bot)
+        };
+        switch_draft(
+            &mut self.draft_target,
+            &mut self.draft,
+            &mut self.other_drafts,
+            target,
+        );
+    }
+
+    fn save_draft(&self, data: &mut SessionData) {
+        data.draft.clone_from(&self.draft);
+        data.draft_target = Some(self.draft_target.clone());
+        data.other_drafts.clone_from(&self.other_drafts);
+        data.bot.clone_from(&self.bot);
+        data.task_mode = self.task_mode;
+    }
+
     /// Detached request sink (cloned channel handles) so panels can enqueue requests while
     /// `self` fields are mutably borrowed.
     fn sender(&self) -> impl FnMut(DaemonRequest) + 'static {
@@ -647,6 +673,7 @@ impl NativeApp {
                 thread_id: None,
             }
         };
+        let clear_draft = clear_draft.map(|text| (self.draft_target.clone(), text));
         if self.requests.try_send((request, clear_draft)).is_ok() {
             self.shared.update(|s| {
                 s.sending = true;
@@ -775,11 +802,7 @@ impl Drop for NativeApp {
 impl eframe::App for NativeApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(store) = &self.shared.session {
-            store.edit(|d| {
-                d.draft = self.draft.clone();
-                d.bot = self.bot.clone();
-                d.task_mode = self.task_mode;
-            });
+            store.edit(|data| self.save_draft(data));
             if let Err(error) = store.flush() {
                 tracing::error!(%error, "Could not save native conversation");
             }
@@ -900,6 +923,7 @@ impl eframe::App for NativeApp {
                 WorkspaceSection::Bots => {}
             }
         }
+        self.sync_draft_target();
         if let Ok(mut state) = self.shared.state.lock()
             && let Some((id, mut secret)) = state.revealed_secret.take()
         {
@@ -985,10 +1009,12 @@ impl eframe::App for NativeApp {
             if let Some((id, secret)) = state.revealed_secret.take() {
                 self.ui_state.revealed_secrets.insert(id, secret);
             }
-            if let Some(sent) = state.clear_draft.take()
-                && self.draft.trim() == sent
-            {
-                self.draft.clear();
+            for (target, sent) in std::mem::take(&mut state.clear_drafts) {
+                if target == self.draft_target && self.draft.trim() == sent {
+                    self.draft.clear();
+                }
+                self.other_drafts
+                    .retain(|(key, draft)| *key != target || draft.trim() != sent);
             }
             if state.runtime_file_dirty {
                 self.identity_bot = state.runtime_file_bot.clone();
@@ -1158,6 +1184,8 @@ impl eframe::App for NativeApp {
             }
         }
 
+        self.sync_draft_target();
+
         // 9. Right 340px 4-Tab `Bot Details` Drawer (`Settings`, `Computer`, `Memory`, `Library`)
         draw_bot_details_drawer(
             ctx,
@@ -1232,13 +1260,14 @@ impl eframe::App for NativeApp {
                         self.send(req);
                     }
                     if let Some((text, reply_to_id)) = pending_send {
+                        let receipt = Some((self.draft_target.clone(), text.clone()));
                         if self.ui_state.active_chat_kind == "channel" {
                             let req = DaemonRequest::ChannelPost {
                                 channel_id: self.channel.clone(),
                                 author: "human".into(),
                                 content: text.clone(),
                             };
-                            let _ = self.requests.try_send((req, Some(text)));
+                            let _ = self.requests.try_send((req, receipt));
                         } else if self.task_mode || text.starts_with("/do ") {
                             let instruction = text
                                 .strip_prefix("/do ")
@@ -1251,7 +1280,7 @@ impl eframe::App for NativeApp {
                                 instruction,
                                 priority: 0,
                             };
-                            if self.requests.try_send((req, Some(text.clone()))).is_ok() {
+                            if self.requests.try_send((req, receipt)).is_ok() {
                                 self.shared.update(|s| {
                                     s.sending = true;
                                     s.error = None;
@@ -1421,18 +1450,19 @@ impl eframe::App for NativeApp {
             }
             self.ui_state.revealed_secrets.clear();
         }
+        self.sync_draft_target();
         // 14. Persist draft/bot/task_mode changes to private session file without triggering repaint
         if let Some(store) = &self.shared.session {
             let changed = {
                 let d = store.data.lock().unwrap_or_else(|e| e.into_inner());
-                d.draft != self.draft || d.bot != self.bot || d.task_mode != self.task_mode
+                d.draft != self.draft
+                    || d.draft_target.as_deref() != Some(self.draft_target.as_str())
+                    || d.other_drafts != self.other_drafts
+                    || d.bot != self.bot
+                    || d.task_mode != self.task_mode
             };
             if changed {
-                store.edit(|d| {
-                    d.draft = self.draft.clone();
-                    d.bot = self.bot.clone();
-                    d.task_mode = self.task_mode;
-                });
+                store.edit(|data| self.save_draft(data));
             }
         }
     }
@@ -1441,7 +1471,7 @@ impl eframe::App for NativeApp {
 async fn background(
     config: GmConfig,
     shared: Shared,
-    mut requests: tokio::sync::mpsc::Receiver<(DaemonRequest, Option<String>)>,
+    mut requests: tokio::sync::mpsc::Receiver<OutboundRequest>,
     live_computer_active: Arc<AtomicBool>,
     live_computer_notify: Arc<tokio::sync::Notify>,
 ) {
@@ -1585,9 +1615,11 @@ async fn background(
                 Ok(response) => {
                     let mut refresh_after = false;
                     request_shared.update(|s| {
-                        if draft.is_some() {
+                        if let Some(draft) = draft {
                             s.sending = false;
-                            s.clear_draft = draft.clone();
+                            if !matches!(&response, DaemonResponse::Error(_)) {
+                                s.clear_drafts.push(draft);
+                            }
                         }
                         s.error = None;
                         match (kind, response) {
@@ -1839,7 +1871,7 @@ async fn background(
                 Err(error) => {
                     let msg = error.to_string();
                     request_shared.update(|s| {
-                        if let Some(draft) = &draft
+                        if let Some((_, draft)) = &draft
                             && s.completed_chat != s.active_chat
                             && let Some((role, _)) = s
                                 .messages
@@ -1997,6 +2029,9 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
                 Arc::clone(&live_computer_notify),
             ));
             let identity_bot = restored.bot.clone();
+            let draft_target = restored
+                .draft_target
+                .unwrap_or_else(|| format!("dm:{}", restored.bot));
             let mut ui_state = GrokUiState::default();
             if config_original.is_none() {
                 ui_state.active_modal = Some(crate::ui::state::ActiveModal::Settings);
@@ -2012,6 +2047,8 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
                 avatar_assets: std::collections::HashMap::new(),
                 lightbox_requested: None,
                 draft: restored.draft,
+                draft_target,
+                other_drafts: restored.other_drafts,
                 bot: restored.bot,
                 task_mode: restored.task_mode,
                 search: String::new(),

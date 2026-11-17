@@ -153,25 +153,6 @@ pub fn draw_chat_canvas(
                     });
                 }
 
-                ui.vertical(|ui| {
-                    let header_title = if ui_state.active_chat_kind == "channel" {
-                        format!("# {active_channel}")
-                    } else {
-                        bot_display_name.to_string()
-                    };
-                    ui.strong(
-                        RichText::new(header_title)
-                            .size(15.0)
-                            .color(palette.text_primary),
-                    );
-                    let sub = if ui_state.active_chat_kind == "channel" {
-                        format!("Shared group channel · {status_line}")
-                    } else {
-                        format!("{bot_role_title} · {status_line}")
-                    };
-                    ui.small(RichText::new(sub).color(palette.text_secondary));
-                });
-
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let details_btn = egui::Button::new(RichText::new("◧ Details").color(
                         if ui_state.details_drawer_open {
@@ -258,6 +239,42 @@ pub fn draw_chat_canvas(
                     {
                         ui_state.search_bar_open = !ui_state.search_bar_open;
                     }
+
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(ui.available_width(), 30.0),
+                        Layout::top_down(Align::Min),
+                        |ui| {
+                            let title = if ui_state.active_chat_kind == "channel" {
+                                format!("# {active_channel}")
+                            } else {
+                                bot_display_name.clone()
+                            };
+                            let subtitle = if ui_state.active_chat_kind == "channel" {
+                                format!("Shared group channel · {status_line}")
+                            } else {
+                                format!("{bot_role_title} · {status_line}")
+                            };
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&title)
+                                        .strong()
+                                        .size(15.0)
+                                        .color(palette.text_primary),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(title);
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(&subtitle)
+                                        .small()
+                                        .color(palette.text_secondary),
+                                )
+                                .truncate(),
+                            )
+                            .on_hover_text(subtitle);
+                        },
+                    );
                 });
             });
         });

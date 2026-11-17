@@ -459,7 +459,7 @@ pub fn draw_bot_details_drawer(
                     }
 
                     BotDetailsTab::Library => {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             for (flt, lbl) in [
                                 ("all", "All"),
                                 ("pinned", "Pinned"),

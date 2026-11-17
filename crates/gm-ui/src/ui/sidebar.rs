@@ -484,6 +484,7 @@ fn draw_bot_row(
 
     let (row_rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, name));
     let bg = if selected {
         palette.bg_hover
     } else if resp.hovered() {

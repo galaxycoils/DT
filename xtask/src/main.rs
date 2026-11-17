@@ -233,6 +233,13 @@ fn detect_identity() -> String {
     "-".into()
 }
 
+fn cargo_profile_dir(release: bool) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("target"))
+        .join(if release { "release" } else { "debug" })
+}
+
 fn create_app_bundles(release: bool) -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     if let Some(workspace_root) = manifest_dir.parent() {
@@ -258,18 +265,17 @@ fn create_app_bundles(release: bool) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Failed to build binaries for bundling".into());
     }
 
-    let bin_dir = if release {
-        "target/release"
-    } else {
-        "target/debug"
-    };
-    println!("==> Bundling Grok-Muse applications from {bin_dir}...");
+    let bin_dir = cargo_profile_dir(release);
+    println!(
+        "==> Bundling Grok-Muse applications from {}...",
+        bin_dir.display()
+    );
     let helper_app_dir = Path::new("target/bundle/GrokMuseCUHelper.app/Contents/MacOS");
     fs::create_dir_all(helper_app_dir)?;
 
     // Copy helper binary
     fs::copy(
-        format!("{bin_dir}/gm-cu-helper"),
+        bin_dir.join("gm-cu-helper"),
         helper_app_dir.join("gm-cu-helper"),
     )?;
 
@@ -315,12 +321,9 @@ fn create_app_bundles(release: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Bundle main GrokMuse.app
     let app_macos_dir = Path::new("target/bundle/GrokMuse.app/Contents/MacOS");
     fs::create_dir_all(app_macos_dir)?;
-    fs::copy(format!("{bin_dir}/gm-ui"), app_macos_dir.join("gm-ui"))?;
-    fs::copy(
-        format!("{bin_dir}/gm-daemon"),
-        app_macos_dir.join("gm-daemon"),
-    )?;
-    fs::copy(format!("{bin_dir}/gm"), app_macos_dir.join("gm"))?;
+    fs::copy(bin_dir.join("gm-ui"), app_macos_dir.join("gm-ui"))?;
+    fs::copy(bin_dir.join("gm-daemon"), app_macos_dir.join("gm-daemon"))?;
+    fs::copy(bin_dir.join("gm"), app_macos_dir.join("gm"))?;
 
     let app_plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -1149,6 +1152,7 @@ async fn run_bench_rss() -> Result<(f64, f64), Box<dyn std::error::Error>> {
     };
     config.openbot.bots_dir = config.storage_dir.join("bots");
     config.openbot.companion_enabled = false;
+    config.muse.enable_desktop_patrol = false;
     #[cfg(unix)]
     {
         config.socket_path = folder.join("helper.sock");
@@ -1161,15 +1165,18 @@ async fn run_bench_rss() -> Result<(f64, f64), Box<dyn std::error::Error>> {
     }
     let config_path = folder.join("config.json");
     config.save(&config_path)?;
+    let bin_dir = cargo_profile_dir(true);
     let mut children = vec![
         Owned(
-            Command::new("target/release/gm-cu-helper")
+            Command::new(bin_dir.join("gm-cu-helper"))
                 .arg("--socket")
                 .arg(&config.socket_path)
                 .spawn()?,
         ),
         Owned(
-            Command::new("target/release/gm-daemon")
+            Command::new(bin_dir.join("gm-daemon"))
+                .env("GROK_MUSE_DATA_DIR", &config.storage_dir)
+                .env("GM_FORCE_MOCK_LLM", "1")
                 .arg("--config")
                 .arg(&config_path)
                 .arg("daemon")
@@ -1186,7 +1193,7 @@ async fn run_bench_rss() -> Result<(f64, f64), Box<dyn std::error::Error>> {
     let (idle_mb, idle_metric) = measure_process_tree_memory(&pids)?;
     println!("Core idle (daemon + helper, UI closed): {idle_mb:.2} MiB ({idle_metric})");
     children.push(Owned(
-        Command::new("target/release/gm-ui")
+        Command::new(bin_dir.join("gm-ui"))
             .arg("--config")
             .arg(&config_path)
             .arg("native")

@@ -29,7 +29,7 @@ pub fn draw_workspace_rail(
                 ui.horizontal_centered(|ui| {
                     for sec in WorkspaceSection::ALL {
                         let active = ui_state.section == sec;
-                        let label = format!("{} {}", sec.icon(), sec.label());
+                        let label = sec.label();
                         let btn =
                             egui::Button::new(RichText::new(label).size(12.0).color(if active {
                                 palette.accent_text
@@ -85,6 +85,7 @@ pub fn draw_workspace_rail(
                     ui,
                     palette,
                     "⌘",
+                    "Keys",
                     "Command Palette (Cmd/Ctrl+K)",
                     ui_state.active_modal == Some(ActiveModal::CommandPalette),
                     0,
@@ -103,8 +104,16 @@ pub fn draw_workspace_rail(
                     } else {
                         0
                     };
-                    if rail_icon_button(ui, palette, sec.icon(), sec.label(), active, badge)
-                        .clicked()
+                    if rail_icon_button(
+                        ui,
+                        palette,
+                        sec.icon(),
+                        sec.label(),
+                        sec.label(),
+                        active,
+                        badge,
+                    )
+                    .clicked()
                     {
                         select_section(ui_state, sec, &mut send);
                     }
@@ -131,12 +140,15 @@ pub fn draw_workspace_rail(
 
                     // Pause / Resume runtime toggle
                     let pause_icon = if paused { "▶" } else { "⏸" };
+                    let pause_label = if paused { "Resume" } else { "Pause" };
                     let pause_tip = if paused {
                         "Resume task admission"
                     } else {
                         "Pause task admission"
                     };
-                    if rail_icon_button(ui, palette, pause_icon, pause_tip, paused, 0).clicked() {
+                    if rail_icon_button(ui, palette, pause_icon, pause_label, pause_tip, paused, 0)
+                        .clicked()
+                    {
                         send(DaemonRequest::SetPaused { paused: !paused });
                     }
                     ui.add_space(4.0);
@@ -146,6 +158,7 @@ pub fn draw_workspace_rail(
                         ui,
                         palette,
                         "⚙",
+                        "Prefs",
                         "Settings (Cmd/Ctrl+,)",
                         ui_state.active_modal == Some(ActiveModal::Settings),
                         0,
@@ -161,6 +174,7 @@ pub fn draw_workspace_rail(
                         ui,
                         palette,
                         "⌨",
+                        "Keys",
                         "Keyboard Shortcuts (Cmd/Ctrl+/)",
                         ui_state.active_modal == Some(ActiveModal::Shortcuts),
                         0,
@@ -176,6 +190,7 @@ pub fn draw_workspace_rail(
                         ui,
                         palette,
                         "✦",
+                        "Studio",
                         "Studio — Templates, Skills & Routines (Cmd/Ctrl+Shift+M)",
                         ui_state.active_modal == Some(ActiveModal::Studio),
                         0,
@@ -191,6 +206,7 @@ pub fn draw_workspace_rail(
                         ui,
                         palette,
                         "🔌",
+                        "Apps",
                         "Connect Apps & Custom MCP/Webhook Connectors",
                         ui_state.active_modal == Some(ActiveModal::ConnectApps),
                         0,
@@ -231,11 +247,15 @@ fn rail_icon_button(
     ui: &mut egui::Ui,
     palette: &GrokPalette,
     icon: &str,
+    fallback: &str,
     tooltip: &str,
     active: bool,
     badge: usize,
 ) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(34.0, 34.0), Sense::click());
+    resp.widget_info(|| {
+        egui::WidgetInfo::selected(egui::WidgetType::Button, true, active, tooltip)
+    });
     let bg = if active {
         palette.accent
     } else if resp.hovered() {
@@ -251,13 +271,14 @@ fn rail_icon_button(
         palette.text_secondary
     };
     ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
-    ui.painter().text(
-        rect.center(),
-        egui::Align2::CENTER_CENTER,
-        icon,
-        egui::FontId::proportional(16.0),
-        fg,
-    );
+    let icon_font = egui::FontId::proportional(16.0);
+    let (label, font) = if ui.fonts_mut(|fonts| fonts.has_glyphs(&icon_font, icon)) {
+        (icon, icon_font)
+    } else {
+        (fallback, egui::FontId::proportional(9.0))
+    };
+    ui.painter()
+        .text(rect.center(), egui::Align2::CENTER_CENTER, label, font, fg);
     if badge > 0 {
         let dot = egui::Pos2::new(rect.max.x - 5.0, rect.min.y + 5.0);
         ui.painter().circle_filled(dot, 4.0, palette.accent);

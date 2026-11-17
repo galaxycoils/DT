@@ -15,6 +15,10 @@ pub(super) struct SessionData {
     version: u32,
     pub messages: Vec<(String, String)>,
     pub draft: String,
+    #[serde(default)]
+    pub draft_target: Option<String>,
+    #[serde(default)]
+    pub other_drafts: Vec<(String, String)>,
     pub bot: String,
     pub task_mode: bool,
 }
@@ -24,9 +28,42 @@ impl Default for SessionData {
             version: 1,
             messages: vec![],
             draft: String::new(),
+            draft_target: None,
+            other_drafts: vec![],
             bot: "muse".into(),
             task_mode: false,
         }
+    }
+}
+
+pub(super) fn switch_draft(
+    target: &mut String,
+    draft: &mut String,
+    other_drafts: &mut Vec<(String, String)>,
+    next: String,
+) {
+    if *target == next {
+        return;
+    }
+    let next_draft = other_drafts
+        .iter()
+        .position(|(key, _)| *key == next)
+        .map(|index| other_drafts.remove(index).1)
+        .unwrap_or_default();
+    let previous = std::mem::replace(target, next);
+    let mut previous_draft = std::mem::replace(draft, next_draft);
+    previous_draft.truncate(previous_draft.floor_char_boundary(128 * 1024));
+    if !previous_draft.is_empty() {
+        other_drafts.push((previous, previous_draft));
+    }
+    while other_drafts.len() > 32
+        || other_drafts
+            .iter()
+            .map(|(_, text)| text.len())
+            .sum::<usize>()
+            > 512 * 1024
+    {
+        other_drafts.remove(0);
     }
 }
 pub(super) struct SessionStore {
@@ -124,6 +161,34 @@ impl SessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keeps_drafts_with_their_bot_or_group() {
+        let legacy: SessionData = serde_json::from_str(
+            r#"{"version":1,"messages":[],"draft":"Muse draft","bot":"muse","task_mode":false}"#,
+        )
+        .unwrap();
+        assert!(legacy.draft_target.is_none());
+        let mut target = format!("dm:{}", legacy.bot);
+        let mut draft = legacy.draft;
+        let mut other = legacy.other_drafts;
+
+        switch_draft(&mut target, &mut draft, &mut other, "dm:coder".into());
+        assert!(draft.is_empty());
+        draft = "Coder draft".into();
+        switch_draft(
+            &mut target,
+            &mut draft,
+            &mut other,
+            "channel:general".into(),
+        );
+        assert!(draft.is_empty());
+        switch_draft(&mut target, &mut draft, &mut other, "dm:muse".into());
+        assert_eq!(draft, "Muse draft");
+        switch_draft(&mut target, &mut draft, &mut other, "dm:coder".into());
+        assert_eq!(draft, "Coder draft");
+    }
+
     #[test]
     fn restores_unicode_drafts_and_messages_and_locks_other_writers() {
         let root = std::env::temp_dir().join(format!("gm-ui-history-{}", uuid::Uuid::new_v4()));

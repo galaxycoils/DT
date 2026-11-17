@@ -1590,7 +1590,9 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
             .with_llm(Arc::clone(&llm_client), router.clone()),
     );
 
-    proactive_engine.schedule_patrol(Arc::clone(&platform), 300);
+    if config.muse.enable_desktop_patrol {
+        proactive_engine.schedule_patrol(Arc::clone(&platform), 300);
+    }
     proactive_engine.schedule_memory_upkeep(Arc::clone(&memory), 3600, None);
 
     let tick_engine = Arc::clone(&proactive_engine);

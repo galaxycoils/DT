@@ -658,6 +658,7 @@ impl Default for UiConfig {
 pub struct MuseConfig {
     pub enable_muse_prompt: bool,
     pub enable_skills: bool,
+    pub enable_desktop_patrol: bool,
     pub enable_heartbeat: bool,
     pub enable_dreams: bool,
     pub enable_spaces: bool,
@@ -678,6 +679,7 @@ impl Default for MuseConfig {
         Self {
             enable_muse_prompt: true,
             enable_skills: true,
+            enable_desktop_patrol: true,
             enable_heartbeat: false,
             enable_dreams: false,
             enable_spaces: true,

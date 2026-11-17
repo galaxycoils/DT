@@ -806,6 +806,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "requires an interactive macOS desktop with Screen Recording and Accessibility grants"]
     async fn test_mac_platform_permissions_and_activity() {
         let platform = MacPlatform::new().expect("init platform");
         let perms = platform.permissions().await.expect("permissions");
@@ -817,6 +818,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Accessibility permission and inspects the frontmost window"]
     async fn test_mac_platform_ax_snapshot() {
         let platform = MacPlatform::new().expect("init platform");
         let snapshot = platform.ax_snapshot(None).await.expect("ax snapshot");
@@ -825,6 +827,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires Screen Recording permission and captures the active desktop"]
     async fn test_mac_platform_capture_and_downscale() {
         let platform = MacPlatform::new().expect("init platform");
         let frame = platform.capture(Some(960), None).await.expect("capture");
@@ -834,6 +837,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "sends global keyboard and mouse input and requires a disposable desktop session"]
     async fn test_mac_platform_actions_dispatch() {
         let platform = MacPlatform::new().expect("init platform");
 
@@ -875,6 +879,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "reads real calendars and reminders and posts a notification"]
     async fn test_mac_platform_eventkit_and_notifications() {
         let platform = MacPlatform::new().expect("init platform");
         // Test querying calendar events (now to +24h)
@@ -902,6 +907,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "opens Mail and reads the signed-in account's inbox"]
     async fn test_mac_platform_get_unread_emails() {
         let platform = MacPlatform::new().expect("init platform");
         let res = platform.get_unread_emails().await;
