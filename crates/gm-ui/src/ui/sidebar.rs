@@ -473,8 +473,14 @@ fn draw_bot_row(
     let selected = ui_state.active_chat_kind == "dm" && active_bot.as_str() == id;
     let unread = unread_counts[format!("dm:{id}")].as_u64().unwrap_or(0);
     let status = &ui_state.server_snapshot["bot_statuses"][&id];
-    let phrase = status["status_phrase"].as_str().unwrap_or(role);
-    let attention = status["needs_attention"].as_bool().unwrap_or(false);
+    let phrase = status["phrase"]
+        .as_str()
+        .or_else(|| bot["status_phrase"].as_str())
+        .unwrap_or(role);
+    let attention = status["needs_attention"]
+        .as_bool()
+        .or_else(|| bot["needs_attention"].as_bool())
+        .unwrap_or(false);
 
     let (row_rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());

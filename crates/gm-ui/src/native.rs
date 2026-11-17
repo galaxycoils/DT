@@ -489,6 +489,8 @@ impl ViewState {
                 phrase,
                 needs_attention,
             } => {
+                self.bot_statuses[&bot_id] =
+                    serde_json::json!({"phrase":phrase,"needs_attention":needs_attention});
                 for b in &mut self.bots {
                     if b["id"].as_str() == Some(bot_id.as_str()) {
                         b["status_phrase"] =
@@ -837,6 +839,7 @@ impl eframe::App for NativeApp {
             if let Some(snapshot) = state.pending_ui_snapshot.take() {
                 self.ui_state.server_snapshot = snapshot;
             }
+            self.ui_state.server_snapshot["bot_statuses"] = state.bot_statuses.clone();
             for (key, value) in std::mem::take(&mut state.tool_results) {
                 if key.starts_with("avatar:") || key.starts_with("lightbox:") {
                     if let Some(encoded) = value["bytes_base64"].as_str()

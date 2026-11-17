@@ -808,6 +808,12 @@ impl OpenBotSupervisor {
             phrase: Some("Thinking...".into()),
             needs_attention: false,
         });
+        self.emit_agui(
+            "BOT_STATUS_PHRASE",
+            &clean_bot,
+            &clean_bot,
+            serde_json::json!({"bot_id":clean_bot,"phrase":"Thinking...","needs_attention":false}),
+        );
 
         let stream_msg_id = format!(
             "dmstream-{}",
@@ -863,6 +869,12 @@ impl OpenBotSupervisor {
             phrase: None,
             needs_attention: false,
         });
+        self.emit_agui(
+            "BOT_STATUS_PHRASE",
+            &clean_bot,
+            &clean_bot,
+            serde_json::json!({"bot_id":clean_bot,"phrase":null,"needs_attention":false}),
+        );
 
         let completion = stream_res?;
         let _ = self.daemon_events_tx.send(DaemonEvent::ChatTokenV1 {
