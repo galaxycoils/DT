@@ -278,6 +278,43 @@ struct ViewState {
 }
 
 impl ViewState {
+    fn select_chat_request(&mut self, request: &DaemonRequest) {
+        match request {
+            DaemonRequest::GetDirectChatHistory { bot_id, .. } if self.dm_bot_id != *bot_id => {
+                self.dm_bot_id = bot_id.clone();
+                self.dm_messages.clear();
+            }
+            DaemonRequest::ChannelHistory { channel_id }
+                if self.channel_history_id != *channel_id =>
+            {
+                self.channel_history_id = channel_id.clone();
+                self.channel_messages.clear();
+            }
+            _ => {}
+        }
+    }
+
+    fn merge_dm_history(&mut self, bot_id: &str, value: &Value) {
+        if self.dm_bot_id != bot_id {
+            return;
+        }
+        if let Some(messages) = value["messages"].as_array().or_else(|| value.as_array()) {
+            for message in messages {
+                if let Some(existing) = self
+                    .dm_messages
+                    .iter_mut()
+                    .find(|m| m["id"] == message["id"])
+                {
+                    *existing = message.clone();
+                } else {
+                    self.dm_messages.push(message.clone());
+                }
+            }
+            self.dm_messages
+                .sort_by_key(|m| m["seq"].as_u64().unwrap_or(0));
+        }
+    }
+
     fn finish_chat(&mut self, id: String, text: String) {
         if self.active_chat.as_ref() != Some(&id) || self.completed_chat.as_ref() == Some(&id) {
             return;
@@ -562,6 +599,7 @@ impl NativeApp {
         let requests = self.requests.clone();
         let shared = self.shared.clone();
         move |request| {
+            shared.update(|s| s.select_chat_request(&request));
             if let Err(error) = requests.try_send((request, None)) {
                 shared.update(|s| s.error = Some(format!("Request queue is busy: {error}")));
             }
@@ -569,6 +607,7 @@ impl NativeApp {
     }
 
     fn send(&self, request: DaemonRequest) {
+        self.shared.update(|s| s.select_chat_request(&request));
         if let Err(error) = self.requests.try_send((request, None)) {
             self.shared
                 .update(|s| s.error = Some(format!("Request queue is busy: {error}")));
@@ -659,9 +698,10 @@ impl NativeApp {
                 .collect();
         }
 
-        if !dm_messages.is_empty() {
-            let mut rows: Vec<TranscriptRow> = dm_messages
+        if !self.bot.is_empty() {
+            let rows: Vec<TranscriptRow> = dm_messages
                 .iter()
+                .filter(|m| m["bot_id"].as_str().is_none_or(|id| id == self.bot))
                 .enumerate()
                 .map(|(idx, m)| {
                     let role = m["role"].as_str().unwrap_or("assistant").to_string();
@@ -693,24 +733,6 @@ impl NativeApp {
                     }
                 })
                 .collect();
-            // Append any local assistant replies from SendChatMessageV2 not yet in dm_messages
-            for (idx, (role_label, content)) in local_messages.iter().enumerate() {
-                if role_label != "You" && !rows.iter().any(|r| r.content == *content) {
-                    let seq = rows.len() as i64 + 1;
-                    rows.push(TranscriptRow {
-                        id: format!("local-{idx}"),
-                        seq,
-                        author: role_label.clone(),
-                        role: "assistant".into(),
-                        content: content.clone(),
-                        created_at: String::new(),
-                        reply_to_id: None,
-                        request_id: None,
-                        reactions: Vec::new(),
-                        card: None,
-                    });
-                }
-            }
             return rows;
         }
 
@@ -1440,8 +1462,28 @@ async fn background(
                     .await?;
                     let _: IpcMessage<DaemonResponse> = read_ipc_message(&mut connection).await?;
                     events_shared.update(|s| s.connected = true);
-                    // Trigger single bootstrap load on connection
+                    // Reconcile persisted history after subscription, including reconnects.
                     events_notify.notify_one();
+                    let bot = events_shared
+                        .state
+                        .lock()
+                        .map(|s| s.dm_bot_id.clone())
+                        .unwrap_or_default();
+                    if !bot.is_empty()
+                        && let Ok(DaemonResponse::JsonPayload(value)) = rpc(
+                            &events_config,
+                            DaemonRequest::GetDirectChatHistory {
+                                bot_id: bot.clone(),
+                                before_seq: None,
+                                limit: Some(50),
+                            },
+                        )
+                        .await
+                    {
+                        events_shared.update(|s| {
+                            s.merge_dm_history(&bot, &value);
+                        });
+                    }
                     loop {
                         let response: IpcMessage<DaemonResponse> =
                             read_ipc_message(&mut connection).await?;
@@ -1603,29 +1645,26 @@ async fn background(
                                 PendingKind::ChannelHistory(channel_id),
                                 DaemonResponse::JsonPayload(value),
                             ) => {
-                                s.channel_history_id = channel_id;
-                                s.channel_messages = value.as_array().cloned().unwrap_or_default();
+                                if s.channel_history_id == channel_id {
+                                    s.channel_messages =
+                                        value.as_array().cloned().unwrap_or_default();
+                                }
                             }
                             (
                                 PendingKind::DirectChatHistory(bot_id),
                                 DaemonResponse::JsonPayload(value),
                             ) => {
-                                s.dm_bot_id = bot_id;
-                                s.dm_messages = value["messages"]
-                                    .as_array()
-                                    .or_else(|| value.as_array())
-                                    .cloned()
-                                    .unwrap_or_default();
+                                s.merge_dm_history(&bot_id, &value);
                             }
                             (
                                 PendingKind::PostDirectChat(bot_id),
                                 DaemonResponse::JsonPayload(value),
                             ) => {
-                                s.dm_bot_id = bot_id;
                                 for key in ["user_message", "assistant_message"] {
                                     let msg = value[key].clone();
                                     let id = msg["id"].as_str().unwrap_or("").to_string();
-                                    if !id.is_empty()
+                                    if s.dm_bot_id == bot_id
+                                        && !id.is_empty()
                                         && !s
                                             .dm_messages
                                             .iter()
@@ -2004,6 +2043,29 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
 #[cfg(test)]
 mod bootstrap_regression_tests {
     use super::*;
+    #[test]
+    fn chat_history_reconciles_without_losing_events_or_switching_bots() {
+        let mut state = ViewState::default();
+        let select = |bot: &str| DaemonRequest::GetDirectChatHistory {
+            bot_id: bot.into(),
+            before_seq: None,
+            limit: Some(50),
+        };
+        state.select_chat_request(&select("muse"));
+        state
+            .dm_messages
+            .push(serde_json::json!({"id":"new", "seq":2}));
+        let page = serde_json::json!({"messages":[{"id":"old", "seq":1},{"id":"new", "seq":2}]});
+        state.merge_dm_history("muse", &page);
+        state.merge_dm_history("muse", &page);
+        assert_eq!(state.dm_messages.len(), 2);
+        assert_eq!(state.dm_messages[0]["id"], "old");
+        state.select_chat_request(&select("other"));
+        state.merge_dm_history("muse", &page);
+        assert_eq!(state.dm_bot_id, "other");
+        assert!(state.dm_messages.is_empty());
+    }
+
     #[test]
     fn bootstrap_uses_store_contract_and_normalizes_spaces() {
         let mut state = ViewState::default();

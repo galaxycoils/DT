@@ -27,6 +27,7 @@ async function freePort(){return new Promise(resolve=>{const s=net.createServer(
   await page.goto(base);await page.getByLabel('Companion bearer token').fill(token);await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#overlay').waitFor({state:'hidden'});
   await page.locator('#draft').fill('Browser smoke test');await page.locator('#draft').press('Enter');await page.locator('.message').first().waitFor();
   const dm=await (await request('/api/dm/muse/messages')).json();assert.ok((dm.messages||dm).some(m=>m.content==='Browser smoke test'));
+  await page.reload();await page.getByLabel('Companion bearer token').fill(token);await page.getByRole('button',{name:'Connect',exact:true}).click();await page.locator('#overlay').waitFor({state:'hidden'});await page.getByText('Browser smoke test',{exact:true}).first().waitFor();
   await page.keyboard.press('Control+n');await page.getByLabel('Bot ID').fill('smoke-bot');await page.getByLabel('Name',{exact:true}).fill('Smoke Bot');await page.getByRole('button',{name:'Save Changes',exact:true}).click();await page.locator('#overlay').waitFor({state:'hidden'});
   let snapshot=await (await request('/api/bootstrap')).json();assert.ok(snapshot.bots.some(b=>b.id==='smoke-bot'));
   await page.keyboard.press('Control+,');await page.getByLabel('Theme',{exact:true}).selectOption('dark');await page.getByRole('button',{name:'Save Changes',exact:true}).click();await page.waitForFunction(()=>document.documentElement.dataset.theme==='dark');await page.keyboard.press('Escape');
