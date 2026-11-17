@@ -416,12 +416,7 @@ impl OpenBotSupervisor {
             bot_id: rec.bot_id.clone(),
             message: val.clone(),
         });
-        self.emit_agui(
-            "DIRECT_MESSAGE_ADDED",
-            &rec.id,
-            &rec.bot_id,
-            val,
-        );
+        self.emit_agui("DIRECT_MESSAGE_ADDED", &rec.id, &rec.bot_id, val);
         Ok(rec)
     }
 
@@ -514,18 +509,20 @@ impl OpenBotSupervisor {
                 .count();
         let feed_posts = self.feed_store.list_posts(30).unwrap_or_default();
         let feed_ideas: Vec<gm_goals::ProactiveIdea> = {
-            let custom_path = self.shared_paths().storage_dir().join("workspace/custom_ideas.json");
+            let custom_path = self
+                .shared_paths()
+                .storage_dir()
+                .join("workspace/custom_ideas.json");
             SharedFileStore::global()
                 .read_text_with_sha256(&custom_path)
                 .ok()
                 .flatten()
-                .and_then(|(raw, _)| serde_json::from_str::<Vec<gm_goals::ProactiveIdea>>(&raw).ok())
+                .and_then(|(raw, _)| {
+                    serde_json::from_str::<Vec<gm_goals::ProactiveIdea>>(&raw).ok()
+                })
                 .unwrap_or_default()
         };
-        let goals = self
-            .goal_manager()
-            .list_goals()
-            .unwrap_or_default();
+        let goals = self.goal_manager().list_goals().unwrap_or_default();
         let spaces = self
             .spaces
             .list_spaces()
@@ -770,16 +767,17 @@ impl OpenBotSupervisor {
                     profile.display_name, profile_trimmed
                 )
             });
-            let mut input =
-                PromptInput::new(PromptSurface::MainChat, &bot_paths, &cfg.muse, &primary.model);
+            let mut input = PromptInput::new(
+                PromptSurface::MainChat,
+                &bot_paths,
+                &cfg.muse,
+                &primary.model,
+            );
             input.allow_host_desktop = self.allow_host_desktop();
             input.workspace_vm_enabled = cfg.workspace_vm.enabled;
             input.channel_instructions = persona_note.as_deref();
             MusePromptBuilder::build_messages(&input).unwrap_or_else(|_| {
-                vec![gm_llm::ChatMessage::text(
-                    "system",
-                    &profile.system_prompt,
-                )]
+                vec![gm_llm::ChatMessage::text("system", &profile.system_prompt)]
             })
         } else {
             vec![gm_llm::ChatMessage::text("system", &profile.system_prompt)]
@@ -811,20 +809,21 @@ impl OpenBotSupervisor {
             needs_attention: false,
         });
 
-        let stream_msg_id = format!("dmstream-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let stream_msg_id = format!(
+            "dmstream-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
         let sup_stream = self.clone();
         let stream_bot = clean_bot.clone();
         let stream_id = stream_msg_id.clone();
         let forward_task = tokio::spawn(async move {
             while let Some(delta) = delta_rx.recv().await {
-                let _ = sup_stream
-                    .daemon_events_tx
-                    .send(DaemonEvent::ChatTokenV1 {
-                        message_id: stream_id.clone(),
-                        delta: delta.clone(),
-                        done: false,
-                    });
+                let _ = sup_stream.daemon_events_tx.send(DaemonEvent::ChatTokenV1 {
+                    message_id: stream_id.clone(),
+                    delta: delta.clone(),
+                    done: false,
+                });
                 sup_stream.emit_agui_ephemeral(
                     "TEXT_MESSAGE_CONTENT",
                     &stream_id,
@@ -1538,9 +1537,7 @@ impl OpenBotSupervisor {
                     "Check due milestones across your Goals workspace and summarize next steps."
                         .into(),
                 source: gm_goals::IdeaSource::Hybrid,
-                action_prompt: Some(
-                    "Review my active goals and suggest the top next step.".into(),
-                ),
+                action_prompt: Some("Review my active goals and suggest the top next step.".into()),
                 confidence: 0.72,
                 created_at: now,
             });

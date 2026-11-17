@@ -31,10 +31,8 @@ pub fn draw_adaptive_sidebar(
         .filter(|b| b["hidden_from_sidebar"].as_bool().unwrap_or(false))
         .collect();
 
-    let mode = SidebarMode::from_visible_bot_count(
-        visible_bots.len(),
-        ui_state.sidebar_manual_override,
-    );
+    let mode =
+        SidebarMode::from_visible_bot_count(visible_bots.len(), ui_state.sidebar_manual_override);
 
     if mode == SidebarMode::AutoCollapsed {
         return;
@@ -69,8 +67,9 @@ pub fn draw_adaptive_sidebar(
                                 .or_else(|| bot["color"].as_str())
                                 .unwrap_or("#2F7CF6"),
                         );
-                        let shape =
-                            BotAvatarShape::from_name(bot["avatar_shape"].as_str().unwrap_or("Circle"));
+                        let shape = BotAvatarShape::from_name(
+                            bot["avatar_shape"].as_str().unwrap_or("Circle"),
+                        );
                         let is_selected =
                             ui_state.active_chat_kind == "dm" && active_bot.as_str() == id;
                         let (rect, resp) =
@@ -110,11 +109,7 @@ pub fn draw_adaptive_sidebar(
                         resp.on_hover_text(name);
                         ui.add_space(6.0);
                     }
-                    if ui
-                        .small_button("＋")
-                        .on_hover_text("New Bot")
-                        .clicked()
-                    {
+                    if ui.small_button("＋").on_hover_text("New Bot").clicked() {
                         ui_state.active_modal = Some(ActiveModal::CreateBot);
                     }
                 });
@@ -246,10 +241,7 @@ pub fn draw_adaptive_sidebar(
                         .filter(|b| {
                             !b["is_primary"].as_bool().unwrap_or(false)
                                 && !b["pinned"].as_bool().unwrap_or(false)
-                                && b["section_id"]
-                                    .as_str()
-                                    .map(str::is_empty)
-                                    .unwrap_or(true)
+                                && b["section_id"].as_str().map(str::is_empty).unwrap_or(true)
                                 && matches_bot_filter(b, &needle)
                         })
                         .collect();
@@ -291,7 +283,9 @@ pub fn draw_adaptive_sidebar(
                         }
                         let selected =
                             ui_state.active_chat_kind == "channel" && active_channel == ch_id;
-                        let unread = unread_counts["channels"][ch_id].as_u64().unwrap_or(0);
+                        let unread = unread_counts[format!("channel:{ch_id}")]
+                            .as_u64()
+                            .unwrap_or(0);
                         let label = if unread > 0 {
                             format!("# {ch_id}  ({unread})")
                         } else {
@@ -327,7 +321,11 @@ pub fn draw_adaptive_sidebar(
                         ui.separator();
                         let toggle_label = format!(
                             "{} Hidden Bots ({})",
-                            if ui_state.show_hidden_bots { "▾" } else { "▸" },
+                            if ui_state.show_hidden_bots {
+                                "▾"
+                            } else {
+                                "▸"
+                            },
                             hidden_bots.len()
                         );
                         if ui.small_button(toggle_label).clicked() {
@@ -395,7 +393,7 @@ fn draw_bot_row(
     );
     let shape = BotAvatarShape::from_name(bot["avatar_shape"].as_str().unwrap_or("Circle"));
     let selected = ui_state.active_chat_kind == "dm" && active_bot.as_str() == id;
-    let unread = unread_counts["dms"][&id].as_u64().unwrap_or(0);
+    let unread = unread_counts[format!("dm:{id}")].as_u64().unwrap_or(0);
 
     let (row_rect, resp) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
@@ -508,18 +506,14 @@ fn draw_bot_row(
             ui.close();
         }
         if ui.button("🎨 Customize Shape & Color…").clicked() {
-            ui_state.avatar_shape_draft = bot["avatar_shape"]
-                .as_str()
-                .unwrap_or("Circle")
-                .to_string();
+            ui_state.avatar_shape_draft =
+                bot["avatar_shape"].as_str().unwrap_or("Circle").to_string();
             ui_state.avatar_color_draft = bot["avatar_color"]
                 .as_str()
                 .or_else(|| bot["color"].as_str())
                 .unwrap_or("#2F7CF6")
                 .to_string();
-            ui_state.active_modal = Some(ActiveModal::AvatarPicker {
-                bot_id: id.clone(),
-            });
+            ui_state.active_modal = Some(ActiveModal::AvatarPicker { bot_id: id.clone() });
             ui.close();
         }
         if ui.button("⎘ Duplicate Bot").clicked() {

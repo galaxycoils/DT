@@ -31,14 +31,17 @@ impl BoundedTextureCache {
         Self::default()
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
+    #[cfg(test)]
     pub fn used_bytes(&self) -> usize {
         self.used_bytes
     }
@@ -170,6 +173,10 @@ impl ParsedMarkdownTable {
         out
     }
 
+    pub fn to_slack(&self) -> String {
+        format!("```\n{}\n```", self.to_tsv().replace("```", "ˋˋˋ"))
+    }
+
     pub fn to_csv(&self) -> String {
         fn esc(cell: &str) -> String {
             if cell.contains(',') || cell.contains('"') || cell.contains('\n') {
@@ -178,7 +185,12 @@ impl ParsedMarkdownTable {
                 cell.to_string()
             }
         }
-        let mut out = self.headers.iter().map(|h| esc(h)).collect::<Vec<_>>().join(",");
+        let mut out = self
+            .headers
+            .iter()
+            .map(|h| esc(h))
+            .collect::<Vec<_>>()
+            .join(",");
         for row in &self.rows {
             out.push('\n');
             out.push_str(&row.iter().map(|c| esc(c)).collect::<Vec<_>>().join(","));
@@ -194,7 +206,8 @@ pub struct MemoizedMessageLayout {
     pub width_bucket: u32,
     pub parts: Vec<RenderedPart>,
     pub tables: Vec<ParsedMarkdownTable>,
-    pub estimated_height: f32,
+    content_hash: u64,
+    has_card: bool,
 }
 
 /// Bounded memoized layout cache keyed by `message_id`.
@@ -216,9 +229,16 @@ impl MarkdownLayoutCache {
     ) -> &MemoizedMessageLayout {
         let width_bucket = ((available_width.max(200.0) / 32.0).round() as u32).max(1);
         let content_len = content.len();
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hash);
+        let content_hash = hash.finish();
         let needs_recompute = match self.entries.get(msg_id) {
             Some(existing) => {
-                existing.content_len != content_len || existing.width_bucket != width_bucket
+                existing.content_len != content_len
+                    || existing.width_bucket != width_bucket
+                    || existing.content_hash != content_hash
+                    || existing.has_card != has_card
             }
             None => true,
         };
@@ -226,19 +246,6 @@ impl MarkdownLayoutCache {
         if needs_recompute {
             let parts = parse_message_bubbles(content);
             let tables = extract_markdown_tables(content);
-            let chars_per_line = ((available_width.max(240.0) / 7.5) as usize).max(24);
-            let wrapped_lines: usize = content
-                .lines()
-                .map(|l| (l.chars().count() / chars_per_line) + 1)
-                .sum::<usize>()
-                .max(1);
-            let mut estimated_height = 38.0 + (wrapped_lines.min(18) as f32) * 18.0;
-            if !tables.is_empty() {
-                estimated_height += 72.0;
-            }
-            if has_card {
-                estimated_height += 96.0;
-            }
             if self.entries.len() >= Self::MAX_ENTRIES
                 && let Some(oldest) = self.order.pop_front()
             {
@@ -252,7 +259,8 @@ impl MarkdownLayoutCache {
                     width_bucket,
                     parts,
                     tables,
-                    estimated_height,
+                    content_hash,
+                    has_card,
                 },
             );
         }
@@ -310,4 +318,21 @@ fn split_pipe_row(line: &str) -> Vec<String> {
         .split('|')
         .map(|cell| cell.trim().to_string())
         .collect()
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn same_length_message_edits_invalidate_cached_layout() {
+        let mut cache = MarkdownLayoutCache::default();
+        let first = cache
+            .get_or_compute("id", "First", false, 400.0)
+            .content_hash;
+        let second = cache
+            .get_or_compute("id", "Other", false, 400.0)
+            .content_hash;
+        assert_ne!(first, second);
+        assert!(cache.get_or_compute("id", "Other", true, 400.0).has_card);
+    }
 }

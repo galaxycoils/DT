@@ -5,7 +5,11 @@ use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Shape, Stroke, Vec2}
 
 /// Preset 12-color GrokBot palette (`(name, hex)`).
 pub const BOT_COLOR_PALETTE: &[(&str, &str, Color32)] = &[
-    ("Electric Blue", "#3B82F6", Color32::from_rgb(0x3B, 0x82, 0xF6)),
+    (
+        "Electric Blue",
+        "#3B82F6",
+        Color32::from_rgb(0x3B, 0x82, 0xF6),
+    ),
     ("Violet", "#8B5CF6", Color32::from_rgb(0x8B, 0x5C, 0xF6)),
     ("Emerald", "#10B981", Color32::from_rgb(0x10, 0xB9, 0x81)),
     ("Amber", "#F59E0B", Color32::from_rgb(0xF5, 0x9E, 0x0B)),
@@ -78,6 +82,7 @@ impl BotAvatarShape {
 pub fn parse_hex_color(hex: &str) -> Color32 {
     let clean = hex.trim().trim_start_matches('#');
     if clean.len() == 6
+        && clean.is_ascii()
         && let (Ok(r), Ok(g), Ok(b)) = (
             u8::from_str_radix(&clean[0..2], 16),
             u8::from_str_radix(&clean[2..4], 16),
@@ -109,7 +114,12 @@ pub struct GrokPalette {
 }
 
 impl GrokPalette {
-    pub fn resolve(theme_pref: &str, system_dark: bool, accent_mode: &str, bot_color_hex: &str) -> Self {
+    pub fn resolve(
+        theme_pref: &str,
+        system_dark: bool,
+        accent_mode: &str,
+        bot_color_hex: &str,
+    ) -> Self {
         let dark_mode = match theme_pref.trim().to_ascii_lowercase().as_str() {
             "light" => false,
             "dark" => true,
@@ -274,8 +284,8 @@ pub fn paint_bot_avatar(
             BotAvatarShape::Hex => {
                 let pts: Vec<Pos2> = (0..6)
                     .map(|i| {
-                        let angle = std::f32::consts::FRAC_PI_3 * (i as f32)
-                            - std::f32::consts::FRAC_PI_6;
+                        let angle =
+                            std::f32::consts::FRAC_PI_3 * (i as f32) - std::f32::consts::FRAC_PI_6;
                         Pos2::new(
                             center.x + radius * angle.cos(),
                             center.y + radius * angle.sin(),

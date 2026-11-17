@@ -584,7 +584,8 @@ mod tests {
         assert_eq!(parsed.ui.computer_execution_mode, "ask");
 
         // Legacy JSON missing `ui` must load cleanly with defaults.
-        let legacy: GmConfig = serde_json::from_str(r#"{"storage_dir": "/tmp/legacy-ui"}"#).unwrap();
+        let legacy: GmConfig =
+            serde_json::from_str(r#"{"storage_dir": "/tmp/legacy-ui"}"#).unwrap();
         assert_eq!(legacy.ui.theme, "system");
         assert!(legacy.validate().is_ok());
 

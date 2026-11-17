@@ -30,18 +30,17 @@ pub fn draw_workspace_rail(
                     for sec in WorkspaceSection::ALL {
                         let active = ui_state.section == sec;
                         let label = format!("{} {}", sec.icon(), sec.label());
-                        let btn = egui::Button::new(RichText::new(label).size(12.0).color(
-                            if active {
+                        let btn =
+                            egui::Button::new(RichText::new(label).size(12.0).color(if active {
                                 palette.accent_text
                             } else {
                                 palette.text_secondary
-                            },
-                        ))
-                        .fill(if active {
-                            palette.accent
-                        } else {
-                            Color32::TRANSPARENT
-                        });
+                            }))
+                            .fill(if active {
+                                palette.accent
+                            } else {
+                                Color32::TRANSPARENT
+                            });
                         if ui.add(btn).clicked() {
                             select_section(ui_state, sec, &mut send);
                         }
@@ -217,7 +216,14 @@ fn select_section(
         WorkspaceSection::Feed => send(DaemonRequest::ListActivity),
         WorkspaceSection::Goals => send(DaemonRequest::ListGoals),
         WorkspaceSection::Spaces => send(DaemonRequest::ListSpaces),
-        WorkspaceSection::Audit => send(DaemonRequest::ListQueue { bot_id: None }),
+        WorkspaceSection::Audit => {
+            send(DaemonRequest::ListQueue { bot_id: None });
+            send(DaemonRequest::QueryAudit {
+                category: None,
+                bot_id: None,
+                limit: Some(100),
+            });
+        }
     }
 }
 
@@ -244,8 +250,7 @@ fn rail_icon_button(
     } else {
         palette.text_secondary
     };
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(8), bg);
+    ui.painter().rect_filled(rect, CornerRadius::same(8), bg);
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,

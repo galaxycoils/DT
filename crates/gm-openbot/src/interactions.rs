@@ -68,11 +68,14 @@ pub struct TeachTaskOutcome {
     pub saved_skill_dir: Option<String>,
 }
 
+type PendingSecrets =
+    Arc<AsyncMutex<HashMap<String, oneshot::Sender<Option<Vec<(String, String)>>>>>>;
+
 /// Shared synchronization coordinator for interactive UI requests and Teach Task recording.
 #[derive(Clone, Default)]
 pub struct SharedInteractionState {
     pending_approvals: Arc<AsyncMutex<HashMap<String, oneshot::Sender<bool>>>>,
-    pending_secrets: Arc<AsyncMutex<HashMap<String, oneshot::Sender<Option<Vec<(String, String)>>>>>>,
+    pending_secrets: PendingSecrets,
     pending_questions: Arc<AsyncMutex<HashMap<String, oneshot::Sender<Option<String>>>>>,
     teach_task: Arc<Mutex<Option<TeachTaskSession>>>,
 }
@@ -86,9 +89,7 @@ impl SharedInteractionState {
         Arc::clone(&self.pending_approvals)
     }
 
-    pub fn pending_secrets(
-        &self,
-    ) -> Arc<AsyncMutex<HashMap<String, oneshot::Sender<Option<Vec<(String, String)>>>>>> {
+    pub fn pending_secrets(&self) -> PendingSecrets {
         Arc::clone(&self.pending_secrets)
     }
 
@@ -136,11 +137,7 @@ impl SharedInteractionState {
         }
     }
 
-    pub async fn register_question(
-        &self,
-        request_id: String,
-        tx: oneshot::Sender<Option<String>>,
-    ) {
+    pub async fn register_question(&self, request_id: String, tx: oneshot::Sender<Option<String>>) {
         self.pending_questions.lock().await.insert(request_id, tx);
     }
 
@@ -158,7 +155,9 @@ impl SharedInteractionState {
     pub fn start_teach_task(&self, bot_id: &str) -> Result<TeachTaskSession> {
         let clean_bot = bot_id.trim().to_ascii_lowercase();
         if clean_bot.is_empty() {
-            return Err(GmError::Config("bot_id is required to start Teach Task".into()));
+            return Err(GmError::Config(
+                "bot_id is required to start Teach Task".into(),
+            ));
         }
         let mut guard = self.teach_task.lock();
         if let Some(ref existing) = *guard
@@ -214,9 +213,11 @@ impl SharedInteractionState {
         shared_paths: &MuseRuntimePaths,
         save_skill_name: Option<&str>,
     ) -> Result<TeachTaskOutcome> {
-        let session = self.teach_task.lock().take().ok_or_else(|| {
-            GmError::Config("No active Teach Task recording session".into())
-        })?;
+        let session = self
+            .teach_task
+            .lock()
+            .take()
+            .ok_or_else(|| GmError::Config("No active Teach Task recording session".into()))?;
         let duration_secs = session.started_instant.elapsed().as_secs();
         let scrubber = SecretScrubber::new();
         let mut body = String::new();
@@ -229,36 +230,44 @@ impl SharedInteractionState {
             body.push_str("1. Open target workflow cleanly and verify outcome.\n");
         } else {
             for (idx, step) in session.steps.iter().enumerate() {
-                body.push_str(&format!("{}. {}\n", idx + 1, scrub_teach_text(&scrubber, step)));
+                body.push_str(&format!(
+                    "{}. {}\n",
+                    idx + 1,
+                    scrub_teach_text(&scrubber, step)
+                ));
             }
         }
         body.push_str("\n## Verification\n- Confirm expected output state before finishing.\n");
 
-        let saved_skill_dir = if let Some(raw_name) = save_skill_name
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let clean_name: String = raw_name
-                .to_ascii_lowercase()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
-                .collect();
-            let clean_name = clean_name.trim_matches('-').to_string();
-            let mut reg = SkillRegistry::open_with_scrubber(shared_paths, scrubber)?;
-            let manifest = SkillYaml {
-                name: clean_name.clone(),
-                title: format!("Custom Task: {raw_name}"),
-                description: "Workflow recorded via Teach Task".into(),
-                category: "custom".into(),
-                include_in_prompt: true,
-                skill_improvement: None,
-                amends: None,
+        let saved_skill_dir =
+            if let Some(raw_name) = save_skill_name.map(str::trim).filter(|s| !s.is_empty()) {
+                let clean_name: String = raw_name
+                    .to_ascii_lowercase()
+                    .chars()
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '-' {
+                            c
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+                let clean_name = clean_name.trim_matches('-').to_string();
+                let mut reg = SkillRegistry::open_with_scrubber(shared_paths, scrubber)?;
+                let manifest = SkillYaml {
+                    name: clean_name.clone(),
+                    title: format!("Custom Task: {raw_name}"),
+                    description: "Workflow recorded via Teach Task".into(),
+                    category: "custom".into(),
+                    include_in_prompt: true,
+                    skill_improvement: None,
+                    amends: None,
+                };
+                let dir = reg.scaffold_custom_skill(manifest, &body)?;
+                Some(dir.to_string_lossy().to_string())
+            } else {
+                None
             };
-            let dir = reg.scaffold_custom_skill(manifest, &body)?;
-            Some(dir.to_string_lossy().to_string())
-        } else {
-            None
-        };
 
         Ok(TeachTaskOutcome {
             bot_id: session.bot_id,
@@ -321,7 +330,10 @@ pub fn apply_and_save_ui_settings(
     if let Some(v) = patch.get("allow_host_desktop").and_then(|v| v.as_bool()) {
         next.safety.allow_host_desktop = v;
     }
-    if let Some(v) = patch.get("allow_secret_injection").and_then(|v| v.as_bool()) {
+    if let Some(v) = patch
+        .get("allow_secret_injection")
+        .and_then(|v| v.as_bool())
+    {
         next.safety.allow_secret_injection = v;
     }
     if let Some(b) = patch.get("budget").and_then(|v| v.as_object()) {
@@ -351,10 +363,16 @@ pub fn apply_and_save_ui_settings(
         if let Some(v) = p.get("xai_model").and_then(|v| v.as_str()) {
             next.providers.xai_model = v.trim().to_string();
         }
-        if let Some(v) = p.get("allow_screenshot_egress_meta").and_then(|v| v.as_bool()) {
+        if let Some(v) = p
+            .get("allow_screenshot_egress_meta")
+            .and_then(|v| v.as_bool())
+        {
             next.providers.allow_screenshot_egress_meta = v;
         }
-        if let Some(v) = p.get("allow_screenshot_egress_xai").and_then(|v| v.as_bool()) {
+        if let Some(v) = p
+            .get("allow_screenshot_egress_xai")
+            .and_then(|v| v.as_bool())
+        {
             next.providers.allow_screenshot_egress_xai = v;
         }
     }
@@ -368,9 +386,11 @@ pub fn apply_and_save_ui_settings(
     sup.set_allow_host_desktop(next.safety.allow_host_desktop);
     *shared_config.write() = next.clone();
 
-    let _ = sup.daemon_event_sender().send(DaemonEvent::ActivityUpdated {
-        reason: "ui_settings_updated".into(),
-    });
+    let _ = sup
+        .daemon_event_sender()
+        .send(DaemonEvent::ActivityUpdated {
+            reason: "ui_settings_updated".into(),
+        });
     sup.emit_agui(
         "UI_SETTINGS_UPDATED",
         "ui",
@@ -469,8 +489,9 @@ pub async fn probe_custom_connector(
             let exists = if cmd.contains('/') || cmd.contains('\\') {
                 Path::new(cmd).is_file()
             } else {
-                std::env::var_os("PATH")
-                    .is_some_and(|paths| std::env::split_paths(&paths).any(|p| p.join(cmd).is_file()))
+                std::env::var_os("PATH").is_some_and(|paths| {
+                    std::env::split_paths(&paths).any(|p| p.join(cmd).is_file())
+                })
             };
             Ok(serde_json::json!({
                 "ok": exists,
@@ -517,7 +538,9 @@ mod tests {
         state
             .record_teach_step("Entered token ghp_123456789012345678901234567890123456")
             .unwrap();
-        let out = state.stop_teach_task(&paths, Some("my-recorded-flow")).unwrap();
+        let out = state
+            .stop_teach_task(&paths, Some("my-recorded-flow"))
+            .unwrap();
         assert!(!out.draft_markdown.contains("ghp_1234567890"));
         assert!(out.saved_skill_dir.is_some());
     }

@@ -289,7 +289,14 @@ mod tests {
         // Updating existing rule still works
         let first_id = store.list_rules().unwrap()[0].id.clone();
         store
-            .upsert_rule(Some(&first_id), RuleMode::Allow, "git *", None, "read git", true)
+            .upsert_rule(
+                Some(&first_id),
+                RuleMode::Allow,
+                "git *",
+                None,
+                "read git",
+                true,
+            )
             .unwrap();
 
         // 1001 char pattern rejected

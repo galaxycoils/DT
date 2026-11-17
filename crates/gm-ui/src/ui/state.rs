@@ -46,6 +46,58 @@ impl WorkspaceSection {
     }
 }
 
+/// In-memory navigation; visiting after Back discards the forward branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavTarget {
+    pub section: WorkspaceSection,
+    pub chat_kind: String,
+    pub target_id: String,
+}
+
+#[derive(Default)]
+pub struct NavHistory {
+    entries: Vec<NavTarget>,
+    cursor: usize,
+}
+
+impl NavHistory {
+    pub fn push(&mut self, target: NavTarget) {
+        if self.entries.get(self.cursor) == Some(&target) {
+            return;
+        }
+        self.entries.truncate(if self.entries.is_empty() {
+            0
+        } else {
+            self.cursor + 1
+        });
+        self.entries.push(target);
+        if self.entries.len() > 100 {
+            self.entries.remove(0);
+        }
+        self.cursor = self.entries.len() - 1;
+    }
+    pub fn can_back(&self) -> bool {
+        !self.entries.is_empty() && self.cursor > 0
+    }
+    pub fn can_forward(&self) -> bool {
+        self.cursor + 1 < self.entries.len()
+    }
+    pub fn back(&mut self) -> Option<NavTarget> {
+        if !self.can_back() {
+            return None;
+        }
+        self.cursor -= 1;
+        self.entries.get(self.cursor).cloned()
+    }
+    pub fn forward(&mut self) -> Option<NavTarget> {
+        if !self.can_forward() {
+            return None;
+        }
+        self.cursor += 1;
+        self.entries.get(self.cursor).cloned()
+    }
+}
+
 /// Adaptive Bot Sidebar layout mode computed from visible bot count (or user override).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarMode {
@@ -151,6 +203,7 @@ pub enum ActiveModal {
     ConnectApps,
     CreateBot,
     CreateChannel,
+    RoutineEditor,
     AvatarPicker {
         bot_id: String,
     },
@@ -192,17 +245,18 @@ pub struct ReplyBanner {
     pub snippet: String,
 }
 
+type SecretCardFields = (Vec<(String, Zeroizing<String>)>, bool);
+
 /// Transient interactive state for all 14 inline cards (keyed by `request_id` or `message_id`).
 #[derive(Default)]
 pub struct InlineCardUiState {
     /// Approval card: whether `"Always allow"` / custom rule input is checked, plus pattern draft.
     pub approval_remember: HashMap<String, (bool, String)>,
     /// Secret prompt card: zeroized field values `request_id -> Vec<(field_key, Zeroizing<String>)>` + `save_to_vault`.
-    pub secret_fields: HashMap<String, (Vec<(String, Zeroizing<String>)>, bool)>,
+    pub secret_fields: HashMap<String, SecretCardFields>,
     /// Clarifying question card: selected option labels + `"Other"` freeform text.
     pub question_answers: HashMap<String, (Vec<String>, String)>,
     /// Expanded file diff / output cards (`request_id -> expanded`).
-    pub expanded_cards: HashMap<String, bool>,
     /// Take-the-wheel handoff resume notes (`task_id -> note`).
     pub wheel_notes: HashMap<String, String>,
 }
@@ -222,6 +276,8 @@ impl InlineCardUiState {
 /// Complete GrokBot UI state held on `NativeApp`.
 pub struct GrokUiState {
     pub section: WorkspaceSection,
+    pub nav_history: NavHistory,
+    pub nav_request: i8,
     pub sidebar_manual_override: Option<bool>,
     pub show_hidden_bots: bool,
     pub sidebar_search: String,
@@ -249,6 +305,7 @@ pub struct GrokUiState {
 
     // Smart composer state
     pub last_auto_arrow_pos: Option<usize>,
+    pub ime_composing: bool,
     pub voice_active: bool,
     pub dictation_active: bool,
     pub pending_attachments: Vec<String>,
@@ -260,12 +317,13 @@ pub struct GrokUiState {
     pub template_export_name: String,
     pub template_export_desc: String,
     pub template_import_json: String,
-    pub template_preview: Option<Value>,
     pub custom_skill_name: String,
     pub custom_skill_title: String,
     pub custom_skill_desc: String,
     pub custom_skill_body: String,
     pub new_section_name: String,
+    pub routine_draft: Value,
+    pub bot_profile_draft: Option<(String, Value)>,
 
     // Settings modal drafts
     pub theme_pref: String,
@@ -274,7 +332,6 @@ pub struct GrokUiState {
     pub sleep_prevention: bool,
     pub wake_at_login: bool,
     pub hardware_security_keys: bool,
-    pub voice_provider: String,
     pub rule_mode_draft: String,
     pub rule_pattern_draft: String,
     pub rule_desc_draft: String,
@@ -290,6 +347,9 @@ pub struct GrokUiState {
     pub connector_name_draft: String,
     pub connector_kind_draft: String,
     pub connector_endpoint_draft: String,
+    pub connector_args_draft: String,
+    pub connector_header_draft: String,
+    pub connector_account_draft: String,
     pub connector_secret_draft: Zeroizing<String>,
 
     // Teach a Task state
@@ -321,6 +381,8 @@ impl Default for GrokUiState {
     fn default() -> Self {
         Self {
             section: WorkspaceSection::Bots,
+            nav_history: NavHistory::default(),
+            nav_request: 0,
             sidebar_manual_override: None,
             show_hidden_bots: false,
             sidebar_search: String::new(),
@@ -341,6 +403,7 @@ impl Default for GrokUiState {
             search_bar_open: false,
             search_older_tier2: false,
             last_auto_arrow_pos: None,
+            ime_composing: false,
             voice_active: false,
             dictation_active: false,
             pending_attachments: Vec::new(),
@@ -350,19 +413,19 @@ impl Default for GrokUiState {
             template_export_name: "My GrokBot Team".into(),
             template_export_desc: "Portable multi-bot team template".into(),
             template_import_json: String::new(),
-            template_preview: None,
             custom_skill_name: String::new(),
             custom_skill_title: String::new(),
             custom_skill_desc: String::new(),
             custom_skill_body: String::new(),
             new_section_name: String::new(),
+            routine_draft: Value::Null,
+            bot_profile_draft: None,
             theme_pref: "dark".into(),
             accent_mode: "bot_color".into(),
             execution_mode: "ask".into(),
             sleep_prevention: false,
             wake_at_login: false,
             hardware_security_keys: false,
-            voice_provider: "xai_realtime".into(),
             rule_mode_draft: "allow".into(),
             rule_pattern_draft: String::new(),
             rule_desc_draft: String::new(),
@@ -374,8 +437,11 @@ impl Default for GrokUiState {
             vault_csv_draft: String::new(),
             revealed_secrets: HashMap::new(),
             connector_name_draft: String::new(),
-            connector_kind_draft: "RemoteHttps".into(),
+            connector_kind_draft: "remote_https".into(),
             connector_endpoint_draft: String::new(),
+            connector_args_draft: "[]".into(),
+            connector_header_draft: "Authorization".into(),
+            connector_account_draft: String::new(),
             connector_secret_draft: Zeroizing::new(String::new()),
             teach_active: false,
             teach_step_draft: String::new(),
@@ -421,6 +487,15 @@ impl GrokUiState {
 
         // Tier 2: Modals
         if self.active_modal.is_some() {
+            use zeroize::Zeroize;
+            self.vault_secret_draft.zeroize();
+            self.connector_secret_draft.zeroize();
+            self.vault_csv_draft.zeroize();
+            for secret in self.revealed_secrets.values_mut() {
+                secret.zeroize();
+            }
+            self.revealed_secrets.clear();
+            self.cards.secret_fields.clear();
             self.active_modal = None;
             return true;
         }
@@ -486,27 +561,133 @@ pub fn apply_smart_composer_edit(
         }
         // Case B: caller invoked undo before deleting '→' at `pos`
         let arrow_len = '→'.len_utf8();
-        if pos + arrow_len <= draft.len() && &draft[pos..pos + arrow_len] == "->" {
+        if pos + arrow_len <= draft.len() && draft.get(pos..pos + arrow_len) == Some("->") {
             *last_auto_arrow_pos = None;
-        } else if pos + arrow_len <= draft.len() && &draft[pos..pos + arrow_len] == "→" {
+        } else if pos + arrow_len <= draft.len() && draft.get(pos..pos + arrow_len) == Some("→") {
             draft.replace_range(pos..pos + arrow_len, "->");
             *last_auto_arrow_pos = None;
             return true;
         }
     }
 
-    if let Some(idx) = draft.find("->") {
-        draft.replace_range(idx..idx + 2, "→");
-        *last_auto_arrow_pos = Some(idx);
-        return true;
+    // Backtick runs delimit inline and fenced code; only equal runs close a span.
+    let bytes = draft.as_bytes();
+    let mut code_ticks = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == b'`' {
+                i += 1;
+            }
+            let count = i - start;
+            if code_ticks == 0 {
+                code_ticks = count;
+            } else if code_ticks == count {
+                code_ticks = 0;
+            }
+            continue;
+        }
+        if code_ticks == 0 && bytes[i..].starts_with(b"->") {
+            draft.replace_range(i..i + 2, "→");
+            *last_auto_arrow_pos = Some(i);
+            return true;
+        }
+        i += 1;
     }
-
     if !backspace_pressed
         && let Some(pos) = *last_auto_arrow_pos
-        && !draft[pos.min(draft.len())..].starts_with('→')
+        && !draft.get(pos..).is_some_and(|s| s.starts_with('→'))
     {
         *last_auto_arrow_pos = None;
     }
 
     false
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+
+    #[test]
+    fn arrows_preserve_inline_fenced_and_unicode_code() {
+        for code in [
+            "`->`",
+            "```rust\nfn f() -> u8 {}\n```",
+            "`` ` -> ``",
+            "`é->`",
+            "```\n->",
+        ] {
+            let mut draft = format!("{code} then ->");
+            let mut position = None;
+            let changed = apply_smart_composer_edit(&mut draft, false, false, &mut position);
+            if code == "```\n->" {
+                assert!(!changed);
+            } else {
+                assert!(changed);
+                assert_eq!(draft, format!("{code} then →"));
+                assert!(apply_smart_composer_edit(
+                    &mut draft,
+                    false,
+                    true,
+                    &mut position
+                ));
+                assert_eq!(draft, format!("{code} then ->"));
+            }
+        }
+        let mut draft = "é".to_string();
+        assert!(!apply_smart_composer_edit(
+            &mut draft,
+            false,
+            false,
+            &mut Some(1)
+        ));
+    }
+
+    #[test]
+    fn escape_zeroizes_modal_secrets_but_preserves_layer_priority() {
+        let mut state = GrokUiState {
+            active_modal: Some(ActiveModal::Settings),
+            mention_popup_open: true,
+            vault_secret_draft: Zeroizing::new("vault secret".into()),
+            connector_secret_draft: Zeroizing::new("connector secret".into()),
+            vault_csv_draft: "password export".into(),
+            ..Default::default()
+        };
+        state
+            .revealed_secrets
+            .insert("id".into(), "revealed".into());
+        assert!(state.dismiss_escape_layer());
+        assert!(state.active_modal.is_some());
+        assert!(state.dismiss_escape_layer());
+        assert!(state.vault_secret_draft.is_empty());
+        assert!(state.connector_secret_draft.is_empty());
+        assert!(state.vault_csv_draft.is_empty());
+        assert!(state.revealed_secrets.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+    #[test]
+    fn navigation_branches_and_duplicate_visits() {
+        let target = |id: &str| NavTarget {
+            section: WorkspaceSection::Bots,
+            chat_kind: "dm".into(),
+            target_id: id.into(),
+        };
+        let mut history = NavHistory::default();
+        history.push(target("muse"));
+        history.push(target("muse"));
+        assert!(!history.can_back());
+        history.push(target("coder"));
+        assert_eq!(history.back(), Some(target("muse")));
+        assert!(history.can_forward());
+        assert_eq!(history.forward(), Some(target("coder")));
+        history.back();
+        history.push(target("researcher"));
+        assert!(!history.can_forward());
+        assert_eq!(history.back(), Some(target("muse")));
+    }
 }

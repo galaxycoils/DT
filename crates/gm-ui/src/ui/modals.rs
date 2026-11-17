@@ -12,10 +12,14 @@ use crate::ui::state::{ActiveModal, GrokUiState, SettingsPane, WorkspaceSection}
 use crate::ui::theme::{
     BOT_COLOR_PALETTE, BotAvatarShape, GrokPalette, paint_bot_avatar, parse_hex_color,
 };
+use base64::Engine;
 use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Sense, Vec2};
 use gm_core::config::GmConfig;
 use gm_core::ipc::DaemonRequest;
 use serde_json::Value;
+
+type PaletteAction = Box<dyn FnOnce(&mut GrokUiState, &mut String, &mut dyn FnMut(DaemonRequest))>;
+type PaletteEntry = (String, String, PaletteAction);
 
 #[allow(clippy::too_many_arguments)]
 pub fn draw_active_modal(
@@ -67,7 +71,7 @@ pub fn draw_active_modal(
                     ui.separator();
 
                     let q = ui_state.command_palette_query.trim().to_ascii_lowercase();
-                    let mut actions: Vec<(String, String, Box<dyn FnOnce(&mut GrokUiState, &mut String, &mut dyn FnMut(DaemonRequest))>)> = Vec::new();
+                    let mut actions: Vec<PaletteEntry> = Vec::new();
 
                     for b in bots {
                         if let Some(id) = b["id"].as_str() {
@@ -160,26 +164,27 @@ pub fn draw_active_modal(
                         }),
                     ));
 
-                    let mut triggered: Option<Box<dyn FnOnce(&mut GrokUiState, &mut String, &mut dyn FnMut(DaemonRequest))>> = None;
-                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                        for (label, cat, cb) in actions {
-                            if !q.is_empty() && !label.to_ascii_lowercase().contains(&q) {
-                                continue;
-                            }
-                            ui.horizontal(|ui| {
-                                if ui.button(&label).clicked() {
-                                    triggered = Some(cb);
+                    let mut triggered: Option<PaletteAction> = None;
+                    egui::ScrollArea::vertical()
+                        .max_height(320.0)
+                        .show(ui, |ui| {
+                            for (label, cat, cb) in actions {
+                                if !q.is_empty() && !label.to_ascii_lowercase().contains(&q) {
+                                    continue;
                                 }
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    ui.small(RichText::new(cat).color(palette.text_muted));
+                                ui.horizontal(|ui| {
+                                    if ui.button(&label).clicked() {
+                                        triggered = Some(cb);
+                                    }
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.small(RichText::new(cat).color(palette.text_muted));
+                                    });
                                 });
-                            });
-                        }
-                    });
+                            }
+                        });
                     if let Some(cb) = triggered {
                         ui_state.active_modal = None;
                         cb(ui_state, active_bot, &mut send);
-                        return;
                     }
                 });
         }
@@ -296,6 +301,11 @@ pub fn draw_active_modal(
                                 });
 
                                 ui.separator();
+                                ui.strong("Performance");
+                                if ui.checkbox(&mut settings_config.ui.hardware_acceleration, "Use hardware acceleration").changed() {
+                                    send(DaemonRequest::SaveUiSettings { ui: serde_json::json!({"hardware_acceleration": settings_config.ui.hardware_acceleration}) });
+                                    *settings_notice = "Restart required to apply graphics backend change".into();
+                                }
                                 ui.strong("Runtime Preferences");
                                 let mut ui_dirty = false;
                                 ui_dirty |= ui
@@ -360,7 +370,7 @@ pub fn draw_active_modal(
                                 ui.horizontal(|ui| {
                                     for (val, lbl) in [
                                         ("always", "Autonomous (within safety tier)"),
-                                        ("ask_first", "Ask First"),
+                                        ("ask", "Ask First"),
                                         ("never", "Never Control Desktop"),
                                     ] {
                                         if ui
@@ -800,6 +810,15 @@ pub fn draw_active_modal(
 
                             "routines" => {
                                 ui.strong(format!("Scheduled Routines ({})", routines.len()));
+                                if ui.button("＋ New Routine").clicked() {
+                                    ui_state.routine_draft = serde_json::json!({
+                                        "id": uuid::Uuid::new_v4().to_string(), "name": "New Routine",
+                                        "bot_id": active_bot, "channel_id": null, "instruction": "",
+                                        "timezone": "UTC", "hour": 9, "minute": 0, "weekdays": [],
+                                        "enabled": true,
+                                    });
+                                    ui_state.active_modal = Some(ActiveModal::RoutineEditor);
+                                }
                                 for st in routines {
                                     let r = &st["routine"];
                                     let rid = r["id"].as_str().unwrap_or("");
@@ -808,6 +827,10 @@ pub fn draw_active_modal(
                                     ui.group(|ui| {
                                         ui.horizontal(|ui| {
                                             ui.strong(format!("{rname} (@{bot_id})"));
+                                            if ui.small_button("Edit").clicked() {
+                                                ui_state.routine_draft = r.clone();
+                                                ui_state.active_modal = Some(ActiveModal::RoutineEditor);
+                                            }
                                             if ui.small_button("▶ Test Now").clicked() {
                                                 send(DaemonRequest::TriggerRoutineTest {
                                                     routine_id: rid.to_string(),
@@ -875,7 +898,33 @@ pub fn draw_active_modal(
                 .open(&mut keep_open)
                 .default_width(580.0)
                 .show(ctx, |ui| {
-                    ui.strong("Add Custom MCP or Webhook Connector");
+                    ui.collapsing("Built-in Integrations", |ui| {
+                        if let Some(integrations) = connectors_data["integrations"].as_array() {
+                            for app in integrations {
+                                ui.group(|ui| {
+                                    ui.strong(app["name"].as_str().unwrap_or("Integration"));
+                                    ui.label(app["status"].as_str().unwrap_or("Setup required"));
+                                    ui.small(app["account_summary"].as_str().unwrap_or_default());
+                                    ui.small(app["setup_hint"].as_str().unwrap_or("Setup / Connect bridge required"));
+                                });
+                            }
+                        }
+                    });
+                    if ui.button("Skills Library & Studio").clicked() { ui_state.studio_tab = "skills".into(); ui_state.active_modal = Some(ActiveModal::Studio); }
+                    ui.strong("Add Custom MCP Connector");
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut ui_state.connector_kind_draft, "remote_https".into(), "Remote HTTPS");
+                        ui.selectable_value(&mut ui_state.connector_kind_draft, "stdio_command".into(), "Stdio Command");
+                    });
+                    ui.label("Arguments (JSON array)");
+                    ui.text_edit_singleline(&mut ui_state.connector_args_draft);
+                    ui.label("Account label");
+                    ui.text_edit_singleline(&mut ui_state.connector_account_draft);
+                    ui.label("Auth header");
+                    ui.text_edit_singleline(&mut ui_state.connector_header_draft);
+                    ui.add(egui::TextEdit::singleline(&mut *ui_state.connector_secret_draft).password(true).hint_text("Secret (OS Keychain)"));
+                    let args = serde_json::from_str::<Vec<String>>(&ui_state.connector_args_draft);
+                    if args.is_err() { ui.colored_label(palette.status_danger, "Arguments must be a JSON string array"); }
                     ui.horizontal(|ui| {
                         ui.add(
                             egui::TextEdit::singleline(&mut ui_state.connector_name_draft)
@@ -889,7 +938,7 @@ pub fn draw_active_modal(
                         );
                         if ui
                             .add_enabled(
-                                !ui_state.connector_name_draft.trim().is_empty()
+                                args.is_ok() && !ui_state.connector_name_draft.trim().is_empty()
                                     && !ui_state.connector_endpoint_draft.trim().is_empty(),
                                 egui::Button::new("＋ Add"),
                             )
@@ -899,12 +948,18 @@ pub fn draw_active_modal(
                                 op: "upsert".into(),
                                 connector: Some(serde_json::json!({
                                     "name": ui_state.connector_name_draft.trim(),
-                                    "kind": ui_state.connector_kind_draft,
-                                    "endpoint_url": ui_state.connector_endpoint_draft.trim(),
+                                    "transport": ui_state.connector_kind_draft,
+                                    "url_or_command": ui_state.connector_endpoint_draft.trim(),
+                                    "args": args.as_ref().ok(), "bot_ids": [],
+                                    "auth_header_name": ui_state.connector_header_draft,
+                                    "auth_secret": if ui_state.connector_secret_draft.is_empty() { None } else { Some(ui_state.connector_secret_draft.as_str()) },
+                                    "account_label": ui_state.connector_account_draft,
                                     "enabled": true,
                                 })),
                                 id: None,
                             });
+                            use zeroize::Zeroize;
+                            ui_state.connector_secret_draft.zeroize();
                             ui_state.connector_name_draft.clear();
                             ui_state.connector_endpoint_draft.clear();
                         }
@@ -918,7 +973,7 @@ pub fn draw_active_modal(
                     for c in &conns {
                         let cid = c["id"].as_str().unwrap_or("");
                         let cname = c["name"].as_str().unwrap_or(cid);
-                        let url = c["endpoint_url"].as_str().unwrap_or("");
+                        let url = c["url_or_command"].as_str().unwrap_or("");
                         ui.horizontal(|ui| {
                             ui.strong(cname);
                             ui.small(url);
@@ -952,9 +1007,7 @@ pub fn draw_active_modal(
                     ui.horizontal(|ui| {
                         let (rect, _) =
                             ui.allocate_exact_size(Vec2::new(48.0, 48.0), Sense::hover());
-                        let tex = textures
-                            .get(&format!("avatar:{bot_id}"))
-                            .map(|(t, _)| t);
+                        let tex = textures.get(&format!("avatar:{bot_id}")).map(|(t, _)| t);
                         paint_bot_avatar(
                             ui.painter(),
                             rect,
@@ -990,12 +1043,31 @@ pub fn draw_active_modal(
                         }
                     });
                     ui.separator();
+                    ui.label("Custom image path (PNG, JPEG, WebP; ≤25 MB)");
+                    ui.text_edit_singleline(&mut ui_state.avatar_upload_path);
+                    if ui.button("Upload Image").clicked() {
+                        let path = std::path::Path::new(&ui_state.avatar_upload_path);
+                        let result = (|| -> std::result::Result<(), String> {
+                            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+                            use std::io::Read;
+                            let mut bytes = Vec::new();
+                            file.take(25 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+                            if bytes.len() > 25 * 1024 * 1024 { return Err("Avatar exceeds 25 MB".into()); }
+                            let format = image::guess_format(&bytes).map_err(|e| e.to_string())?;
+                            let extension = match format { image::ImageFormat::Png => "png", image::ImageFormat::Jpeg => "jpg", image::ImageFormat::WebP => "webp", _ => return Err("Use PNG, JPEG or WebP".into()) };
+                            send(DaemonRequest::ManageSystem { op: "set_bot_avatar".into(), payload: serde_json::json!({"bot_id": bot_id, "extension": extension, "bytes_base64": base64::engine::general_purpose::STANDARD.encode(&bytes)}) });
+                            Ok(())
+                        })();
+                        *settings_notice = result.err().unwrap_or_else(|| "Avatar upload requested".into());
+                    }
                     ui.strong("12 Preset GrokBot Colors");
                     ui.horizontal_wrapped(|ui| {
                         for (name, hex, col) in BOT_COLOR_PALETTE {
-                            let btn = egui::Button::new(RichText::new(*name).size(11.0).color(Color32::WHITE))
-                                .fill(*col)
-                                .corner_radius(CornerRadius::same(6));
+                            let btn = egui::Button::new(
+                                RichText::new(*name).size(11.0).color(Color32::WHITE),
+                            )
+                            .fill(*col)
+                            .corner_radius(CornerRadius::same(6));
                             if ui.add(btn).clicked() {
                                 ui_state.avatar_color_draft = (*hex).to_string();
                             }
@@ -1099,7 +1171,75 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::RoutineEditor => {
-            keep_open = false;
+            egui::Window::new("Routine Editor")
+                .open(&mut keep_open)
+                .default_width(440.0)
+                .show(ctx, |ui| {
+                    let draft = &mut ui_state.routine_draft;
+                    for (key, label) in [
+                        ("name", "Name"),
+                        ("bot_id", "Bot"),
+                        ("timezone", "Timezone (IANA)"),
+                        ("instruction", "Instruction"),
+                    ] {
+                        ui.label(label);
+                        let mut text = draft[key].as_str().unwrap_or_default().to_string();
+                        let response = if key == "instruction" {
+                            ui.text_edit_multiline(&mut text)
+                        } else {
+                            ui.text_edit_singleline(&mut text)
+                        };
+                        if response.changed() {
+                            draft[key] = Value::String(text);
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        for (key, max) in [("hour", 23), ("minute", 59)] {
+                            let mut number = draft[key].as_u64().unwrap_or(0);
+                            ui.label(key);
+                            if ui
+                                .add(egui::DragValue::new(&mut number).range(0..=max))
+                                .changed()
+                            {
+                                draft[key] = number.into();
+                            }
+                        }
+                    });
+                    let mut days = draft["weekdays"].as_array().cloned().unwrap_or_default();
+                    ui.horizontal_wrapped(|ui| {
+                        for (day, label) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let value = Value::from(day);
+                            let mut selected = days.contains(&value);
+                            if ui.checkbox(&mut selected, label).changed() {
+                                days.retain(|d| d != &value);
+                                if selected {
+                                    days.push(value);
+                                }
+                            }
+                        }
+                    });
+                    draft["weekdays"] = days.into();
+                    ui.small("No weekdays selected means every day.");
+                    let mut enabled = draft["enabled"].as_bool().unwrap_or(true);
+                    if ui.checkbox(&mut enabled, "Enabled").changed() {
+                        draft["enabled"] = enabled.into();
+                    }
+                    let valid = ["name", "bot_id", "instruction", "timezone"]
+                        .iter()
+                        .all(|key| draft[key].as_str().is_some_and(|s| !s.trim().is_empty()));
+                    if ui
+                        .add_enabled(valid, egui::Button::new("Save Routine"))
+                        .clicked()
+                    {
+                        send(DaemonRequest::SaveRoutine {
+                            routine: draft.clone(),
+                        });
+                        close_requested = true;
+                    }
+                });
         }
 
         ActiveModal::Lightbox { title, uri, mime } => {
@@ -1164,6 +1304,14 @@ pub fn draw_active_modal(
     }
 
     if !keep_open || close_requested {
+        use zeroize::Zeroize;
+        ui_state.vault_secret_draft.zeroize();
+        ui_state.connector_secret_draft.zeroize();
+        ui_state.vault_csv_draft.zeroize();
+        for secret in ui_state.revealed_secrets.values_mut() {
+            secret.zeroize();
+        }
+        ui_state.revealed_secrets.clear();
         ui_state.active_modal = None;
     }
 }

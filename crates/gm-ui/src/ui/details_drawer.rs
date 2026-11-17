@@ -135,8 +135,10 @@ pub fn draw_bot_details_drawer(
                     BotDetailsTab::Settings => {
                         if let Some(bot) = bots.iter().find(|b| b["id"].as_str() == Some(active_bot))
                         {
-                            let mut draft_profile = bot.clone();
-                            let mut changed = false;
+                            if ui_state.bot_profile_draft.as_ref().map(|(id, _)| id.as_str()) != Some(active_bot) {
+                                ui_state.bot_profile_draft = Some((active_bot.to_string(), bot.clone()));
+                            }
+                            let draft_profile = &mut ui_state.bot_profile_draft.as_mut().expect("initialized above").1;
                             ui.label("Display Name");
                             let mut name = draft_profile["display_name"]
                                 .as_str()
@@ -144,7 +146,6 @@ pub fn draw_bot_details_drawer(
                                 .to_string();
                             if ui.text_edit_singleline(&mut name).changed() {
                                 draft_profile["display_name"] = Value::String(name);
-                                changed = true;
                             }
                             ui.label("Role Title");
                             let mut role = draft_profile["role_title"]
@@ -153,7 +154,6 @@ pub fn draw_bot_details_drawer(
                                 .to_string();
                             if ui.text_edit_singleline(&mut role).changed() {
                                 draft_profile["role_title"] = Value::String(role);
-                                changed = true;
                             }
                             ui.label("System Instructions");
                             let mut prompt = draft_profile["system_prompt"]
@@ -169,7 +169,6 @@ pub fn draw_bot_details_drawer(
                                 .changed()
                             {
                                 draft_profile["system_prompt"] = Value::String(prompt);
-                                changed = true;
                             }
                             for (key, label) in [
                                 ("allow_gui", "Allow Desktop GUI Control"),
@@ -179,14 +178,30 @@ pub fn draw_bot_details_drawer(
                                 let mut flag = draft_profile[key].as_bool().unwrap_or(false);
                                 if ui.checkbox(&mut flag, label).changed() {
                                     draft_profile[key] = Value::Bool(flag);
-                                    changed = true;
                                 }
                             }
-                            if changed {
-                                send(DaemonRequest::SaveBot {
-                                    profile: draft_profile,
-                                });
+                            for (key, label) in [("preferred_provider", "Provider"), ("preferred_model", "Model")] {
+                                ui.label(label);
+                                let mut text = draft_profile[key].as_str().unwrap_or_default().to_string();
+                                if ui.text_edit_singleline(&mut text).changed() {
+                                    draft_profile[key] = if text.is_empty() { Value::Null } else { Value::String(text) };
+                                }
                             }
+                            for (key, label) in [("notifications_enabled", "Notifications"), ("drafts_enabled", "Drafts enabled")] {
+                                let mut flag = draft_profile[key].as_bool().unwrap_or(false);
+                                if ui.checkbox(&mut flag, label).changed() { draft_profile[key] = Value::Bool(flag); }
+                            }
+                            let mut mode = draft_profile["task_mode_default"].as_str().unwrap_or("chat").to_string();
+                            ui.horizontal(|ui| {
+                                ui.label("Default mode");
+                                ui.selectable_value(&mut mode, "chat".into(), "Chat");
+                                ui.selectable_value(&mut mode, "queue".into(), "Queue");
+                            });
+                            draft_profile["task_mode_default"] = mode.into();
+                            if ui.button("Save Changes").clicked() {
+                                send(DaemonRequest::SaveBot { profile: draft_profile.clone() });
+                            }
+                            if ui.button("Discard Changes").clicked() { *draft_profile = bot.clone(); }
                             ui.add_space(6.0);
                             if ui.button("🎨 Customize Avatar, Shape & Color…").clicked() {
                                 ui_state.open_avatar_picker(active_bot, bot);
@@ -401,8 +416,11 @@ pub fn draw_bot_details_drawer(
                             for (flt, lbl) in [
                                 ("all", "All"),
                                 ("pinned", "Pinned"),
-                                ("outputs", "Outputs"),
-                                ("uploads", "Uploads"),
+                                ("pages", "Pages"),
+                                ("media", "Media"),
+                                ("links", "Links"),
+                                ("files", "Files"),
+                                ("apps", "Apps"),
                             ] {
                                 let active = ui_state.library_filter == flt;
                                 if ui.selectable_label(active, lbl).clicked() {
@@ -504,10 +522,7 @@ pub fn draw_bot_details_drawer(
 
 impl GrokUiState {
     pub fn open_avatar_picker(&mut self, bot_id: &str, bot: &Value) {
-        self.avatar_shape_draft = bot["avatar_shape"]
-            .as_str()
-            .unwrap_or("Circle")
-            .to_string();
+        self.avatar_shape_draft = bot["avatar_shape"].as_str().unwrap_or("Circle").to_string();
         self.avatar_color_draft = bot["avatar_color"]
             .as_str()
             .or_else(|| bot["color"].as_str())

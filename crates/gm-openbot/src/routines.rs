@@ -201,7 +201,10 @@ impl DurableTaskQueue {
         let rows = self
             .conn
             .lock()
-            .execute("DELETE FROM routines_v1 WHERE id = ?1", params![routine_id.trim()])
+            .execute(
+                "DELETE FROM routines_v1 WHERE id = ?1",
+                params![routine_id.trim()],
+            )
             .map_err(error)?;
         Ok(rows > 0)
     }
@@ -613,12 +616,12 @@ impl OpenBotSupervisor {
             }
             if let Some(id) = self.queue().fire_routine(&routine, now)? {
                 count += 1;
-                let _ = self
-                    .daemon_event_sender()
-                    .send(gm_core::ipc::DaemonEvent::RoutineUpdated {
-                        routine_id: Some(routine.id.clone()),
-                        bot_id: Some(routine.bot_id.clone()),
-                    });
+                let _ =
+                    self.daemon_event_sender()
+                        .send(gm_core::ipc::DaemonEvent::RoutineUpdated {
+                            routine_id: Some(routine.id.clone()),
+                            bot_id: Some(routine.bot_id.clone()),
+                        });
                 self.emit_agui(
                     "ROUTINE_QUEUED",
                     id,

@@ -309,9 +309,7 @@ impl gm_agent::InteractionHandler for DaemonApprovalHandler {
                 self.update_dm_card_status(
                     &request_id,
                     status,
-                    answer
-                        .as_ref()
-                        .map(|a| serde_json::json!({ "answer": a })),
+                    answer.as_ref().map(|a| serde_json::json!({ "answer": a })),
                 );
                 Ok(answer)
             }
@@ -451,10 +449,7 @@ impl DaemonControlServer {
         self
     }
 
-    pub fn with_interactions(
-        mut self,
-        interactions: gm_openbot::SharedInteractionState,
-    ) -> Self {
+    pub fn with_interactions(mut self, interactions: gm_openbot::SharedInteractionState) -> Self {
         self.interactions = interactions;
         self
     }
@@ -2466,22 +2461,16 @@ impl DaemonControlServerState {
                                 let mode = gm_openbot::RuleMode::parse(
                                     r.get("mode").and_then(|v| v.as_str()).unwrap_or("allow"),
                                 )?;
-                                let pattern = r
-                                    .get("pattern")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
+                                let pattern =
+                                    r.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
                                 let scope_bot_id = r
                                     .get("scope_bot_id")
                                     .and_then(|v| v.as_str())
                                     .filter(|s| !s.trim().is_empty() && *s != "all");
-                                let description = r
-                                    .get("description")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let enabled = r
-                                    .get("enabled")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
+                                let description =
+                                    r.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                                let enabled =
+                                    r.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
                                 let saved = sup.rules().upsert_rule(
                                     rule_id,
                                     mode,
@@ -2852,10 +2841,9 @@ impl DaemonControlServerState {
                             .openbot
                             .as_ref()
                             .ok_or_else(|| GmError::Config("Task runtime is unavailable".into()))?;
-                        let outcome = self.interactions.stop_teach_task(
-                            &sup.shared_paths(),
-                            save_skill_name.as_deref(),
-                        )?;
+                        let outcome = self
+                            .interactions
+                            .stop_teach_task(&sup.shared_paths(), save_skill_name.as_deref())?;
                         Ok::<_, GmError>(serde_json::to_value(outcome)?)
                     })();
                     let payload = match result {
@@ -2900,40 +2888,38 @@ impl DaemonControlServerState {
                     bot_id,
                     limit,
                 } => {
-                    let result = (|| {
-                        match category.as_deref() {
-                            Some("report_weekly") => {
-                                let rep = self.audit_log.generate_report(
-                                    gm_safety::AuditPeriod::Weekly,
-                                    chrono::Utc::now(),
-                                );
-                                Ok::<_, GmError>(serde_json::to_value(rep)?)
-                            }
-                            Some("report_monthly") => {
-                                let rep = self.audit_log.generate_report(
-                                    gm_safety::AuditPeriod::Monthly,
-                                    chrono::Utc::now(),
-                                );
-                                Ok::<_, GmError>(serde_json::to_value(rep)?)
-                            }
-                            other => {
-                                let cat = match other {
-                                    Some("permitted") => Some(gm_safety::AuditCategory::Permitted),
-                                    Some("refused") | Some("blocked") => {
-                                        Some(gm_safety::AuditCategory::Refused)
-                                    }
-                                    Some("failed") | Some("escalated") => {
-                                        Some(gm_safety::AuditCategory::Failed)
-                                    }
-                                    _ => None,
-                                };
-                                let entries = self.audit_log.query_governance_entries(
-                                    cat,
-                                    bot_id.as_deref(),
-                                    limit.unwrap_or(100),
-                                );
-                                Ok::<_, GmError>(serde_json::to_value(entries)?)
-                            }
+                    let result = (|| match category.as_deref() {
+                        Some("report_weekly") => {
+                            let rep = self.audit_log.generate_report(
+                                gm_safety::AuditPeriod::Weekly,
+                                chrono::Utc::now(),
+                            );
+                            Ok::<_, GmError>(serde_json::to_value(rep)?)
+                        }
+                        Some("report_monthly") => {
+                            let rep = self.audit_log.generate_report(
+                                gm_safety::AuditPeriod::Monthly,
+                                chrono::Utc::now(),
+                            );
+                            Ok::<_, GmError>(serde_json::to_value(rep)?)
+                        }
+                        other => {
+                            let cat = match other {
+                                Some("permitted") => Some(gm_safety::AuditCategory::Permitted),
+                                Some("refused") | Some("blocked") => {
+                                    Some(gm_safety::AuditCategory::Refused)
+                                }
+                                Some("failed") | Some("escalated") => {
+                                    Some(gm_safety::AuditCategory::Failed)
+                                }
+                                _ => None,
+                            };
+                            let entries = self.audit_log.query_governance_entries(
+                                cat,
+                                bot_id.as_deref(),
+                                limit.unwrap_or(100),
+                            );
+                            Ok::<_, GmError>(serde_json::to_value(entries)?)
                         }
                     })();
                     let payload = match result {
@@ -3043,8 +3029,7 @@ impl DaemonControlServerState {
                                     .as_deref()
                                     .or_else(|| p.get("name").and_then(|v| v.as_str()))
                                     .unwrap_or("");
-                                let note =
-                                    p.get("note").and_then(|v| v.as_str()).unwrap_or("");
+                                let note = p.get("note").and_then(|v| v.as_str()).unwrap_or("");
                                 let reg = sup.skill_registry()?;
                                 let path = reg.append_amendment(
                                     gm_muse::skills::AmendmentTarget::Skill,
@@ -3126,8 +3111,7 @@ impl DaemonControlServerState {
                                     .get("relative_path")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("index.html");
-                                let file_path =
-                                    sup.spaces().resolve_asset_file(&slug, rel_path)?;
+                                let file_path = sup.spaces().resolve_asset_file(&slug, rel_path)?;
                                 let pair = gm_muse::shared_files::SharedFileStore::global()
                                     .read_text_with_sha256(&file_path)?;
                                 let (content, sha256) = pair.unwrap_or_default();
@@ -3143,10 +3127,8 @@ impl DaemonControlServerState {
                                     .get("relative_path")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("index.html");
-                                let content = p
-                                    .get("content")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
+                                let content =
+                                    p.get("content").and_then(|v| v.as_str()).unwrap_or("");
                                 let path =
                                     sup.spaces().update_space_file(&slug, rel_path, content)?;
                                 let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
@@ -3159,10 +3141,8 @@ impl DaemonControlServerState {
                                 }))
                             }
                             "publish" => {
-                                let confirmed = p
-                                    .get("confirmed")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
+                                let confirmed =
+                                    p.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(true);
                                 let space = sup.spaces().publish_space(&slug, confirmed)?;
                                 let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
                                     reason: "space_published".into(),
@@ -3177,10 +3157,8 @@ impl DaemonControlServerState {
                                 Ok::<_, GmError>(serde_json::to_value(space)?)
                             }
                             "delete" => {
-                                let confirmed = p
-                                    .get("confirmed")
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(true);
+                                let confirmed =
+                                    p.get("confirmed").and_then(|v| v.as_bool()).unwrap_or(true);
                                 let deleted = sup.spaces().delete_space(&slug, confirmed)?;
                                 let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
                                     reason: "space_deleted".into(),
@@ -3214,8 +3192,7 @@ impl DaemonControlServerState {
                     let result = if let Some(ref sup) = self.openbot {
                         match op_lower.as_str() {
                             "prompt" => (|| {
-                                let prompt =
-                                    p.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                                let prompt = p.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
                                 sup.feed_store().set_brief_prompt(prompt)?;
                                 Ok::<_, GmError>(serde_json::json!({
                                     "brief_prompt": sup.feed_store().get_brief_prompt()?,
@@ -3228,7 +3205,10 @@ impl DaemonControlServerState {
                                     .filter(|s| !s.trim().is_empty())
                                     .map(ToString::to_string)
                                     .unwrap_or_else(|| {
-                                        format!("post-{}", &uuid::Uuid::new_v4().simple().to_string()[..10])
+                                        format!(
+                                            "post-{}",
+                                            &uuid::Uuid::new_v4().simple().to_string()[..10]
+                                        )
                                     });
                                 let kicker = p
                                     .get("kicker")
@@ -3279,8 +3259,7 @@ impl DaemonControlServerState {
                                 }))
                             })(),
                             "ideas" => {
-                                let default_bot =
-                                    sup.config().openbot.default_bot_id.clone();
+                                let default_bot = sup.config().openbot.default_bot_id.clone();
                                 let memory = sup.roster().memory_store(&default_bot)?;
                                 let mut ideas = gm_goals::generate_ideas_with_llm(
                                     Option::<&gm_platform::MockPlatform>::None,
@@ -3293,8 +3272,9 @@ impl DaemonControlServerState {
                                     .shared_paths()
                                     .storage_dir()
                                     .join("workspace/custom_ideas.json");
-                                if let Some((raw, _)) = gm_muse::shared_files::SharedFileStore::global()
-                                    .read_text_with_sha256(&custom_path)?
+                                if let Some((raw, _)) =
+                                    gm_muse::shared_files::SharedFileStore::global()
+                                        .read_text_with_sha256(&custom_path)?
                                     && let Ok(custom) =
                                         serde_json::from_str::<Vec<gm_goals::ProactiveIdea>>(&raw)
                                 {
@@ -3442,10 +3422,8 @@ impl DaemonControlServerState {
                             let cfg_snap = self.shared_config.read().clone();
                             let dir = cfg_snap.storage_dir.join("feedback");
                             std::fs::create_dir_all(&dir)?;
-                            let id = format!(
-                                "fb-{}",
-                                &uuid::Uuid::new_v4().simple().to_string()[..10]
-                            );
+                            let id =
+                                format!("fb-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
                             let path = dir.join(format!("{id}.json"));
                             let entry = serde_json::json!({
                                 "id": id,
@@ -3523,10 +3501,8 @@ impl DaemonControlServerState {
                             let tpl: gm_openbot::TeamTemplate = serde_json::from_value(
                                 p.get("template").cloned().unwrap_or_else(|| p.clone()),
                             )?;
-                            let overwrite = p
-                                .get("overwrite")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true);
+                            let overwrite =
+                                p.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(true);
                             let summary = gm_openbot::import_team(sup, &tpl, overwrite)?;
                             let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
                                 reason: "template_imported".into(),
@@ -3537,8 +3513,7 @@ impl DaemonControlServerState {
                             let sup = self.openbot.as_ref().ok_or_else(|| {
                                 GmError::Config("Task runtime is unavailable".into())
                             })?;
-                            let bot_id =
-                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let bot_id = p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
                             let removed = sup.roster().remove_bot(bot_id)?;
                             let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
                                 reason: "bot_deleted".into(),
@@ -3560,7 +3535,8 @@ impl DaemonControlServerState {
                             let new_id = p.get("new_id").and_then(|v| v.as_str());
                             let new_name = p.get("new_name").and_then(|v| v.as_str());
                             let dup =
-                                sup.roster().duplicate_bot(source_bot_id, new_id, new_name)?;
+                                sup.roster()
+                                    .duplicate_bot(source_bot_id, new_id, new_name)?;
                             let val = serde_json::to_value(&dup)?;
                             let _ = self.event_tx.send(DaemonEvent::BotUpdated {
                                 bot_id: dup.id.clone(),
@@ -3572,16 +3548,9 @@ impl DaemonControlServerState {
                             let sup = self.openbot.as_ref().ok_or_else(|| {
                                 GmError::Config("Task runtime is unavailable".into())
                             })?;
-                            let bot_id =
-                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
-                            let b64 = p
-                                .get("bytes_base64")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
-                            let ext = p
-                                .get("extension")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("png");
+                            let bot_id = p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let b64 = p.get("bytes_base64").and_then(|v| v.as_str()).unwrap_or("");
+                            let ext = p.get("extension").and_then(|v| v.as_str()).unwrap_or("png");
                             use base64::Engine as _;
                             let bytes = base64::engine::general_purpose::STANDARD
                                 .decode(b64.trim())
@@ -3606,8 +3575,7 @@ impl DaemonControlServerState {
                             let sup = self.openbot.as_ref().ok_or_else(|| {
                                 GmError::Config("Task runtime is unavailable".into())
                             })?;
-                            let bot_id =
-                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
+                            let bot_id = p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("");
                             use base64::Engine as _;
                             if let Some((asset, bytes)) =
                                 sup.roster().read_bot_avatar_bytes(bot_id)?
@@ -3676,13 +3644,9 @@ impl DaemonControlServerState {
                             let sup = self.openbot.as_ref().ok_or_else(|| {
                                 GmError::Config("Task runtime is unavailable".into())
                             })?;
-                            let bot_id =
-                                p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("muse");
+                            let bot_id = p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("muse");
                             let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                            let pinned = p
-                                .get("pinned")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(true);
+                            let pinned = p.get("pinned").and_then(|v| v.as_bool()).unwrap_or(true);
                             let updated = sup.library().set_pinned(bot_id, id, pinned)?;
                             Ok::<_, GmError>(serde_json::json!({
                                 "bot_id": bot_id,
@@ -3695,14 +3659,10 @@ impl DaemonControlServerState {
                             let raw_step = if let Some(s) = p.get("step").and_then(|v| v.as_str()) {
                                 s.to_string()
                             } else {
-                                let action = p
-                                    .get("action")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("click");
-                                let target =
-                                    p.get("target").and_then(|v| v.as_str()).unwrap_or("");
-                                let detail =
-                                    p.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                                let action =
+                                    p.get("action").and_then(|v| v.as_str()).unwrap_or("click");
+                                let target = p.get("target").and_then(|v| v.as_str()).unwrap_or("");
+                                let detail = p.get("detail").and_then(|v| v.as_str()).unwrap_or("");
                                 format!("{action} {target} {detail}").trim().to_string()
                             };
                             self.interactions.record_teach_step(&raw_step)?;

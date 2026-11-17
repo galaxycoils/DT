@@ -2696,7 +2696,10 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
         config.budget.clone(),
         &config.storage_dir,
     )?);
-    let llm = Arc::new(HybridLlmClient::new(build_llm_backend(&secrets), Arc::clone(&budget)));
+    let llm = Arc::new(HybridLlmClient::new(
+        build_llm_backend(&secrets),
+        Arc::clone(&budget),
+    ));
     let router = LlmRouter::new(config.providers.clone());
     let kill_switch = KillSwitch::new();
     let platform = Arc::new(IpcPlatformClient::new(&config.socket_path));

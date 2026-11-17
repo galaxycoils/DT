@@ -256,7 +256,9 @@ impl VaultStore {
             FROM vault_items_v1 ORDER BY kind ASC, is_default_payment DESC, updated_at DESC
             "#
         };
-        let mut stmt = conn.prepare(sql).map_err(|e| GmError::Platform(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| GmError::Platform(e.to_string()))?;
         let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<VaultItemRecord> {
             let kind_str: String = r.get(1)?;
             let kind = VaultItemKind::parse(&kind_str).unwrap_or(VaultItemKind::Login);
@@ -292,7 +294,9 @@ impl VaultStore {
     pub fn upsert_item(&self, input: VaultItemInput) -> Result<VaultItemRecord> {
         let label = input.label.trim();
         if label.is_empty() || label.len() > 256 {
-            return Err(GmError::Config("Vault label must be 1-256 characters".into()));
+            return Err(GmError::Config(
+                "Vault label must be 1-256 characters".into(),
+            ));
         }
         let id = match input.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(existing) => existing.to_string(),
@@ -341,7 +345,10 @@ impl VaultStore {
         }
 
         if input.is_default_payment
-            && matches!(input.kind, VaultItemKind::Card | VaultItemKind::PaymentMethod)
+            && matches!(
+                input.kind,
+                VaultItemKind::Card | VaultItemKind::PaymentMethod
+            )
         {
             let _ = conn.execute(
                 "UPDATE vault_items_v1 SET is_default_payment = 0 WHERE kind IN ('card', 'payment_method')",
@@ -480,7 +487,10 @@ impl VaultStore {
         let rows = self
             .conn
             .lock()
-            .execute("DELETE FROM vault_items_v1 WHERE id = ?1", params![id.trim()])
+            .execute(
+                "DELETE FROM vault_items_v1 WHERE id = ?1",
+                params![id.trim()],
+            )
             .map_err(|e| GmError::Platform(e.to_string()))?;
         Ok(rows > 0)
     }
@@ -535,7 +545,9 @@ impl VaultStore {
 
         for (idx, row) in rows.iter().skip(1).enumerate() {
             if idx >= MAX_VAULT_CSV_ROWS {
-                warnings.push(format!("Truncated CSV import after {MAX_VAULT_CSV_ROWS} rows"));
+                warnings.push(format!(
+                    "Truncated CSV import after {MAX_VAULT_CSV_ROWS} rows"
+                ));
                 break;
             }
             let get = |col: Option<usize>| -> String {
@@ -605,7 +617,9 @@ fn detect_csv_format(headers: &[String]) -> String {
         "Bitwarden".into()
     } else if joined.contains("httprealm") || joined.contains("formactionorigin") {
         "Firefox".into()
-    } else if joined.contains("otpauth") || joined.contains("notes") && joined.contains("url") && joined.contains("title") {
+    } else if joined.contains("otpauth")
+        || joined.contains("notes") && joined.contains("url") && joined.contains("title")
+    {
         "Safari / Apple Passwords".into()
     } else if joined.contains("grouping") || joined.contains("extra") || joined.contains("totp") {
         "LastPass / 1Password".into()
@@ -682,7 +696,9 @@ fn parse_rfc4180_csv(input: &str, max_rows: usize) -> Result<Vec<Vec<String>>> {
         }
     }
     if in_quotes {
-        return Err(GmError::Config("Malformed CSV: unclosed quoted field".into()));
+        return Err(GmError::Config(
+            "Malformed CSV: unclosed quoted field".into(),
+        ));
     }
     if !field.is_empty() || !row.is_empty() {
         row.push(field);
@@ -718,7 +734,12 @@ mod tests {
             })
             .unwrap();
         assert!(item.has_secret);
-        assert!(item.secret_ref.as_deref().unwrap().starts_with("secret://keychain/"));
+        assert!(
+            item.secret_ref
+                .as_deref()
+                .unwrap()
+                .starts_with("secret://keychain/")
+        );
 
         // Verify hardware security key enforcement
         assert!(vault.reveal_secret(&item.id, true, false).is_err());
@@ -731,7 +752,11 @@ mod tests {
         let sqlite_bytes = std::fs::read(&db).unwrap();
         let sqlite_lossy = String::from_utf8_lossy(&sqlite_bytes);
         assert!(!sqlite_lossy.contains("ghp_UltraSecret999"));
-        assert!(!serde_json::to_string(&item).unwrap().contains("ghp_UltraSecret999"));
+        assert!(
+            !serde_json::to_string(&item)
+                .unwrap()
+                .contains("ghp_UltraSecret999")
+        );
 
         // Test CSV import (1Password/Chrome mixed style with quoted comma notes)
         let csv = "\u{feff}name,url,username,password,note\n\
@@ -751,7 +776,10 @@ mod tests {
         );
 
         // Verify > 5 MiB CSV rejected
-        let huge = format!("name,url,username,password\n{}", "a".repeat(MAX_VAULT_CSV_BYTES + 10));
+        let huge = format!(
+            "name,url,username,password\n{}",
+            "a".repeat(MAX_VAULT_CSV_BYTES + 10)
+        );
         assert!(vault.import_csv(&huge, None).is_err());
     }
 }

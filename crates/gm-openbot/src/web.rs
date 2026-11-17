@@ -1129,26 +1129,25 @@ async fn post_message_reaction(
     check_auth(&headers, state.bearer_token.as_deref())?;
     let actor = body.actor.as_deref().unwrap_or("operator");
     let explicit_kind = body.chat_kind.as_deref().map(str::trim);
-    let outcome = match explicit_kind {
-        Some(k) if k.eq_ignore_ascii_case("dm") => {
-            state
-                .supervisor
-                .toggle_message_reaction("dm", &id, &body.emoji, actor)
-        }
-        Some(k) if k.eq_ignore_ascii_case("channel") => {
-            state
-                .supervisor
-                .toggle_message_reaction("channel", &id, &body.emoji, actor)
-        }
-        _ => state
-            .supervisor
-            .toggle_message_reaction("channel", &id, &body.emoji, actor)
-            .or_else(|_| {
+    let outcome =
+        match explicit_kind {
+            Some(k) if k.eq_ignore_ascii_case("dm") => {
                 state
                     .supervisor
                     .toggle_message_reaction("dm", &id, &body.emoji, actor)
-            }),
-    };
+            }
+            Some(k) if k.eq_ignore_ascii_case("channel") => state
+                .supervisor
+                .toggle_message_reaction("channel", &id, &body.emoji, actor),
+            _ => state
+                .supervisor
+                .toggle_message_reaction("channel", &id, &body.emoji, actor)
+                .or_else(|_| {
+                    state
+                        .supervisor
+                        .toggle_message_reaction("dm", &id, &body.emoji, actor)
+                }),
+        };
     let (chat_id, reactions) = outcome.map_err(|err| {
         let msg = err.to_string();
         if msg.contains("Unknown ") || msg.contains("not found") {
@@ -2339,16 +2338,16 @@ async fn delete_bot_route(
     let _ = state
         .supervisor
         .daemon_event_sender()
-        .send(DaemonEvent::BotUpdated {
-            bot_id: id.clone(),
-        });
+        .send(DaemonEvent::BotUpdated { bot_id: id.clone() });
     state.supervisor.emit_agui(
         "BOT_DELETED",
         &id,
         &id,
         serde_json::json!({ "bot_id": id, "deleted": deleted }),
     );
-    Ok(Json(serde_json::json!({ "bot_id": id, "deleted": deleted })))
+    Ok(Json(
+        serde_json::json!({ "bot_id": id, "deleted": deleted }),
+    ))
 }
 
 async fn duplicate_bot_route(
@@ -2422,7 +2421,10 @@ async fn get_bot_avatar_route(
         .read_bot_avatar_bytes(&id)
         .map_err(map_gm_error)?
     else {
-        return Err(ApiErr::msg(StatusCode::NOT_FOUND, "Bot has no custom avatar"));
+        return Err(ApiErr::msg(
+            StatusCode::NOT_FOUND,
+            "Bot has no custom avatar",
+        ));
     };
     let lower = asset.to_ascii_lowercase();
     let mime = if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
@@ -2468,9 +2470,7 @@ async fn post_bot_avatar_route(
     let _ = state
         .supervisor
         .daemon_event_sender()
-        .send(DaemonEvent::BotUpdated {
-            bot_id: id.clone(),
-        });
+        .send(DaemonEvent::BotUpdated { bot_id: id.clone() });
     state
         .supervisor
         .emit_agui("BOT_UPDATED", &id, &id, val.clone());
@@ -2954,9 +2954,7 @@ async fn patch_channel_route(
         .send(DaemonEvent::ActivityUpdated {
             reason: "channel_updated".into(),
         });
-    state
-        .supervisor
-        .emit_agui("CHANNEL_UPDATED", &id, "", val);
+    state.supervisor.emit_agui("CHANNEL_UPDATED", &id, "", val);
     Ok(Json(chan))
 }
 
@@ -2982,10 +2980,14 @@ async fn respond_approval_route(
         } else {
             crate::rules::RuleMode::AskFirst
         };
-        let _ = state
-            .supervisor
-            .rules()
-            .upsert_rule(None, mode, pattern, None, "Saved from approval card", true);
+        let _ = state.supervisor.rules().upsert_rule(
+            None,
+            mode,
+            pattern,
+            None,
+            "Saved from approval card",
+            true,
+        );
     }
     let resolved = state.interactions.resolve_approval(&id, approved).await;
     update_web_dm_card_status(
@@ -3076,26 +3078,37 @@ async fn submit_secret_prompt_route(
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default();
             let secret_val = fields.last().map(|(_, v)| v.clone());
-            if let Ok(saved) = state.supervisor.vault().upsert_item(crate::vault::VaultItemInput {
-                id: None,
-                kind: crate::vault::VaultItemKind::Login,
-                label,
-                subtitle_or_last4: domain.clone(),
-                username,
-                domain,
-                hint: String::new(),
-                secret_value: secret_val,
-                external_secret_ref: None,
-                is_default_payment: false,
-                bot_scope: Some(bot_id.to_string()),
-            }) {
+            if let Ok(saved) = state
+                .supervisor
+                .vault()
+                .upsert_item(crate::vault::VaultItemInput {
+                    id: None,
+                    kind: crate::vault::VaultItemKind::Login,
+                    label,
+                    subtitle_or_last4: domain.clone(),
+                    username,
+                    domain,
+                    hint: String::new(),
+                    secret_value: secret_val,
+                    external_secret_ref: None,
+                    is_default_payment: false,
+                    bot_scope: Some(bot_id.to_string()),
+                })
+            {
                 vault_item_id = Some(saved.id);
             }
         }
     }
     let resolved = state
         .interactions
-        .resolve_secret(&id, if cancelled || fields.is_empty() { None } else { Some(fields) })
+        .resolve_secret(
+            &id,
+            if cancelled || fields.is_empty() {
+                None
+            } else {
+                Some(fields)
+            },
+        )
         .await;
     update_web_dm_card_status(
         &state.supervisor,
@@ -3157,8 +3170,14 @@ async fn respond_question_route(
     update_web_dm_card_status(
         &state.supervisor,
         &id,
-        if combined.is_some() { "answered" } else { "dismissed" },
-        combined.as_ref().map(|a| serde_json::json!({ "answer": a })),
+        if combined.is_some() {
+            "answered"
+        } else {
+            "dismissed"
+        },
+        combined
+            .as_ref()
+            .map(|a| serde_json::json!({ "answer": a })),
     );
     Ok(Json(serde_json::json!({
         "request_id": id,
@@ -3206,7 +3225,10 @@ async fn upsert_rule_route(
         .get("description")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let rule = state
         .supervisor
         .rules()
@@ -3258,9 +3280,7 @@ async fn upsert_vault_route(
             .filter(|s| !s.trim().is_empty())
             .map(ToString::to_string);
         let kind = crate::vault::VaultItemKind::parse(
-            body.get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("login"),
+            body.get("kind").and_then(|v| v.as_str()).unwrap_or("login"),
         )
         .map_err(map_gm_error)?;
         let label = body
@@ -3456,9 +3476,7 @@ async fn upsert_routine_route(
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(ToString::to_string)
-        .unwrap_or_else(|| {
-            format!("rtn-{}", &uuid::Uuid::new_v4().simple().to_string()[..8])
-        });
+        .unwrap_or_else(|| format!("rtn-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]));
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
@@ -3485,14 +3503,8 @@ async fn upsert_routine_route(
         .filter(|s| !s.trim().is_empty())
         .unwrap_or("UTC")
         .to_string();
-    let hour = body
-        .get("hour")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(9) as u32;
-    let minute = body
-        .get("minute")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    let hour = body.get("hour").and_then(|v| v.as_u64()).unwrap_or(9) as u32;
+    let minute = body.get("minute").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let weekdays: Vec<u32> = body
         .get("weekdays")
         .and_then(|v| v.as_array())
@@ -3514,7 +3526,10 @@ async fn upsert_routine_route(
         .and_then(|v| v.as_str())
         .filter(|s| !s.trim().is_empty())
         .map(ToString::to_string);
-    let enabled = body.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let enabled = body
+        .get("enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     let routine = crate::routines::Routine {
         id,
         name,
@@ -3543,10 +3558,7 @@ async fn delete_routine_route(
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let deleted = state
-        .supervisor
-        .delete_routine(&id)
-        .map_err(map_gm_error)?;
+    let deleted = state.supervisor.delete_routine(&id).map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({ "id": id, "deleted": deleted })))
 }
 
@@ -3883,10 +3895,7 @@ async fn put_space_file_route(
         .or_else(|| body.get("path"))
         .and_then(|v| v.as_str())
         .unwrap_or("index.html");
-    let content = body
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let path = state
         .supervisor
         .spaces()
@@ -3922,7 +3931,9 @@ async fn delete_space_route(
         .send(DaemonEvent::ActivityUpdated {
             reason: "space_deleted".into(),
         });
-    Ok(Json(serde_json::json!({ "slug": slug, "deleted": deleted })))
+    Ok(Json(
+        serde_json::json!({ "slug": slug, "deleted": deleted }),
+    ))
 }
 
 async fn delete_custom_skill_route(
@@ -3950,7 +3961,9 @@ async fn delete_custom_skill_route(
     } else {
         false
     };
-    Ok(Json(serde_json::json!({ "name": clean, "deleted": deleted })))
+    Ok(Json(
+        serde_json::json!({ "name": clean, "deleted": deleted }),
+    ))
 }
 
 async fn amend_skill_route(
@@ -4023,11 +4036,14 @@ async fn import_template_route(
         .or_else(|| body.get("template"))
         .and_then(|v| v.as_str())
     {
-        serde_json::from_str(s)
-            .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, e.to_string()))?
+        serde_json::from_str(s).map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, e.to_string()))?
     } else {
-        serde_json::from_value(body.get("template").cloned().unwrap_or_else(|| body.clone()))
-            .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, e.to_string()))?
+        serde_json::from_value(
+            body.get("template")
+                .cloned()
+                .unwrap_or_else(|| body.clone()),
+        )
+        .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, e.to_string()))?
     };
     let overwrite = body
         .get("overwrite")
@@ -4156,10 +4172,7 @@ async fn system_provider_key_route(
     if api_key.is_empty() {
         let _ = state.supervisor.vault().backend().delete_secret(&key_name);
     } else {
-        state
-            .supervisor
-            .scrubber()
-            .register(&key_name, api_key);
+        state.supervisor.scrubber().register(&key_name, api_key);
         state
             .supervisor
             .vault()
@@ -4225,10 +4238,7 @@ async fn system_feedback_route(
     let dir = cfg.storage_dir.join("feedback");
     std::fs::create_dir_all(&dir)
         .map_err(|e| ApiErr::msg(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    let id = format!(
-        "fb-{}",
-        &uuid::Uuid::new_v4().simple().to_string()[..10]
-    );
+    let id = format!("fb-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
     let path = dir.join(format!("{id}.json"));
     let entry = serde_json::json!({
         "id": id,
@@ -4254,6 +4264,90 @@ mod tests {
     use gm_core::config::GmConfig;
     use gm_safety::AuditLogger;
     use tokio::sync::broadcast;
+
+    #[test]
+    fn companion_assets_preserve_budget_and_security_contracts() {
+        assert!(COMPANION_UI_CSS.len() + COMPANION_UI_JS.len() < 45 * 1024);
+        assert!(!COMPANION_UI_JS.contains("setInterval"));
+        assert!(!COMPANION_UI_JS.contains("innerHTML"));
+        assert!(!COMPANION_UI_JS.contains("localStorage"));
+        assert!(COMPANION_UI_JS.contains("/api/bootstrap"));
+        assert!(COMPANION_UI_JS.contains("/ag-ui/events"));
+        assert!(COMPANION_UI_JS.contains("Authorization"));
+        assert!(COMPANION_UI_HTML.contains("id=\"space-iframe\""));
+        assert!(COMPANION_UI_HTML.contains("sandbox=\"allow-scripts\""));
+    }
+
+    #[tokio::test]
+    async fn companion_assets_and_authenticated_sse_delivery() {
+        let (comp_addr, _spaces_addr, sup, comp_handle, spaces_handle, _dir) =
+            spawn_test_servers().await;
+        let client = reqwest::Client::new();
+        let base = format!("http://{comp_addr}");
+        for (path, mime) in [
+            ("/companion.css", "text/css"),
+            ("/companion.js", "javascript"),
+        ] {
+            let response = client.get(format!("{base}{path}")).send().await.unwrap();
+            assert_eq!(response.status(), 200);
+            assert!(
+                response.headers()["content-type"]
+                    .to_str()
+                    .unwrap()
+                    .contains(mime)
+            );
+            assert!(
+                response.headers()["content-security-policy"]
+                    .to_str()
+                    .unwrap()
+                    .contains("frame-ancestors 'none'")
+            );
+        }
+        for path in ["/api/bootstrap", "/ag-ui/events"] {
+            assert_eq!(
+                client
+                    .get(format!("{base}{path}"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .status(),
+                401
+            );
+        }
+        let mut response = client
+            .get(format!("{base}/ag-ui/events"))
+            .bearer_auth("secret-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(
+            response.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .contains("text/event-stream")
+        );
+        sup.emit_agui(
+            "BOT_UPDATED",
+            "muse",
+            "muse",
+            serde_json::json!({"id":"muse"}),
+        );
+        let mut received = String::new();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while let Some(chunk) = response.chunk().await.unwrap() {
+                received.push_str(&String::from_utf8_lossy(&chunk));
+                if received.contains("BOT_UPDATED") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("SSE must deliver the pushed update");
+        assert!(received.contains("BOT_UPDATED"));
+        comp_handle.abort();
+        spaces_handle.abort();
+    }
 
     async fn spawn_test_servers() -> (
         SocketAddr,

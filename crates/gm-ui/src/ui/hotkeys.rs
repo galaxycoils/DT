@@ -31,6 +31,22 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
         return outcome;
     }
 
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::N)) {
+        ui_state.active_modal = Some(ActiveModal::CreateBot);
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
+        ui_state.sidebar_manual_override = Some(!ui_state.sidebar_manual_override.unwrap_or(false));
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F)) {
+        ui_state.sidebar_manual_override = Some(true);
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::OpenBracket)) {
+        ui_state.nav_request = -1;
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::CloseBracket)) {
+        ui_state.nav_request = 1;
+    }
+
     // Cmd/Ctrl + K -> Command Palette
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::K)) {
         ui_state.active_modal = if ui_state.active_modal == Some(ActiveModal::CommandPalette) {
@@ -55,10 +71,10 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
 
     // Cmd/Ctrl + Shift + M -> Studio Modal
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::M)) {
-        ui_state.active_modal = if ui_state.active_modal == Some(ActiveModal::Studio) {
+        ui_state.active_modal = if ui_state.active_modal == Some(ActiveModal::ConnectApps) {
             None
         } else {
-            Some(ActiveModal::Studio)
+            Some(ActiveModal::ConnectApps)
         };
         return outcome;
     }

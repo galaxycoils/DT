@@ -152,8 +152,10 @@ impl LibraryStore {
         let mut all = Vec::new();
 
         // 1. Pages (Static Spaces)
-        if matches!(filter, LibraryFilter::All | LibraryFilter::Pinned | LibraryFilter::Pages)
-            && let Ok(space_list) = spaces.list_spaces()
+        if matches!(
+            filter,
+            LibraryFilter::All | LibraryFilter::Pinned | LibraryFilter::Pages
+        ) && let Ok(space_list) = spaces.list_spaces()
         {
             for s in space_list {
                 let id = format!("page:{}", s.slug);
@@ -174,8 +176,10 @@ impl LibraryStore {
         }
 
         // 2. Files (Bot sandbox shared files in inbox/ & outbox/)
-        if matches!(filter, LibraryFilter::All | LibraryFilter::Pinned | LibraryFilter::Files)
-            && let Ok(sandbox) = roster.workspace_sandbox(bot_id)
+        if matches!(
+            filter,
+            LibraryFilter::All | LibraryFilter::Pinned | LibraryFilter::Files
+        ) && let Ok(sandbox) = roster.workspace_sandbox(bot_id)
             && let Ok(files) = sandbox.shared_files()
         {
             for (f, _size) in files {
@@ -199,13 +203,21 @@ impl LibraryStore {
         // 3. Links & Media extracted from recent DM messages
         if matches!(
             filter,
-            LibraryFilter::All | LibraryFilter::Pinned | LibraryFilter::Media | LibraryFilter::Links
+            LibraryFilter::All
+                | LibraryFilter::Pinned
+                | LibraryFilter::Media
+                | LibraryFilter::Links
         ) && let Ok(msgs) = direct_chat.collect_urls_and_media_for_bot(bot_id, 250)
         {
             let mut seen_urls = BTreeSet::new();
             for (_msg_id, content, ts) in msgs {
                 for token in content.split_whitespace() {
-                    let trimmed = token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.' | ';' | '"' | '\''));
+                    let trimmed = token.trim_matches(|c: char| {
+                        matches!(
+                            c,
+                            '(' | ')' | '[' | ']' | '<' | '>' | ',' | '.' | ';' | '"' | '\''
+                        )
+                    });
                     if let Some(rel) = trimmed.strip_prefix("sandbox://")
                         && seen_urls.insert(trimmed.to_string())
                     {
@@ -253,7 +265,10 @@ impl LibraryStore {
         }
 
         // 4. Apps / Connectors
-        if matches!(filter, LibraryFilter::All | LibraryFilter::Pinned | LibraryFilter::Apps) {
+        if matches!(
+            filter,
+            LibraryFilter::All | LibraryFilter::Pinned | LibraryFilter::Apps
+        ) {
             if let Ok(custom) = connectors.list_connectors() {
                 for c in custom {
                     if c.bot_ids.is_empty() || c.bot_ids.iter().any(|b| b == bot_id) {

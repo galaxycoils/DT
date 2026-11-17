@@ -29,7 +29,9 @@ impl ConnectorTransport {
 
     pub fn parse(raw: &str) -> Result<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "remote_https" | "remotehttps" | "https" | "http" => Ok(ConnectorTransport::RemoteHttps),
+            "remote_https" | "remotehttps" | "https" | "http" => {
+                Ok(ConnectorTransport::RemoteHttps)
+            }
             "stdio_command" | "stdiocommand" | "stdio" => Ok(ConnectorTransport::StdioCommand),
             other => Err(GmError::Config(format!(
                 "Unsupported connector transport '{other}'"
@@ -113,8 +115,9 @@ impl ConnectorStore {
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| GmError::Platform(format!("Failed to open in-memory connector DB: {e}")))?;
+        let conn = Connection::open_in_memory().map_err(|e| {
+            GmError::Platform(format!("Failed to open in-memory connector DB: {e}"))
+        })?;
         Self::init_conn(conn, None)
     }
 
@@ -192,10 +195,14 @@ impl ConnectorStore {
         let name = input.name.trim();
         let target = input.url_or_command.trim();
         if name.is_empty() || name.len() > 128 {
-            return Err(GmError::Config("Connector name must be 1-128 characters".into()));
+            return Err(GmError::Config(
+                "Connector name must be 1-128 characters".into(),
+            ));
         }
         if target.is_empty() || target.len() > 1024 {
-            return Err(GmError::Config("Connector URL or command is required".into()));
+            return Err(GmError::Config(
+                "Connector URL or command is required".into(),
+            ));
         }
         if input.transport == ConnectorTransport::RemoteHttps
             && !target.starts_with("https://")
@@ -352,7 +359,8 @@ impl ConnectorStore {
                     "setup_required".into()
                 },
                 account_summary: format!("{} allowed channels", b.slack_allowed_channel_ids.len()),
-                setup_hint: "Configure SLACK_BOT_TOKEN & signing secret in Keychain + bridges".into(),
+                setup_hint: "Configure SLACK_BOT_TOKEN & signing secret in Keychain + bridges"
+                    .into(),
                 supports_multi_account: true,
             },
             BuiltInIntegrationStatus {
@@ -377,7 +385,10 @@ impl ConnectorStore {
                 } else {
                     "setup_required".into()
                 },
-                account_summary: format!("{} allowed channels", b.discord_allowed_channel_ids.len()),
+                account_summary: format!(
+                    "{} allowed channels",
+                    b.discord_allowed_channel_ids.len()
+                ),
                 setup_hint: "Add DISCORD_BOT_TOKEN & channel allowlist".into(),
                 supports_multi_account: true,
             },
@@ -424,7 +435,11 @@ impl ConnectorStore {
                 id: "1password".into(),
                 name: "1Password CLI".into(),
                 category: "Security & Vault".into(),
-                status: if std::process::Command::new("op").arg("--version").output().is_ok_and(|o| o.status.success()) {
+                status: if std::process::Command::new("op")
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|o| o.status.success())
+                {
                     "connected".into()
                 } else {
                     "setup_required".into()
@@ -469,7 +484,8 @@ impl ConnectorStore {
                     "setup_required".into()
                 },
                 account_summary: "Order confirmation cards & default Vault card summary".into(),
-                setup_hint: "Add default card in Settings -> Vault & configure checkout bridge".into(),
+                setup_hint: "Add default card in Settings -> Vault & configure checkout bridge"
+                    .into(),
                 supports_multi_account: false,
             },
         ]

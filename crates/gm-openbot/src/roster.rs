@@ -26,14 +26,7 @@ fn default_task_mode() -> String {
     "chat".into()
 }
 
-pub const AVATAR_SHAPES: &[&str] = &[
-    "Circle",
-    "Hex",
-    "RoundedSquare",
-    "Diamond",
-    "Pill",
-    "Spark",
-];
+pub const AVATAR_SHAPES: &[&str] = &["Circle", "Hex", "RoundedSquare", "Diamond", "Pill", "Spark"];
 
 pub const BOT_PALETTE_HEX: &[&str] = &[
     "#2F7CF6", // Electric Blue
@@ -510,7 +503,11 @@ impl BotRoster {
             profile.pinned = v;
         }
         if let Some(v) = prefs.get("section_id") {
-            profile.section_id = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            profile.section_id = v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         }
         if let Some(v) = prefs.get("hidden_from_sidebar").and_then(|v| v.as_bool()) {
             profile.hidden_from_sidebar = v;
@@ -522,10 +519,18 @@ impl BotRoster {
             profile.avatar_color = v.trim().to_string();
         }
         if let Some(v) = prefs.get("avatar_asset") {
-            profile.avatar_asset = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            profile.avatar_asset = v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         }
         if let Some(v) = prefs.get("accent_color") {
-            profile.accent_color = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            profile.accent_color = v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         }
         if let Some(v) = prefs.get("notifications_enabled").and_then(|v| v.as_bool()) {
             profile.notifications_enabled = v;
@@ -546,10 +551,18 @@ impl BotRoster {
             profile.allow_network = v;
         }
         if let Some(v) = prefs.get("preferred_provider") {
-            profile.preferred_provider = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            profile.preferred_provider = v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         }
         if let Some(v) = prefs.get("preferred_model") {
-            profile.preferred_model = v.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+            profile.preferred_model = v
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
         }
 
         self.upsert_bot(profile)
@@ -592,7 +605,12 @@ impl BotRoster {
         self.upsert_bot(cloned)
     }
 
-    pub fn save_bot_avatar_bytes(&self, bot_id: &str, filename_hint: &str, bytes: &[u8]) -> Result<String> {
+    pub fn save_bot_avatar_bytes(
+        &self,
+        bot_id: &str,
+        filename_hint: &str,
+        bytes: &[u8],
+    ) -> Result<String> {
         let profile = self
             .get_bot(bot_id)
             .ok_or_else(|| GmError::Config(format!("Unknown bot '{bot_id}'")))?;
@@ -609,7 +627,10 @@ impl BotRoster {
             .unwrap_or_else(|| "png".to_string());
         let avatar_dir = self.bot_root(&profile.id).join("avatar");
         gm_core::storage::ensure_private_dir(&avatar_dir)?;
-        let fname = format!("avatar_{}.{ext}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        let fname = format!(
+            "avatar_{}.{ext}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
         let target = avatar_dir.join(&fname);
         gm_core::storage::atomic_write_private(&target, bytes)?;
         let mut updated = profile;
@@ -633,7 +654,10 @@ impl BotRoster {
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             return Ok(None);
         };
-        if meta.file_type().is_symlink() || !meta.is_file() || meta.len() as usize > MAX_AVATAR_BYTES {
+        if meta.file_type().is_symlink()
+            || !meta.is_file()
+            || meta.len() as usize > MAX_AVATAR_BYTES
+        {
             return Err(GmError::SafetyViolation(
                 "RULE-PATH-002: Avatar file invalid or symlink".into(),
             ));
@@ -648,7 +672,8 @@ impl BotRoster {
         use std::io::Read;
         let file = options.open(&path)?;
         let mut buf = Vec::new();
-        file.take((MAX_AVATAR_BYTES + 1) as u64).read_to_end(&mut buf)?;
+        file.take((MAX_AVATAR_BYTES + 1) as u64)
+            .read_to_end(&mut buf)?;
         if buf.len() > MAX_AVATAR_BYTES {
             return Err(GmError::Config("Avatar exceeds 25 MiB limit".into()));
         }
@@ -789,7 +814,10 @@ mod tests {
 
         assert!(
             roster
-                .save_bot_ui_prefs("muse", &serde_json::json!({"avatar_asset": "../escape.png"}))
+                .save_bot_ui_prefs(
+                    "muse",
+                    &serde_json::json!({"avatar_asset": "../escape.png"})
+                )
                 .is_err()
         );
         assert!(

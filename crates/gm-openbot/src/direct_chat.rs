@@ -64,8 +64,9 @@ impl DirectChatStore {
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| GmError::Platform(format!("Failed to open in-memory direct chat DB: {e}")))?;
+        let conn = Connection::open_in_memory().map_err(|e| {
+            GmError::Platform(format!("Failed to open in-memory direct chat DB: {e}"))
+        })?;
         Self::init_conn(conn)
     }
 
@@ -226,7 +227,9 @@ impl DirectChatStore {
                 "#
             };
 
-            let mut stmt = conn.prepare(sql).map_err(|e| GmError::Platform(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| GmError::Platform(e.to_string()))?;
             let map_row = |row: &rusqlite::Row<'_>| -> rusqlite::Result<DirectMessageRecord> {
                 let seq_i64: i64 = row.get(0)?;
                 let card_str: Option<String> = row.get(8)?;
@@ -406,8 +409,11 @@ impl DirectChatStore {
         if clean_msg.is_empty() {
             return Err(GmError::Config("Message ID cannot be empty".into()));
         }
-        if clean_emoji.is_empty() || clean_emoji.chars().count() > 32 || clean_emoji.contains('\n') {
-            return Err(GmError::Config("Reaction emoji must be 1-32 characters".into()));
+        if clean_emoji.is_empty() || clean_emoji.chars().count() > 32 || clean_emoji.contains('\n')
+        {
+            return Err(GmError::Config(
+                "Reaction emoji must be 1-32 characters".into(),
+            ));
         }
 
         let conn = self.conn.lock();
@@ -420,7 +426,9 @@ impl DirectChatStore {
             .optional()
             .map_err(|e| GmError::Platform(e.to_string()))?;
         let Some(bot_id) = bot_id else {
-            return Err(GmError::Config(format!("Unknown direct message '{clean_msg}'")));
+            return Err(GmError::Config(format!(
+                "Unknown direct message '{clean_msg}'"
+            )));
         };
 
         let deleted = conn
@@ -641,7 +649,9 @@ impl DirectChatStore {
                     "SELECT bot_id, id, author, content, created_at FROM (SELECT * FROM direct_messages_v1 ORDER BY seq DESC LIMIT 200) WHERE content LIKE ?1 ESCAPE '\\' ORDER BY seq DESC LIMIT ?2"
                 }
             };
-            let mut stmt = conn.prepare(sql).map_err(|e| GmError::Platform(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| GmError::Platform(e.to_string()))?;
             let map_hit = |r: &rusqlite::Row<'_>| -> rusqlite::Result<MessageSearchHit> {
                 let body: String = r.get(3)?;
                 let excerpt = make_excerpt(&body, needle, 140);
@@ -682,7 +692,9 @@ impl DirectChatStore {
             } else {
                 "SELECT channel_id, id, author, content, timestamp FROM (SELECT rowid, channel_id, id, author, content, timestamp FROM channel_messages ORDER BY rowid DESC LIMIT 200) WHERE content LIKE ?1 ESCAPE '\\' ORDER BY rowid DESC LIMIT ?2"
             };
-            let mut stmt = conn.prepare(sql).map_err(|e| GmError::Platform(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(sql)
+                .map_err(|e| GmError::Platform(e.to_string()))?;
             let rows = stmt
                 .query_map(params![like_pattern, max_hits as i64], |r| {
                     let body: String = r.get(3)?;
@@ -706,7 +718,11 @@ impl DirectChatStore {
         Ok(hits)
     }
 
-    pub fn collect_urls_and_media_for_bot(&self, bot_id: &str, limit: usize) -> Result<Vec<(String, String, String)>> {
+    pub fn collect_urls_and_media_for_bot(
+        &self,
+        bot_id: &str,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String)>> {
         let clean_bot = bot_id.trim().to_ascii_lowercase();
         let conn = self.conn.lock();
         let mut stmt = conn
@@ -749,8 +765,18 @@ fn make_excerpt(body: &str, needle: &str, max_chars: usize) -> String {
     let lower_body = body.to_lowercase();
     let lower_needle = needle.to_lowercase();
     if let Some(pos) = lower_body.find(&lower_needle) {
-        let prefix_chars: String = body[..pos].chars().rev().take(32).collect::<Vec<_>>().into_iter().rev().collect();
-        let match_and_rest: String = body[pos..].chars().take(max_chars.saturating_sub(prefix_chars.len())).collect();
+        let prefix_chars: String = body[..pos]
+            .chars()
+            .rev()
+            .take(32)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let match_and_rest: String = body[pos..]
+            .chars()
+            .take(max_chars.saturating_sub(prefix_chars.len()))
+            .collect();
         let prefix_ellipsis = if prefix_chars.len() < pos { "…" } else { "" };
         format!("{prefix_ellipsis}{prefix_chars}{match_and_rest}")
     } else {
@@ -766,7 +792,16 @@ mod tests {
     fn direct_chat_reactions_read_cursors_and_two_stage_search() {
         let store = DirectChatStore::in_memory().unwrap();
         let m1 = store
-            .append_message("muse", "user", "operator", "Check invoice #901 please", None, None, None, None)
+            .append_message(
+                "muse",
+                "user",
+                "operator",
+                "Check invoice #901 please",
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         let m2 = store
             .append_message(
@@ -799,18 +834,33 @@ mod tests {
             .unwrap();
         assert_eq!(updated.card.unwrap()["status"], "approved");
 
-        let hits = store.search_messages("invoice", Some("muse"), false, 20).unwrap();
+        let hits = store
+            .search_messages("invoice", Some("muse"), false, 20)
+            .unwrap();
         assert_eq!(hits.len(), 2);
 
         // Push >200 filler messages so m1 falls outside recent 200 window
         for i in 0..205 {
             store
-                .append_message("muse", "assistant", "Muse Operator", &format!("filler {i}"), None, None, None, None)
+                .append_message(
+                    "muse",
+                    "assistant",
+                    "Muse Operator",
+                    &format!("filler {i}"),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap();
         }
-        let recent_hits = store.search_messages("invoice #901", Some("muse"), false, 20).unwrap();
+        let recent_hits = store
+            .search_messages("invoice #901", Some("muse"), false, 20)
+            .unwrap();
         assert!(recent_hits.is_empty());
-        let older_hits = store.search_messages("invoice #901", Some("muse"), true, 20).unwrap();
+        let older_hits = store
+            .search_messages("invoice #901", Some("muse"), true, 20)
+            .unwrap();
         assert_eq!(older_hits.len(), 2);
     }
 }

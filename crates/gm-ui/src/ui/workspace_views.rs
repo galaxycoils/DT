@@ -37,7 +37,10 @@ pub fn draw_workspace_section_view(
 
         WorkspaceSection::Feed => {
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("⚡ Proactive Activity & Digest Feed").color(palette.text_primary));
+                ui.heading(
+                    RichText::new("⚡ Proactive Activity & Digest Feed")
+                        .color(palette.text_primary),
+                );
                 if ui.button("↻ Refresh").clicked() {
                     send(DaemonRequest::ListActivity);
                 }
@@ -110,7 +113,9 @@ pub fn draw_workspace_section_view(
 
         WorkspaceSection::Goals => {
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("🎯 Hierarchical Goals Workspace").color(palette.text_primary));
+                ui.heading(
+                    RichText::new("🎯 Hierarchical Goals Workspace").color(palette.text_primary),
+                );
                 if ui.button("↻ Refresh").clicked() {
                     send(DaemonRequest::ListGoals);
                 }
@@ -187,7 +192,7 @@ pub fn draw_workspace_section_view(
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     for entry in goals {
-                        let g = &entry["goal"];
+                        let g = entry.get("goal").unwrap_or(entry);
                         let slug = g["slug"].as_str().unwrap_or("").to_string();
                         let title = g["title"].as_str().unwrap_or(&slug);
                         let status = g["status"].as_str().unwrap_or("Active");
@@ -297,7 +302,10 @@ pub fn draw_workspace_section_view(
             });
             ui.add_space(8.0);
 
-            let spaces = spaces_data["spaces"].as_array().cloned().unwrap_or_default();
+            let spaces = spaces_data["spaces"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             egui::ScrollArea::vertical()
                 .id_salt("grok_spaces_scroll")
                 .auto_shrink([false, false])

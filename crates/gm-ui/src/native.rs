@@ -105,6 +105,7 @@ enum PendingKind {
     RevealVaultItem(String),
     UsageBreakdown,
     ListConnectors,
+    ListRoutines,
     /// Any write whose result is reflected by re-fetching the bootstrap snapshot.
     Mutation,
     CaptureComputerPreview,
@@ -146,6 +147,7 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
         }
         DaemonRequest::GetUsageBreakdown { .. } => PendingKind::UsageBreakdown,
         DaemonRequest::ListCustomConnectors => PendingKind::ListConnectors,
+        DaemonRequest::ListRoutines => PendingKind::ListRoutines,
         DaemonRequest::ManageBotSection { .. }
         | DaemonRequest::ManageCustomRule { .. }
         | DaemonRequest::ManageVault { .. }
@@ -156,7 +158,13 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
         | DaemonRequest::MarkChatRead { .. }
         | DaemonRequest::ManageSystem { .. }
         | DaemonRequest::SaveUiSettings { .. }
-        | DaemonRequest::CreateChannel { .. } => PendingKind::Mutation,
+        | DaemonRequest::CreateChannel { .. }
+        | DaemonRequest::SaveRoutine { .. }
+        | DaemonRequest::DeleteRoutine { .. }
+        | DaemonRequest::TriggerRoutineTest { .. }
+        | DaemonRequest::ManageFeed { .. }
+        | DaemonRequest::ManageSkill { .. }
+        | DaemonRequest::ManageSpace { .. } => PendingKind::Mutation,
         DaemonRequest::CaptureComputerPreview { .. } => PendingKind::CaptureComputerPreview,
         DaemonRequest::ListActivity => PendingKind::ListActivity,
         DaemonRequest::RateActivity { .. } => PendingKind::RateActivity,
@@ -196,6 +204,11 @@ struct ViewState {
     vault_items: Vec<Value>,
     usage_data: Value,
     connectors_data: Value,
+    bootstrap_status: Value,
+    ui_config: Option<gm_core::config::UiConfig>,
+    bot_statuses: Value,
+    connected_app_count: u64,
+    version: String,
     files: Value,
     file_preview: Value,
     library_page: Value,
@@ -260,13 +273,13 @@ impl ViewState {
         if let Some(arr) = value["dm_messages"].as_array() {
             self.dm_messages = arr.clone();
         }
-        if let Some(arr) = value["tasks"].as_array() {
+        if let Some(arr) = value["recent_tasks"].as_array() {
             self.tasks = arr.clone();
         }
         if let Some(arr) = value["routines"].as_array() {
             self.routines = arr.clone();
         }
-        if let Some(arr) = value["rules"].as_array() {
+        if let Some(arr) = value["custom_rules"].as_array() {
             self.rules = arr.clone();
         }
         if let Some(arr) = value["vault_items"].as_array() {
@@ -275,21 +288,42 @@ impl ViewState {
         if !value["usage"].is_null() {
             self.usage_data = value["usage"].clone();
         }
-        if !value["connectors"].is_null() {
-            self.connectors_data = value["connectors"].clone();
-        }
+        self.connectors_data = serde_json::json!({
+            "integrations": value["integrations"],
+            "custom_connectors": value["custom_connectors"],
+        });
+        self.bootstrap_status = value["status"].clone();
+        self.paused = value["status"]["paused"].as_bool().unwrap_or(false);
+        self.ui_config = serde_json::from_value(value["ui"].clone()).ok();
+        self.skills_data = value["skills"].clone();
+        self.bot_statuses = value["bot_statuses"].clone();
+        self.connected_app_count = value["connected_app_count"].as_u64().unwrap_or(0);
+        self.version = value["version"].as_str().unwrap_or_default().to_string();
         if let Some(arr) = value["goals"].as_array() {
             self.goals = arr.clone();
         }
         if !value["spaces"].is_null() {
-            self.spaces_data = value["spaces"].clone();
+            let entries = value["spaces"].as_array().cloned().unwrap_or_default();
+            let mut urls = serde_json::Map::new();
+            let spaces: Vec<Value> = entries
+                .into_iter()
+                .map(|entry| {
+                    let meta = entry.get("meta").unwrap_or(&entry).clone();
+                    if let Some(slug) = meta["slug"].as_str() {
+                        urls.insert(slug.to_string(), entry["url"].clone());
+                    }
+                    meta
+                })
+                .collect();
+            self.spaces_data = serde_json::json!({
+                "spaces": spaces, "urls": urls,
+                "spaces_port": value["status"]["spaces_port"], "enable_spaces": true,
+            });
         }
-        if let Some(arr) = value["activity"]["posts"].as_array() {
+        if let Some(arr) = value["feed"]["posts"].as_array() {
             self.activity_posts = arr.clone();
         }
-        self.brief_prompt = value["activity"]["brief_prompt"]
-            .as_str()
-            .map(str::to_string);
+        self.brief_prompt = value["feed"]["brief_prompt"].as_str().map(str::to_string);
     }
 
     fn event(&mut self, event: DaemonEvent) {
@@ -319,7 +353,8 @@ impl ViewState {
                 if ok { "Completed" } else { "Task update" }.into(),
                 format!("{task_id}\n{message}"),
             )),
-            DaemonEvent::ApprovalResolved { request_id } => {
+            DaemonEvent::ApprovalResolved { request_id }
+            | DaemonEvent::ApprovalExpired { request_id } => {
                 self.approvals.retain(|(id, _, _)| id != &request_id)
             }
             DaemonEvent::ApprovalRequested {
@@ -388,7 +423,8 @@ impl ViewState {
             } => {
                 for b in &mut self.bots {
                     if b["id"].as_str() == Some(bot_id.as_str()) {
-                        b["status_phrase"] = phrase.clone().map(Value::String).unwrap_or(Value::Null);
+                        b["status_phrase"] =
+                            phrase.clone().map(Value::String).unwrap_or(Value::Null);
                         b["needs_attention"] = Value::Bool(needs_attention);
                     }
                 }
@@ -596,16 +632,13 @@ impl NativeApp {
                 .enumerate()
                 .map(|(idx, m)| {
                     let role = m["role"].as_str().unwrap_or("assistant").to_string();
-                    let author = m["author"]
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| {
-                            if role == "user" {
-                                "You".into()
-                            } else {
-                                self.bot.clone()
-                            }
-                        });
+                    let author = m["author"].as_str().map(str::to_string).unwrap_or_else(|| {
+                        if role == "user" {
+                            "You".into()
+                        } else {
+                            self.bot.clone()
+                        }
+                    });
                     TranscriptRow {
                         id: m["id"]
                             .as_str()
@@ -629,9 +662,7 @@ impl NativeApp {
                 .collect();
             // Append any local assistant replies from SendChatMessageV2 not yet in dm_messages
             for (idx, (role_label, content)) in local_messages.iter().enumerate() {
-                if role_label != "You"
-                    && !rows.iter().any(|r| r.content == *content)
-                {
+                if role_label != "You" && !rows.iter().any(|r| r.content == *content) {
                     let seq = rows.len() as i64 + 1;
                     rows.push(TranscriptRow {
                         id: format!("local-{idx}"),
@@ -699,9 +730,86 @@ impl eframe::App for NativeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let previous_modal = self.ui_state.active_modal.clone();
         // 1. Handle global GrokBot hotkeys & 5-tier Escape stack
         let hotkey_outcome = handle_global_hotkeys(ctx, &mut self.ui_state);
 
+        if hotkey_outcome.escape_dismissed {
+            if !matches!(
+                self.ui_state.active_modal,
+                Some(crate::ui::state::ActiveModal::Lightbox { .. })
+            ) {
+                self.textures.evict_prefix("lightbox:");
+            }
+            if !self.ui_state.is_live_computer_visible() {
+                self.textures.evict_prefix("live_computer:");
+            }
+            use zeroize::Zeroize;
+            self.meta_key.zeroize();
+            self.xai_key.zeroize();
+        }
+        if let Some(ui) = self
+            .shared
+            .state
+            .lock()
+            .ok()
+            .and_then(|mut s| s.ui_config.take())
+        {
+            self.ui_state.theme_pref = ui.theme.clone();
+            self.ui_state.accent_mode = ui.accent_mode.clone();
+            self.ui_state.execution_mode = ui.computer_execution_mode.clone();
+            self.settings_config.ui = ui;
+        }
+
+        let target = crate::ui::state::NavTarget {
+            section: self.ui_state.section,
+            chat_kind: self.ui_state.active_chat_kind.clone(),
+            target_id: if self.ui_state.active_chat_kind == "channel" {
+                self.channel.clone()
+            } else {
+                self.bot.clone()
+            },
+        };
+        self.ui_state.nav_history.push(target);
+        let target = match std::mem::take(&mut self.ui_state.nav_request) {
+            -1 => self.ui_state.nav_history.back(),
+            1 => self.ui_state.nav_history.forward(),
+            _ => None,
+        };
+        if let Some(target) = target {
+            self.ui_state.section = target.section;
+            self.ui_state.active_chat_kind = target.chat_kind;
+            if self.ui_state.active_chat_kind == "channel" {
+                self.channel = target.target_id;
+                self.send(DaemonRequest::ChannelHistory {
+                    channel_id: self.channel.clone(),
+                });
+            } else {
+                self.bot = target.target_id;
+                self.send(DaemonRequest::GetDirectChatHistory {
+                    bot_id: self.bot.clone(),
+                    before_seq: None,
+                    limit: Some(50),
+                });
+            }
+            match self.ui_state.section {
+                WorkspaceSection::Feed => self.send(DaemonRequest::ListActivity),
+                WorkspaceSection::Goals => self.send(DaemonRequest::ListGoals),
+                WorkspaceSection::Spaces => self.send(DaemonRequest::ListSpaces),
+                WorkspaceSection::Audit => self.send(DaemonRequest::ListQueue { bot_id: None }),
+                WorkspaceSection::Bots => {}
+            }
+        }
+        if let Ok(mut state) = self.shared.state.lock()
+            && let Some((id, mut secret)) = state.revealed_secret.take()
+        {
+            if self.ui_state.active_modal == Some(crate::ui::state::ActiveModal::Settings) {
+                self.ui_state.revealed_secrets.insert(id, secret);
+            } else {
+                use zeroize::Zeroize;
+                secret.zeroize();
+            }
+        }
         // 2. Handle dropped file attachments
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         for file in dropped {
@@ -834,7 +942,7 @@ impl eframe::App for NativeApp {
         if let Some(bot_idx) = hotkey_outcome.switch_to_bot_index {
             let visible_bots: Vec<&Value> = bots
                 .iter()
-                .filter(|b| !b["hidden"].as_bool().unwrap_or(false))
+                .filter(|b| !b["hidden_from_sidebar"].as_bool().unwrap_or(false))
                 .collect();
             if let Some(target_bot) = visible_bots.get(bot_idx)
                 && let Some(id) = target_bot["id"].as_str()
@@ -866,24 +974,16 @@ impl eframe::App for NativeApp {
         if live_computer_visible
             && let Some((_w, _h, _seq, jpeg_b64)) = pending_jpeg
             && let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(jpeg_b64.trim())
-            && let Ok(decoded) = image::load_from_memory(&bytes)
         {
-            let rgba = decoded.to_rgba8();
-            let (width, height) = rgba.dimensions();
-            self.textures.insert_rgba(
-                ctx,
-                "live_computer:latest".to_string(),
-                width as usize,
-                height as usize,
-                rgba.into_raw(),
-            );
+            self.textures
+                .insert_encoded(ctx, "live_computer:latest", &bytes, 1280);
         }
 
         // 6. Resolve & apply GrokBot Theme Palette
         let active_bot_color_hex = bots
             .iter()
             .find(|b| b["id"].as_str() == Some(self.bot.as_str()))
-            .and_then(|b| b["color"].as_str())
+            .and_then(|b| b["avatar_color"].as_str().or_else(|| b["color"].as_str()))
             .unwrap_or("#3B82F6");
         let system_prefers_dark = ctx.style().visuals.dark_mode;
         let palette = GrokPalette::resolve(
@@ -892,7 +992,17 @@ impl eframe::App for NativeApp {
             &self.settings_config.ui.accent_mode,
             active_bot_color_hex,
         );
-        palette.apply_to_context(ctx);
+        let style_key = format!(
+            "{}:{}:{}:{}",
+            self.settings_config.ui.theme,
+            self.settings_config.ui.accent_mode,
+            active_bot_color_hex,
+            system_prefers_dark
+        );
+        if self.ui_state.applied_style_key != style_key {
+            palette.apply_to_context(ctx);
+            self.ui_state.applied_style_key = style_key;
+        }
 
         let mut outbound = self.sender();
         // 7. Left 48px Workspace Rail (or bottom bar on < 768px)
@@ -1013,8 +1123,11 @@ impl eframe::App for NativeApp {
                             };
                             let _ = self.requests.try_send((req, Some(text)));
                         } else if self.task_mode || text.starts_with("/do ") {
-                            let instruction =
-                                text.strip_prefix("/do ").unwrap_or(&text).trim().to_string();
+                            let instruction = text
+                                .strip_prefix("/do ")
+                                .unwrap_or(&text)
+                                .trim()
+                                .to_string();
                             let req = DaemonRequest::QueueTask {
                                 bot_id: Some(self.bot.clone()),
                                 channel_id: Some(self.channel.clone()),
@@ -1118,9 +1231,7 @@ impl eframe::App for NativeApp {
                 shared.update(|s| {
                     s.credentials_saving = false;
                     s.credentials_notice = match result {
-                        Ok(()) => {
-                            "API keys saved in OS Keychain. Restart daemon to apply.".into()
-                        }
+                        Ok(()) => "API keys saved in OS Keychain. Restart daemon to apply.".into(),
                         Err(e) => e.to_string(),
                     };
                 });
@@ -1166,6 +1277,18 @@ impl eframe::App for NativeApp {
                 });
         }
 
+        if previous_modal.is_some() && previous_modal != self.ui_state.active_modal {
+            use zeroize::Zeroize;
+            self.meta_key.zeroize();
+            self.xai_key.zeroize();
+            self.ui_state.vault_secret_draft.zeroize();
+            self.ui_state.connector_secret_draft.zeroize();
+            self.ui_state.vault_csv_draft.zeroize();
+            for secret in self.ui_state.revealed_secrets.values_mut() {
+                secret.zeroize();
+            }
+            self.ui_state.revealed_secrets.clear();
+        }
         // 14. Persist draft/bot/task_mode changes to private session file without triggering repaint
         if let Some(store) = &self.shared.session {
             let changed = {
@@ -1221,6 +1344,10 @@ async fn background(
                                 DaemonEvent::ActivityUpdated { .. }
                                     | DaemonEvent::TaskFinished { .. }
                                     | DaemonEvent::BotUpdated { .. }
+                                    | DaemonEvent::RoutineUpdated { .. }
+                                    | DaemonEvent::RoutineRunRecorded { .. }
+                                    | DaemonEvent::TaskUpdated { .. }
+                                    | DaemonEvent::BudgetUpdated { .. }
                             );
                             events_shared.update(|s| s.event(event));
                             if wake_refresh {
@@ -1248,11 +1375,8 @@ async fn background(
     tokio::spawn(async move {
         loop {
             poll_notify.notified().await;
-            if let Ok(DaemonResponse::JsonPayload(value)) = rpc(
-                &refresh_config,
-                DaemonRequest::GetBootstrapState,
-            )
-            .await
+            if let Ok(DaemonResponse::JsonPayload(value)) =
+                rpc(&refresh_config, DaemonRequest::GetBootstrapState).await
             {
                 refresh_shared.update(|s| s.apply_bootstrap(value));
             }
@@ -1387,15 +1511,15 @@ async fn background(
                                     refresh_after = true;
                                 }
                             }
-                            (
-                                PendingKind::SearchMessages,
-                                DaemonResponse::JsonPayload(value),
-                            ) => {
+                            (PendingKind::SearchMessages, DaemonResponse::JsonPayload(value)) => {
                                 s.search_hits = value["hits"]
                                     .as_array()
                                     .or_else(|| value.as_array())
                                     .cloned()
                                     .unwrap_or_default();
+                            }
+                            (PendingKind::ListRoutines, DaemonResponse::JsonPayload(value)) => {
+                                s.routines = value.as_array().cloned().unwrap_or_default();
                             }
                             (PendingKind::ListSections, DaemonResponse::JsonPayload(value)) => {
                                 s.sections = value.as_array().cloned().unwrap_or_default();
@@ -1591,8 +1715,7 @@ async fn background(
     }
 }
 
-#[allow(dead_code)]
-fn take_composer_shortcut(ctx: &egui::Context) -> bool {
+pub(crate) fn take_composer_shortcut(ctx: &egui::Context) -> bool {
     ctx.memory(|m| m.has_focus(egui::Id::new("main-draft")))
         && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
 }
@@ -1625,9 +1748,19 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
         "Grok Muse",
         eframe::NativeOptions {
             #[cfg(feature = "hardware-wgpu")]
-            renderer: eframe::Renderer::Wgpu,
+            renderer: if config.ui.hardware_acceleration {
+                eframe::Renderer::Wgpu
+            } else {
+                eframe::Renderer::Glow
+            },
             #[cfg(not(feature = "hardware-wgpu"))]
             renderer: eframe::Renderer::Glow,
+            hardware_acceleration: if config.ui.hardware_acceleration {
+                eframe::HardwareAcceleration::Preferred
+            } else {
+                eframe::HardwareAcceleration::Off
+            },
+            vsync: true,
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1220.0, 800.0])
                 .with_min_inner_size([680.0, 480.0]),
@@ -1734,6 +1867,38 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
         }),
     )
     .map_err(|e| GmError::Platform(format!("Native UI could not start: {e}")))
+}
+
+#[cfg(test)]
+mod bootstrap_regression_tests {
+    use super::*;
+    #[test]
+    fn bootstrap_uses_store_contract_and_normalizes_spaces() {
+        let mut state = ViewState::default();
+        state.apply_bootstrap(serde_json::json!({
+            "recent_tasks": [{"id":"task"}], "custom_rules": [{"id":"rule"}],
+            "integrations": [{"id":"github"}], "custom_connectors": [{"id":"mcp"}],
+            "feed": {"posts":[{"id":"post"}], "brief_prompt":"daily"},
+            "status": {"paused":true, "spaces_port":1234},
+            "spaces": [{"meta":{"slug":"demo"}, "url":"http://127.0.0.1:1234/spaces/v2/demo/?token=abc"}],
+            "goals": [{"slug":"goal"}], "skills": [{"name":"skill"}],
+            "ui": gm_core::config::UiConfig::default(), "version":"test",
+            "unread_counts": {"dm:muse":3}, "connected_app_count":2
+        }));
+        assert_eq!(state.tasks[0]["id"], "task");
+        assert_eq!(state.rules[0]["id"], "rule");
+        assert_eq!(state.activity_posts[0]["id"], "post");
+        assert_eq!(state.brief_prompt.as_deref(), Some("daily"));
+        assert_eq!(state.connectors_data["integrations"][0]["id"], "github");
+        assert_eq!(state.spaces_data["spaces"][0]["slug"], "demo");
+        assert_eq!(state.spaces_data["spaces_port"], 1234);
+        assert!(state.spaces_data["urls"]["demo"].is_string());
+        assert_eq!(state.unread_counts["dm:muse"], 3);
+        assert!(state.paused);
+        assert!(state.ui_config.is_some());
+        assert_eq!(state.skills_data[0]["name"], "skill");
+        assert_eq!(state.connected_app_count, 2);
+    }
 }
 
 #[cfg(test)]
