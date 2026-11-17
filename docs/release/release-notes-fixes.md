@@ -2,7 +2,8 @@
 
 This note records verified release-status clarifications for GitHub Releases `v0.3.0`, `v0.4.0`, `v0.5.0`, and `v0.6.0`.
 
-## `v0.6.0` (Full Rakazo Parity & Multi-Provider Suite)
+## `v0.6.0` (Apple Silicon development preview)
+- The published Apple Silicon DMG uses the debug profile and ad-hoc signing. Manual installation is required. Native certification, Developer ID signing, notarization, and signed-updater distribution remain outstanding. Its DMG bytes are preserved and its sidecar names the actual downloadable file.
 - Includes full workspace parity, multi-provider OAuth/Responses routing, outbound HTTPS relay & mapped bridges, honest capability probing, local voice/SIP/Zoom/Meet adapters, `/api/v1` + hosted tenant isolation + marketplace/Stripe sandbox + React/Expo clients, PR #2 database/patch/updater hardening, and the `v0.5.0` Mac QA & privacy/data-loss fixes.
 - Signed release DMGs/installers built in self-hosted CI with Developer ID signing/notarization and offline Ed25519 publisher keys are required for public auto-updater binary verification; local builds on machines without Developer ID certificates are ad-hoc signed.
 

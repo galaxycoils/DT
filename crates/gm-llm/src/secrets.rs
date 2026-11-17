@@ -86,6 +86,8 @@ impl VaultSecretResolver {
 pub struct KeychainSecrets {
     #[allow(dead_code)]
     service: String,
+    #[cfg(test)]
+    memory: Option<std::sync::Arc<parking_lot::Mutex<std::collections::BTreeMap<String, String>>>>,
 }
 
 impl Default for KeychainSecrets {
@@ -98,6 +100,16 @@ impl KeychainSecrets {
     pub fn new(service: impl Into<String>) -> Self {
         Self {
             service: service.into(),
+            #[cfg(test)]
+            memory: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
+        Self {
+            service: String::new(),
+            memory: Some(Default::default()),
         }
     }
 
@@ -108,6 +120,15 @@ impl KeychainSecrets {
 
     /// Retrieve secret from OS keychain, falling back to environment variable if absent.
     pub fn get_secret(&self, account: &str) -> Result<String> {
+        #[cfg(test)]
+        if let Some(memory) = &self.memory {
+            return memory
+                .lock()
+                .get(account)
+                .cloned()
+                .ok_or_else(|| GmError::Config(format!("Test secret '{account}' not found")));
+        }
+
         #[cfg(target_os = "macos")]
         {
             match security_framework::passwords::get_generic_password(&self.service, account) {
@@ -158,6 +179,12 @@ impl KeychainSecrets {
 
     /// Save secret to macOS Keychain (overwrites existing key if present).
     pub fn set_secret(&self, account: &str, secret: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(memory) = &self.memory {
+            memory.lock().insert(account.to_owned(), secret.to_owned());
+            return Ok(());
+        }
+
         #[cfg(target_os = "macos")]
         {
             // The platform API updates an existing item atomically. Preserve the old key if saving fails.
@@ -186,6 +213,15 @@ impl KeychainSecrets {
 
     /// Delete secret from macOS Keychain.
     pub fn delete_secret(&self, account: &str) -> Result<()> {
+        #[cfg(test)]
+        if let Some(memory) = &self.memory {
+            return memory
+                .lock()
+                .remove(account)
+                .map(|_| ())
+                .ok_or_else(|| GmError::Config(format!("Test secret '{account}' not found")));
+        }
+
         #[cfg(target_os = "macos")]
         {
             security_framework::passwords::delete_generic_password(&self.service, account)
@@ -226,6 +262,24 @@ impl KeychainSecrets {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn memory_secrets_are_shared_and_ignore_environment() {
+        let secrets = KeychainSecrets::in_memory();
+        let clone = secrets.clone();
+        let account = "GM_TEST_MEMORY_ONLY_SECRET";
+        unsafe { std::env::set_var(account, "environment-secret") };
+        assert!(secrets.get_secret(account).is_err());
+        secrets.set_secret(account, "first").unwrap();
+        assert_eq!(clone.get_secret(account).unwrap(), "first");
+        clone.set_secret(account, "second").unwrap();
+        assert_eq!(secrets.get_secret(account).unwrap(), "second");
+        secrets.delete_secret(account).unwrap();
+        assert!(clone.get_secret(account).is_err());
+        assert!(secrets.delete_secret(account).is_err());
+        assert!(KeychainSecrets::in_memory().get_secret(account).is_err());
+        unsafe { std::env::remove_var(account) };
+    }
 
     #[test]
     fn test_keychain_env_fallback() {

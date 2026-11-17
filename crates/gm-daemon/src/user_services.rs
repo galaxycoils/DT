@@ -233,6 +233,7 @@ pub fn show_services_status() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     #[test]
     fn linux_quotes_paths_and_rejects_directive_injection() {
         let unit = linux_unit(Path::new("/opt/My App/100%/$HOME/gm-daemon"), true).unwrap();

@@ -2,6 +2,14 @@
 
 All notable changes to **Grok-Muse** are documented in this file.
 
+## [v0.6.1] — Apple Silicon Preview (2026-11-17)
+
+- Isolate OAuth fixtures from OS credential stores and environment secrets.
+- Keep Unix service-path assertions on Unix test hosts.
+- Add explicit release-profile DMG packaging and tag-time checksum verification.
+- Synchronize package versions and clarify platform certification and preview installation status.
+- Publish an ad-hoc Apple Silicon prerelease with a checksum matching its download filename.
+
 ## [v0.6.0] — Full Rakazo Parity & Multi-Provider Suite (2026-11-17)
 
 ### Added & Fixed
