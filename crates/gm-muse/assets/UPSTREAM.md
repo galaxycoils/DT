@@ -108,7 +108,7 @@
 | `8490d5d1922787f0d859bec8ac0730fb0d3b097fc034b59f9b846c12c58b18cd` | `skills/spaces/templates/space-static/space.json` |
 | `fd2a18b944385f22959a271adfeba90d70063587014d8c04f171d1e6fd667294` | `skills/spaces/templates/space-static/workspace_agents.md` |
 | `d9cc6609a832013b9cdb0d81c0c997a426e20b94c93fee3fa1472916bb42c971` | `skills/spaces/templates/space-ts/client/tsconfig.json` |
-| `a1917b91cf2f8c9097a338025316be920fa8866c7bdda06a14e8a273f079fb29` | `skills/spaces/templates/space-ts/package.json` |
+| `954636fbfe3b5993693b0028e1964cae55f35c874ce9cdc8c820db9419179a66` | `skills/spaces/templates/space-ts/package.json` |
 | `5698f6c130a85287640ab69e8ea859d49aba21266333a68494afc52e92c335a5` | `skills/spaces/templates/space-ts/server/tsconfig.json` |
 | `6559aedb83f03bca262dfb6f247f00924a7f25b7d3e61efef5162e7b140a5f84` | `skills/spaces/templates/space-ts/space.json` |
 | `1000b5fb48cee172a53a1ad37c821330b3f48b227f4fc580070b393e1d80ba1f` | `skills/spaces/templates/space-ts/tsconfig.base.json` |
@@ -124,9 +124,9 @@
 | `3a25790470d8dae15e98a2f42abe588ff3a4820926871939e420497d5eb3b710` | `skills/spaces/ts-runtime/muse-ui/tsconfig.json` |
 | `42ae2a1ff1d98c7220b1ef86610c975c0e2385b3cd07f3b8d06facaf642fb008` | `skills/spaces/ts-runtime/package.json` |
 | `234d771d80f10ceebe22c8479c6d3796457616e0dbc61e04f4c31984c07bf777` | `skills/spaces/ts-runtime/sdk/README.md` |
-| `3edbe29bb29bd321091b8eaee9a6c279d6bc01b526dd1f441d792ec618c4ee3c` | `skills/spaces/ts-runtime/sdk/package.json` |
+| `195bf279c52810598db64ac752ff0ad09e5158af42241bd40201d5d45183db4b` | `skills/spaces/ts-runtime/sdk/package.json` |
 | `3083cdcdbbda734c223424ec08144d12d0ad0b70ab7e3c332703bbba46f490f8` | `skills/spaces/ts-runtime/sdk/tsconfig.json` |
-| `a93c7e2223a74524d7b89564c0a9ce601ff6f2fd3ce539c247d0e9ac340e9d4e` | `skills/spaces/ts-runtime/worker/package.json` |
+| `a6691cf1625ff75d551d2fe9a7749001dfd73ed9a37b2e3480087bee628a0c5b` | `skills/spaces/ts-runtime/worker/package.json` |
 | `be04a48ea7b6337c305d0da24214d6380efd087e04bfad41854faa7ade129e4d` | `skills/spaces/ts-runtime/worker/tsconfig.json` |
 | `c11792d39439fb78ac77d039a8f533c78c0dcbbf6c6a1cbaf13128323a405476` | `skills/spaces/upgrades.json` |
 | `34d814cee07aeb47074a271b8490100d6dfd28d202ae5f7562a4da8bd2cdb9ff` | `skills/wide-research/SKILL.md` |

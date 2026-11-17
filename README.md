@@ -1,4 +1,4 @@
-# Grok-Muse Hybrid Agent (`v0.3.0` — OpenBot Multi-Agent & Coworker Suite)
+# Grok-Muse Hybrid Agent (`v0.5.0` — GrokBot Workspace Parity)
 
 > **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite for macOS.**  
 > Built in Rust with native Rust desktop rendering, macOS ScreenCaptureKit/Accessibility integration, scoped workspace file access, an offline workspace VM transport, Candle model support, and hybrid LLM routing (Meta Muse + xAI Grok + Local VLM).
@@ -9,7 +9,7 @@ The current branch adds a durable task dispatcher, native desktop client, persis
 
 ## 📑 Table of Contents
 1. [Goal State & Metrics (G1–G8)](#goal-state--metrics-g1g8)
-2. [What's New in `v0.3.0` (OpenBot Coworker Suite)](#whats-new-in-v030-openbot-coworker-suite)
+2. [What's New in `v0.5.0` (GrokBot Workspace Parity)](#whats-new-in-v050-grokbot-workspace-parity)
 3. [System Architecture](#system-architecture)
 4. [Workspace Crates](#workspace-crates)
 5. [Installation & Packaging (DMG)](#installation--packaging-dmg)
@@ -26,9 +26,20 @@ The current branch adds a durable task dispatcher, native desktop client, persis
 
 ---
 
-## What's New in `v0.3.0` (OpenBot Coworker Suite)
+## What's New in `v0.5.0` (GrokBot Workspace Parity)
 
-Grok-Muse `v0.3.0` integrates the **OpenBot Multi-Agent & Coworker Suite** (`crates/gm-openbot`) alongside the `v0.2.0` Set-of-Marks (SoM) vision grounding, MCP tool bridge, and native Candle Metal VLM engine (`crates/gm-vlm-candle`):
+Grok-Muse `v0.5.0` builds on the `v0.4.0` **Meta Muse Agent Integration** (`crates/gm-muse`, `crates/gm-memory`, `crates/gm-goals`) and `v0.3.0` **OpenBot Multi-Agent & Coworker Suite** (`crates/gm-openbot`):
+
+- **GrokBot Workspace Parity (`crates/gm-ui`, `crates/gm-openbot`)**: Workspace rail, sidebar, chat view, 4-tab `Bot Details` drawer, `Space` split view, `Cmd/Ctrl+K` command palette, Settings modal, and Vault/connector flows.
+- **Authenticated Incremental SSE & Persisted Continuity**: Live `/ag-ui/events` delta stream with persisted direct/channel history, stale-bot response guards, attachments, custom bot avatars/media, and cached rich Markdown rendering.
+- **Isolated Scripts-Only Spaces & Signed Updates**: Static Spaces served on a dedicated loopback port (`spaces_port`), signed update verification via `gm-daemon`, and Glow default rendering with optional WGPU.
+- **Pinned Sibling `Darius` Dependency**: `f47a4ce980abecb751c9f5c79e1c424a20100433` (enforced by `.github/workflows/ci.yml` and `tools/bootstrap.sh`).
+- **Branch History**: `master` is the canonical development and release branch (`v0.4.0`, `v0.5.0+`). `main` (`6f60b76`) is preserved solely as the historical `v0.3.0` tip.
+- *Caveats*: Cloud messaging bridges require configured adapters/relay; RSS/CPU and macOS TCC targets are not certified by headless CI checks.
+
+### Previous `v0.3.0` Highlights (OpenBot Coworker Suite)
+
+Grok-Muse `v0.3.0` integrated the **OpenBot Multi-Agent & Coworker Suite** (`crates/gm-openbot`) alongside the `v0.2.0` Set-of-Marks (SoM) vision grounding, MCP tool bridge, and native Candle Metal VLM engine (`crates/gm-vlm-candle`):
 
 1. **Persistent Multi-Bot Roster & Isolated Per-Bot Workspaces**:
    - Ships with 4 specialized AI teammates out of the box: `@muse` (*General Desktop Operator*), `@researcher` (*Deep Knowledge & Web Researcher*), `@coder` (*Sandboxed Software Engineer*), and `@guardian` (*Security & Governance Analyst*), plus custom bot creation via `gm bots create`.
@@ -128,13 +139,15 @@ The workspace currently expects the separate Darius repository beside this check
 
 ```bash
 git clone https://github.com/galaxycoils/darius.git Darius
+git -C Darius checkout f47a4ce980abecb751c9f5c79e1c424a20100433
 git clone https://github.com/galaxycoils/grok-muse.git grok-muse
 cd grok-muse
+./tools/bootstrap.sh
 cargo test -p gm-openbot --locked
 ```
 
-The dependency is not pinned to a Darius revision yet; this is tracked in the
-[reliability review](docs/openmausbot-comparison.md).
+The sibling `Darius` checkout is pinned to commit `f47a4ce980abecb751c9f5c79e1c424a20100433`
+in `.github/workflows/ci.yml` and verified by `tools/bootstrap.sh` (see the [reliability review](docs/openmausbot-comparison.md)).
 
 ### Building the DMG
 ```bash
