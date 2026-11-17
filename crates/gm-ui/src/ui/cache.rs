@@ -142,7 +142,15 @@ impl BoundedTextureCache {
         encoded_bytes: &[u8],
         max_edge: u32,
     ) -> Option<(egui::TextureId, [usize; 2])> {
-        let img = image::load_from_memory(encoded_bytes).ok()?;
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(encoded_bytes))
+            .with_guessed_format()
+            .ok()?;
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(8192);
+        limits.max_image_height = Some(8192);
+        limits.max_alloc = Some(32 * 1024 * 1024);
+        reader.limits(limits);
+        let img = reader.decode().ok()?;
         let (w, h) = (img.width(), img.height());
         let resized = if w > max_edge || h > max_edge {
             img.thumbnail(max_edge, max_edge)

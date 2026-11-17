@@ -102,6 +102,15 @@ jobs:
         working-directory: grok-muse
         run: tools/test-native-x11.sh
 
+      - name: Verify companion in a real browser with isolated daemon storage
+        if: runner.os == 'Linux'
+        working-directory: grok-muse
+        env:
+          CHROME_BIN: /usr/bin/google-chrome
+        run: |
+          cargo build -p gm-daemon --bin gm-daemon
+          npm run smoke --prefix tools/companion
+
       - name: Run G5 eval suite gate
         working-directory: grok-muse
         run: cargo run -p xtask -- eval

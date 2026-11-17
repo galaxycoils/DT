@@ -44,7 +44,7 @@ strings=[]
 for match in re.finditer(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"",source):
     try: value=ast.literal_eval(match.group())
     except (ValueError,SyntaxError): continue
-    if not isinstance(value,str) or len(value)<5 or value.startswith(('/api/','/ag-ui/')): continue
+    if not isinstance(value,str) or len(value)<5 or value in ('/api/bootstrap','/ag-ui/events'): continue
     if source[match.end():].lstrip().startswith(':'): continue
     if value not in strings: strings.append(value)
     copy.append((match.start(),match.end(),'texts['+str(strings.index(value))+']'))

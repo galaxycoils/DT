@@ -711,7 +711,8 @@ pub fn draw_active_modal(
                                 ui.label(format!("Version {}",env!("CARGO_PKG_VERSION")));
                                 if ui.button("Check for Updates").clicked(){send(DaemonRequest::CheckUpdates);}
                                 let update=ui_state.responses["updates"].clone();
-                                if !update.is_null(){ui.monospace(serde_json::to_string_pretty(&update).unwrap_or_default());if let Some(url)=update["release_url"].as_str(){ui.hyperlink_to("Release notes",url);} if update["update_available"].as_bool()==Some(true)&&ui.button("Download & Verify Update").clicked(){send(DaemonRequest::ManageSystem {op:"install_update".into(),payload:serde_json::json!({"confirmed":true})});}}
+                                if !update.is_null(){ui.monospace(serde_json::to_string_pretty(&update).unwrap_or_default());if let Some(url)=update["release_url"].as_str(){ui.hyperlink_to("Release notes",url);}
+                                if update["update_available"].as_bool()==Some(true)&&ui.button("Download & Verify Update").clicked(){send(DaemonRequest::ManageSystem {op:"install_update".into(),payload:serde_json::json!({"confirmed":true})});}}
                                 ui.checkbox(&mut settings_config.ui.auto_updates,"Automatic updates when idle");
                                 if ui.button("Save Update Preference").clicked(){send(DaemonRequest::SaveUiSettings {ui:serde_json::json!({"auto_updates":settings_config.ui.auto_updates})});}
                                 if ui.button("Helper Health").clicked(){send(DaemonRequest::ManageSystem {op:"health".into(),payload:Value::Null});}
