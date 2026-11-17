@@ -26,7 +26,11 @@ def main():
         if os_name not in ('linux', 'macos', 'windows') or architecture not in ('x86_64', 'aarch64'):
             parser.error('Unsupported OS or architecture')
         path = pathlib.Path(filename)
-        identity = (path.name, os_name, architecture)
+        extension = dict(macos='dmg', windows='zip', linux='tar.gz')[os_name]
+        expected = f'GrokMuse-{args.version}-{os_name}-{architecture}.{extension}'
+        if path.name != expected:
+            parser.error(f'Asset must use canonical exact-target name: {expected}')
+        identity = (os_name, architecture)
         if identity in identities or not path.is_file() or path.is_symlink():
             parser.error('Duplicate asset or asset is not a regular file')
         identities.add(identity)
@@ -34,7 +38,10 @@ def main():
         if not 0 < size <= 2 * 1024**3:
             parser.error('Asset size must be between 1 byte and 2 GiB')
         with path.open('rb') as source:
-            digest = hashlib.file_digest(source, 'sha256').hexdigest()
+            hasher = hashlib.sha256()
+            for chunk in iter(lambda: source.read(65536), b''):
+                hasher.update(chunk)
+            digest = hasher.hexdigest()
         assets.append(dict(name=path.name, os=os_name, architecture=architecture, size_bytes=size, sha256=digest))
     raw = (json.dumps(dict(schema=1, version=args.version, expires_at=args.expires, assets=assets), sort_keys=True, separators=(',', ':')) + '\n').encode()
     with tempfile.TemporaryDirectory(prefix='gm-sign-') as folder:

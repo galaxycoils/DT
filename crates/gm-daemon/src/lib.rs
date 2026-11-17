@@ -24,8 +24,10 @@ use tracing::{info, warn};
 
 pub mod control_server;
 pub mod diagnostics;
+pub mod patch;
 pub mod service;
 pub mod updater;
+mod user_services;
 
 pub use control_server::*;
 pub use diagnostics::*;

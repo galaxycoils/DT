@@ -1,4 +1,8 @@
+#[cfg(not(target_os = "macos"))]
+pub use crate::user_services::{install_services, show_services_status, uninstall_services};
+#[cfg(target_os = "macos")]
 use gm_core::error::{GmError, Result};
+#[cfg(target_os = "macos")]
 use std::fs;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
@@ -278,6 +282,7 @@ pub fn inspect_service(label: &str, plist_path: PathBuf) -> ServiceStatus {
     }
 }
 
+#[cfg(target_os = "macos")]
 pub fn install_services(custom_bin_dir: Option<&Path>) -> Result<()> {
     let agents_dir = launch_agents_dir();
     fs::create_dir_all(&agents_dir).map_err(GmError::Io)?;
@@ -339,6 +344,7 @@ pub fn install_services(custom_bin_dir: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub fn uninstall_services() -> Result<()> {
     println!("==> Uninstalling Grok-Muse LaunchAgents...");
     let d_path = daemon_plist_path();
@@ -365,6 +371,7 @@ pub fn uninstall_services() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 pub fn show_services_status() -> Result<()> {
     let d_status = inspect_service(DAEMON_LABEL, daemon_plist_path());
     let h_status = inspect_service(HELPER_LABEL, helper_plist_path());
