@@ -1,6 +1,6 @@
 # Grok Muse Platform Support Matrix
 
-This matrix describes implementation targets for the v0.6.1 preview. CI runs on macOS, Ubuntu and Windows. Native certification remains outstanding. The distributed installer covers Apple Silicon only. See [release readiness](release-readiness.md).
+This matrix describes implementation targets for the v0.7.0 preview. CI runs on macOS, Ubuntu and Windows. Native certification remains outstanding. The distributed installer covers Apple Silicon only. See [release readiness](release-readiness.md).
 
 ---
 
@@ -32,16 +32,9 @@ This matrix describes implementation targets for the v0.6.1 preview. CI runs on 
 
 ## 3. Provider implementation status
 
-Host CLI invocation and version probes are disabled. Isolated CLI-agent execution and real-account certification remain outstanding. The following historical model examples and pricing require provider verification before use.
+Provider setup, model discovery, and text verification share the daemon-owned transport. Real account certification is pending. See [provider validation](provider-validation.md) for each provider's auth method, catalog source, and observed test coverage. Host CLI probes remain disabled; isolated CLI-agent certification is outstanding.
 
-| Provider | Method | Supported Models | Availability Checks | Auth Flow | Cost Metering |
-|---|---|---|---|---|---|
-| **Meta AI (Llama)** | Cloud API | `muse-spark`, `muse-wonder` | Ping endpoint / API key presence | API Key in OS Keychain | Bounded meter ($0.80-$3.20/M tokens) |
-| **xAI Grok** | Cloud API | `grok-4`, `grok-vision-beta` | Ping endpoint / API key presence | API Key in OS Keychain | Bounded meter ($3.00-$15.00/M tokens) |
-| **Anthropic Claude** | CLI Driver | `claude-3-5-sonnet`, `claude-3-opus` | Host probes disabled | `claude login` / `ANTHROPIC_API_KEY` | Labeled honestly: 0.0 USD (unmetered CLI) |
-| **OpenAI Codex** | CLI Driver | `codex`, `gpt-4o` | Host probes disabled | `codex login` / `OPENAI_API_KEY` | Labeled honestly: 0.0 USD (unmetered CLI) |
-| **xAI Grok CLI** | CLI Driver | `grok` | Host probes disabled | `grok auth` / `XAI_API_KEY` | Labeled honestly: 0.0 USD (unmetered CLI) |
-| **Offline Candle VLM** | Local Engine | `Qwen2-VL-2B-Instruct`, `SmolVLM2` | Installed weights registry check | None (offline open weights) | Free (local compute) |
+The distributed provider UI includes ChatGPT plan access, OpenAI API keys, Meta, xAI, Kilo, OpenRouter, Nous Portal, and custom/local OpenAI-compatible services. Model availability comes from the connected provider. Cost figures are estimates, and advertised capabilities are not execution certification.
 
 ---
 

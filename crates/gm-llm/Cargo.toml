@@ -20,6 +20,7 @@ parking_lot = { workspace = true }
 base64 = "0.22"
 sha2 = { workspace = true }
 hex = { workspace = true }
+jsonwebtoken = { version = "12", default-features = false, features = ["rust_crypto"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7.0"

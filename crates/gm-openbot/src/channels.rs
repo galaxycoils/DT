@@ -376,6 +376,26 @@ impl ChannelStore {
         })
     }
 
+    pub fn conversation_previews(&self) -> Result<serde_json::Value> {
+        let conn = self.conn.lock();
+        let mut statement=conn.prepare("SELECT m.channel_id,substr(m.content,1,160),m.timestamp FROM channel_messages m JOIN (SELECT channel_id,max(rowid) AS seq FROM channel_messages GROUP BY channel_id) latest ON m.rowid=latest.seq ORDER BY m.rowid DESC LIMIT 1000").map_err(|e|GmError::Platform(e.to_string()))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let mut result = serde_json::Map::new();
+        for row in rows {
+            let (id, content, date) = row.map_err(|e| GmError::Platform(e.to_string()))?;
+            result.insert(id,serde_json::json!({"preview":content.lines().collect::<Vec<_>>().join(" "),"created_at":date}));
+        }
+        Ok(result.into())
+    }
+
     pub fn list_messages(
         &self,
         channel_id: &str,
@@ -625,6 +645,21 @@ impl ChannelStore {
 mod tests {
     use super::*;
 
+    #[test]
+    fn sidebar_preview_uses_latest_group_message() {
+        let store = ChannelStore::in_memory().unwrap();
+        store.create_channel("team", "Topic", None, &[]).unwrap();
+        store
+            .post_message("team", "You", None, "First", &[])
+            .unwrap();
+        store
+            .post_message("team", "You", None, "Latest\nmessage", &[])
+            .unwrap();
+        assert_eq!(
+            store.conversation_previews().unwrap()["team"]["preview"],
+            "Latest message"
+        );
+    }
     #[test]
     fn test_channel_instructions_persistence_and_update() {
         let store = ChannelStore::in_memory().unwrap();

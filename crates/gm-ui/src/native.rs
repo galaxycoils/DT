@@ -11,7 +11,6 @@ use crate::ui::{
     details_drawer::draw_bot_details_drawer,
     hotkeys::handle_global_hotkeys,
     modals::draw_active_modal,
-    rail::draw_workspace_rail,
     sidebar::draw_adaptive_sidebar,
     split_page::draw_split_page_panel,
     state::{BotDetailsTab, GrokUiState, WorkspaceSection},
@@ -223,8 +222,6 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
 struct ViewState {
     status: String,
     paused: bool,
-    credentials_notice: String,
-    credentials_saving: bool,
     error: Option<String>,
     messages: Vec<(String, String)>,
     dm_messages: Vec<Value>,
@@ -606,8 +603,6 @@ struct NativeApp {
     config_path: std::path::PathBuf,
     config_original: Option<Vec<u8>>,
     settings_notice: String,
-    meta_key: String,
-    xai_key: String,
 }
 
 impl NativeApp {
@@ -803,14 +798,6 @@ impl NativeApp {
     }
 }
 
-impl Drop for NativeApp {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.meta_key.zeroize();
-        self.xai_key.zeroize();
-    }
-}
-
 impl eframe::App for NativeApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if let Some(store) = &self.shared.session {
@@ -853,9 +840,6 @@ impl eframe::App for NativeApp {
             if !self.ui_state.is_live_computer_visible() {
                 self.textures.evict_prefix("live_computer:");
             }
-            use zeroize::Zeroize;
-            self.meta_key.zeroize();
-            self.xai_key.zeroize();
         }
         if let Some(ui) = self
             .shared
@@ -897,6 +881,8 @@ impl eframe::App for NativeApp {
                         if let Ok(parsed) = serde_json::from_value::<gm_core::config::ProvidersConfig>(
                             candidate.clone(),
                         ) {
+                            self.ui_state.server_snapshot["providers"] =
+                                serde_json::to_value(&parsed).unwrap_or_default();
                             self.settings_config.providers = parsed;
                         } else if let Some(prof_val) = value.get("profile")
                             && let Ok(prof) = serde_json::from_value::<
@@ -980,7 +966,7 @@ impl eframe::App for NativeApp {
         // 3. Snapshot ViewState without holding mutex across egui layout
         let (
             status,
-            paused,
+            _paused,
             error,
             connected,
             messages,
@@ -1014,7 +1000,6 @@ impl eframe::App for NativeApp {
             memory_import_report,
             forget_plan,
             forget_notice,
-            credentials_notice,
             computer_frame_meta,
             pending_jpeg,
         ) = {
@@ -1090,7 +1075,6 @@ impl eframe::App for NativeApp {
                 state.memory_import_report.clone(),
                 state.forget_plan.clone(),
                 state.forget_notice.clone(),
-                state.credentials_notice.clone(),
                 state.computer_frame_meta,
                 state.pending_computer_frame_jpeg.take(),
             )
@@ -1154,7 +1138,9 @@ impl eframe::App for NativeApp {
             .find(|b| b["id"].as_str() == Some(self.bot.as_str()))
             .and_then(|b| b["avatar_color"].as_str().or_else(|| b["color"].as_str()))
             .unwrap_or("#3B82F6");
-        let system_prefers_dark = ctx.style().visuals.dark_mode;
+        let system_prefers_dark = ctx
+            .system_theme()
+            .is_none_or(|theme| theme == egui::Theme::Dark);
         let palette = GrokPalette::resolve(
             &self.settings_config.ui.theme,
             system_prefers_dark,
@@ -1174,40 +1160,23 @@ impl eframe::App for NativeApp {
         }
 
         let mut outbound = self.sender();
-        // 7. Left 48px Workspace Rail (or bottom bar on < 768px)
-        let unread_feed = activity_posts
-            .iter()
-            .filter(|p| p["rating"].is_null())
-            .count();
-        draw_workspace_rail(
+        let prev_bot = self.bot.clone();
+        draw_adaptive_sidebar(
             ctx,
             &mut self.ui_state,
             &palette,
-            unread_feed,
-            paused,
+            &mut self.textures,
+            &bots,
+            &sections,
+            &channels,
+            &unread_counts,
+            &mut self.bot,
+            &mut self.channel,
             &mut outbound,
         );
-
-        // 8. Adaptive Bot / Group / Section Sidebar (`AutoCollapsed` <=1, `CompactRail` 2..=4, `FullList` 5+)
-        if self.ui_state.section == WorkspaceSection::Bots {
-            let prev_bot = self.bot.clone();
-            draw_adaptive_sidebar(
-                ctx,
-                &mut self.ui_state,
-                &palette,
-                &mut self.textures,
-                &bots,
-                &sections,
-                &channels,
-                &unread_counts,
-                &mut self.bot,
-                &mut self.channel,
-                &mut outbound,
-            );
-            if self.bot != prev_bot {
-                let next_bot = self.bot.clone();
-                self.shared.update(|s| s.dm_bot_id = next_bot);
-            }
+        if self.bot != prev_bot {
+            let next_bot = self.bot.clone();
+            self.shared.update(|s| s.dm_bot_id = next_bot);
         }
 
         self.sync_draft_target();
@@ -1366,7 +1335,6 @@ impl eframe::App for NativeApp {
             self.textures.evict_prefix("lightbox:");
         }
         // 12. Global Modals (`CommandPalette`, 5-Pane `Settings`, `Studio`, `Shortcuts`, `ConnectApps`, `AvatarPicker`, `Lightbox`, `ExpandedTable`)
-        let mut do_save_keys = false;
         let mut do_save_config = false;
         let mut modal_reqs: Vec<DaemonRequest> = Vec::new();
         draw_active_modal(
@@ -1385,44 +1353,12 @@ impl eframe::App for NativeApp {
             &mut self.bot,
             &mut self.new_channel,
             &mut self.settings_config,
-            &mut self.meta_key,
-            &mut self.xai_key,
-            &credentials_notice,
             &mut self.settings_notice,
-            || do_save_keys = true,
             || do_save_config = true,
             |req| modal_reqs.push(req),
         );
         for req in modal_reqs {
             self.send(req);
-        }
-        if do_save_keys {
-            let meta = zeroize::Zeroizing::new(std::mem::take(&mut self.meta_key));
-            let xai = zeroize::Zeroizing::new(std::mem::take(&mut self.xai_key));
-            let shared = self.shared.clone();
-            shared.update(|s| {
-                s.credentials_saving = true;
-                s.credentials_notice = "Saving to the OS credential store…".into();
-            });
-            tokio::task::spawn_blocking(move || {
-                let keys = gm_llm::KeychainSecrets::default();
-                let result = (|| {
-                    if !meta.is_empty() {
-                        keys.set_meta_key(&meta)?;
-                    }
-                    if !xai.is_empty() {
-                        keys.set_xai_key(&xai)?;
-                    }
-                    Ok::<_, GmError>(())
-                })();
-                shared.update(|s| {
-                    s.credentials_saving = false;
-                    s.credentials_notice = match result {
-                        Ok(()) => "API keys saved in OS Keychain. Restart daemon to apply.".into(),
-                        Err(e) => e.to_string(),
-                    };
-                });
-            });
         }
         if do_save_config {
             let current = std::fs::read(&self.config_path).ok();
@@ -1466,8 +1402,6 @@ impl eframe::App for NativeApp {
 
         if previous_modal.is_some() && previous_modal != self.ui_state.active_modal {
             use zeroize::Zeroize;
-            self.meta_key.zeroize();
-            self.xai_key.zeroize();
             self.ui_state.vault_secret_draft.zeroize();
             self.ui_state.connector_secret_draft.zeroize();
             self.ui_state.vault_csv_draft.zeroize();
@@ -1997,7 +1931,10 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
             ..Default::default()
         },
         Box::new(move |creation| {
-            let system_dark = creation.egui_ctx.style().visuals.dark_mode;
+            let system_dark = creation
+                .egui_ctx
+                .system_theme()
+                .is_none_or(|theme| theme == egui::Theme::Dark);
             let initial_palette = GrokPalette::resolve(
                 &config.ui.theme,
                 system_dark,
@@ -2058,8 +1995,15 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
             let draft_target = restored
                 .draft_target
                 .unwrap_or_else(|| format!("dm:{}", restored.bot));
+            crate::ui::theme::install_system_font(&creation.egui_ctx);
             let mut ui_state = GrokUiState::default();
+            ui_state.sidebar_width = settings_config.ui.sidebar_width.clamp(240, 480) as f32;
+            ui_state.details_width = settings_config.ui.details_width.clamp(320, 600) as f32;
+            ui_state.sidebar_saved_width = ui_state.sidebar_width;
+            ui_state.details_saved_width = ui_state.details_width;
+            ui_state.sidebar_manual_override = Some(!settings_config.ui.sidebar_collapsed);
             if config_original.is_none() {
+                ui_state.settings_pane = crate::ui::state::SettingsPane::Providers;
                 ui_state.active_modal = Some(crate::ui::state::ActiveModal::Settings);
             }
             Ok(Box::new(NativeApp {
@@ -2098,8 +2042,6 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
                 config_path,
                 config_original,
                 settings_notice: String::new(),
-                meta_key: String::new(),
-                xai_key: String::new(),
             }))
         }),
     )

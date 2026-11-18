@@ -62,7 +62,7 @@ jobs:
         run: |
           npm ci --prefix tools/companion
           npm run build --prefix tools/companion
-          git diff --exit-code -- crates/gm-openbot/src/companion_ui.js crates/gm-openbot/src/companion_ui.html
+          git diff --exit-code -- crates/gm-openbot/src/companion_ui.js crates/gm-openbot/src/companion_ui.html crates/gm-openbot/src/companion_ui.css crates/gm-openbot/src/companion_tokens.css crates/gm-ui/src/ui/tokens.rs
           npm test --prefix tools/companion
           node --test tools/tests/companion-events.test.cjs
 

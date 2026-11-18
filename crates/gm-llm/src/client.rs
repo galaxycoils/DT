@@ -124,11 +124,11 @@ pub fn estimate_cost_usd(
 
 pub fn estimate_api_cost_usd(model: &str, prompt: u32, completion: u32, images: usize) -> f64 {
     let m = model.to_lowercase();
-    if m.starts_with("cli") || m.contains("claude") || m.contains("codex") {
+    if m.starts_with("cli") {
         return 0.0;
     }
     estimate_cost_usd(
-        if m.starts_with("local") {
+        if m.starts_with("local") || m.contains("claude") || m.contains("codex") {
             "unknown-hosted-model"
         } else {
             model
@@ -306,11 +306,78 @@ impl LlmBackend for MockLlmBackend {
     }
 }
 
+/// Normalize account-specific ChatGPT catalogs and OpenAI-compatible provider catalogs.
+pub fn parse_model_catalog(
+    value: &serde_json::Value,
+) -> Result<Vec<gm_core::config::ProviderModel>> {
+    let account_catalog = value.get("models").and_then(|v| v.as_array());
+    let rows = account_catalog
+        .or_else(|| value.get("data").and_then(|v| v.as_array()))
+        .ok_or_else(|| GmError::Provider("Provider catalog has no models or data array".into()))?;
+    let mut models = Vec::new();
+    for row in rows {
+        if account_catalog.is_some() && row["visibility"].as_str().is_some_and(|v| v != "list") {
+            continue;
+        }
+        let Some(id) = row["slug"]
+            .as_str()
+            .or_else(|| row["id"].as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        if models
+            .iter()
+            .any(|model: &gm_core::config::ProviderModel| model.id == id)
+        {
+            continue;
+        }
+        models.push(gm_core::config::ProviderModel {
+            id: id.to_owned(),
+            display_name: row["display_name"]
+                .as_str()
+                .or_else(|| row["name"].as_str())
+                .unwrap_or(id)
+                .to_owned(),
+            context_window: row["context_length"]
+                .as_u64()
+                .or_else(|| row["context_window"].as_u64()),
+            input_modalities: row["architecture"]["input_modalities"]
+                .as_array()
+                .or_else(|| row["input_modalities"].as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            output_modalities: row["architecture"]["output_modalities"]
+                .as_array()
+                .or_else(|| row["output_modalities"].as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            supports_tools: row["supported_parameters"]
+                .as_array()
+                .map(|items| items.iter().any(|v| v.as_str() == Some("tools")))
+                .or_else(|| row["supports_tools"].as_bool()),
+        });
+    }
+    Ok(models)
+}
+
 pub struct ReqwestLlmBackend {
     client: reqwest::Client,
     meta_api_key: Option<String>,
     xai_api_key: Option<String>,
     secrets: KeychainSecrets,
+    scoped_bearer: Option<(String, Option<String>)>,
 }
 
 impl Default for ReqwestLlmBackend {
@@ -327,11 +394,13 @@ impl ReqwestLlmBackend {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_default(),
             meta_api_key,
             xai_api_key,
             secrets,
+            scoped_bearer: None,
         }
     }
 
@@ -339,11 +408,13 @@ impl ReqwestLlmBackend {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_default(),
             meta_api_key: meta_key,
             xai_api_key: xai_key,
             secrets: KeychainSecrets::default(),
+            scoped_bearer: None,
         }
     }
 
@@ -353,12 +424,20 @@ impl ReqwestLlmBackend {
         Self {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_default(),
             meta_api_key,
             xai_api_key,
             secrets: secrets.clone(),
+            scoped_bearer: None,
         }
+    }
+
+    pub fn for_provider(target: &ModelTarget, bearer: Option<String>) -> Self {
+        let mut backend = Self::with_keys(None, None);
+        backend.scoped_bearer = Some((target.api_base.clone(), bearer));
+        backend
     }
 
     fn oauth_preset(provider: &ProviderKind) -> Option<ProviderPreset> {
@@ -381,8 +460,57 @@ impl ReqwestLlmBackend {
         Ok(())
     }
 
+    fn inference_base(&self, target: &ModelTarget) -> Result<String> {
+        if target.provider == ProviderKind::NousPortal
+            && target.auth_mode == ProviderAuthMode::NousPortalOAuth
+            && self.scoped_bearer.is_none()
+            && let Some(reference) = &target.credential_ref
+            && let Some(base) = load_oauth_bundle(&self.secrets, reference)?.inference_base_url
+        {
+            gm_core::config::validate_oauth_destination(
+                ProviderPreset::NousPortal,
+                target.auth_mode,
+                target.protocol,
+                &base,
+            )?;
+            return Ok(base);
+        }
+        Ok(target.api_base.clone())
+    }
+
     async fn resolve_bearer_token(&self, target: &ModelTarget) -> Result<Option<String>> {
         self.verify_destination_origin(target)?;
+        if matches!(
+            target.auth_mode,
+            ProviderAuthMode::ChatGptOAuth | ProviderAuthMode::NousPortalOAuth
+        ) && !(cfg!(test) && target.api_base.starts_with("http://127.0.0.1:"))
+        {
+            let preset = match target.provider {
+                ProviderKind::ChatGpt => ProviderPreset::ChatGpt,
+                ProviderKind::NousPortal => ProviderPreset::NousPortal,
+                _ => {
+                    return Err(GmError::SafetyViolation(
+                        "OAuth provider identity does not match".into(),
+                    ));
+                }
+            };
+            gm_core::config::validate_oauth_destination(
+                preset,
+                target.auth_mode,
+                target.protocol,
+                &target.api_base,
+            )?;
+        }
+
+        if let Some((base, bearer)) = &self.scoped_bearer {
+            if base != &target.api_base {
+                return Err(GmError::SafetyViolation(
+                    "Provider credential belongs to a different destination".into(),
+                ));
+            }
+            return Ok(bearer.clone());
+        }
+
         match target.auth_mode {
             ProviderAuthMode::None => return Ok(None),
             ProviderAuthMode::Cli => return Ok(None),
@@ -394,6 +522,16 @@ impl ReqwestLlmBackend {
                     )));
                 };
                 let mut bundle = load_oauth_bundle(&self.secrets, secret_ref)?;
+                if target.provider == ProviderKind::ChatGpt
+                    && bundle
+                        .identity
+                        .as_ref()
+                        .is_none_or(|i| !i.scopes.iter().any(|s| s == "chatgpt.tokens.use.direct"))
+                {
+                    return Err(GmError::Provider(
+                        "Reconnect ChatGPT in Providers & models and enable plan usage".into(),
+                    ));
+                }
                 if bundle.is_expiring_soon()
                     && let Some(preset) = Self::oauth_preset(&target.provider)
                 {
@@ -407,20 +545,34 @@ impl ReqwestLlmBackend {
 
         if let Some(ref secret_ref) = target.credential_ref {
             let resolver = VaultSecretResolver::new(self.secrets.clone());
-            if let Ok(leased) = resolver.resolve(secret_ref) {
-                return Ok(Some(leased.value));
+            match resolver.resolve(secret_ref) {
+                Ok(leased) => return Ok(Some(leased.value)),
+                Err(error) => {
+                    if !matches!(
+                        secret_ref.as_str(),
+                        "secret://keychain/meta_api_key" | "secret://keychain/xai_api_key"
+                    ) {
+                        return Err(error);
+                    }
+                }
             }
+        } else if target.profile_id.is_some() {
+            return Err(GmError::Config(
+                "Connect the selected provider before sending a message".into(),
+            ));
         }
 
         let fallback = match target.provider {
             ProviderKind::Meta => self
-                .meta_api_key
-                .clone()
-                .or_else(|| self.secrets.get_meta_key().ok()),
+                .secrets
+                .get_meta_key()
+                .ok()
+                .or_else(|| self.meta_api_key.clone()),
             ProviderKind::Xai => self
-                .xai_api_key
-                .clone()
-                .or_else(|| self.secrets.get_xai_key().ok()),
+                .secrets
+                .get_xai_key()
+                .ok()
+                .or_else(|| self.xai_api_key.clone()),
             ProviderKind::KiloGateway => self.secrets.get_secret("kilo_api_key").ok(),
             ProviderKind::OpenRouter => self.secrets.get_secret("openrouter_api_key").ok(),
             ProviderKind::Custom => None,
@@ -443,38 +595,72 @@ impl ReqwestLlmBackend {
         base_url: &str,
         bearer: Option<&str>,
     ) -> Result<Vec<String>> {
+        Ok(self
+            .discover_model_catalog(base_url, bearer)
+            .await?
+            .into_iter()
+            .map(|model| model.id)
+            .collect())
+    }
+
+    pub async fn discover_model_catalog(
+        &self,
+        base_url: &str,
+        bearer: Option<&str>,
+    ) -> Result<Vec<gm_core::config::ProviderModel>> {
         let _ = extract_provider_origin(base_url)?;
-        let url = format!("{}/models", base_url.trim_end_matches('/'));
-        let mut req = self.client.get(&url);
-        if let Some(tok) = bearer.filter(|s| !s.trim().is_empty()) {
-            req = req.bearer_auth(tok);
-        }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| GmError::Provider(format!("Model discovery failed at {url}: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
-            return Err(GmError::Provider(format!(
-                "Model discovery returned {status}: {text}"
-            )));
-        }
-        let val: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| GmError::Provider(format!("Invalid /models JSON: {e}")))?;
+        let resource = if reqwest::Url::parse(base_url).ok().is_some_and(|url| {
+            url.host_str() == Some("api.x.ai") && url.path().trim_end_matches('/') == "/v1"
+        }) {
+            "language-models"
+        } else {
+            "models"
+        };
+        let url = format!("{}/{resource}", base_url.trim_end_matches('/'));
         let mut models = Vec::new();
-        if let Some(arr) = val["data"].as_array() {
-            for item in arr {
-                if let Some(id) = item["id"].as_str()
-                    && !id.trim().is_empty()
+        let mut cursor: Option<String> = None;
+        for _ in 0..20 {
+            let mut req = self.client.get(&url);
+            if let Some(token) = bearer.filter(|value| !value.trim().is_empty()) {
+                req = req.bearer_auth(token);
+            }
+            if let Some(after) = &cursor {
+                req = req.query(&[("after", after)]);
+            }
+            let response = req.send().await.map_err(|_| {
+                GmError::Provider("Model discovery could not reach the provider".into())
+            })?;
+            if !response.status().is_success() {
+                return Err(GmError::Provider(format!(
+                    "Model discovery returned HTTP {}",
+                    response.status()
+                )));
+            }
+            let value: serde_json::Value = response.json().await.map_err(|_| {
+                GmError::Provider("Provider returned an invalid model catalog".into())
+            })?;
+            for model in parse_model_catalog(&value)? {
+                if !models
+                    .iter()
+                    .any(|existing: &gm_core::config::ProviderModel| existing.id == model.id)
                 {
-                    models.push(id.trim().to_string());
+                    models.push(model);
                 }
             }
+            if value["has_more"].as_bool() != Some(true) {
+                return Ok(models);
+            }
+            let next = value["last_id"].as_str().map(str::to_owned);
+            if next.is_none() || next == cursor {
+                return Err(GmError::Provider(
+                    "Provider model pagination did not advance".into(),
+                ));
+            }
+            cursor = next;
         }
-        Ok(models)
+        Err(GmError::Provider(
+            "Provider model catalog exceeded the pagination limit".into(),
+        ))
     }
 
     /// Dedicated OpenAI wire request serializer:
@@ -609,14 +795,17 @@ impl LlmBackend for ReqwestLlmBackend {
         } else {
             "chat/completions"
         };
-        let url = format!("{}/{endpoint}", target.api_base.trim_end_matches('/'));
+        let mut url = format!(
+            "{}/{endpoint}",
+            self.inference_base(target)?.trim_end_matches('/')
+        );
         let body = if target.protocol == WireProtocol::Responses {
             build_responses_body(
                 &target.model,
                 messages,
                 None,
-                Some(0.2),
-                false,
+                None,
+                target.provider == ProviderKind::ChatGpt,
                 target.allow_vision,
             )
         } else {
@@ -652,6 +841,10 @@ impl LlmBackend for ReqwestLlmBackend {
             let refreshed =
                 refresh_oauth_bundle(&self.client, &self.secrets, preset, secret_ref).await?;
             key = Some(refreshed.access_token);
+            url = format!(
+                "{}/{endpoint}",
+                self.inference_base(target)?.trim_end_matches('/')
+            );
             resp = self
                 .send_with_retries(&url, key.as_deref(), &target.provider, &body)
                 .await?;
@@ -659,12 +852,25 @@ impl LlmBackend for ReqwestLlmBackend {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
             return Err(GmError::Provider(format!(
-                "API returned error {status}: {text}"
+                "Provider request failed ({status}). Check authentication, model access, and quota."
             )));
         }
 
+        if target.provider == ProviderKind::ChatGpt && target.protocol == WireProtocol::Responses {
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+            let drain = tokio::spawn(async move { while receiver.recv().await.is_some() {} });
+            let result = crate::responses_api::parse_responses_sse_stream(
+                resp,
+                &target.model,
+                messages,
+                sender,
+                |input, output| estimate_cost_for_target(target, input, output, 0),
+            )
+            .await;
+            let _ = drain.await;
+            return result;
+        }
         let val: serde_json::Value = resp
             .json()
             .await
@@ -737,13 +943,17 @@ impl LlmBackend for ReqwestLlmBackend {
         } else {
             "chat/completions"
         };
-        let url = format!("{}/{endpoint}", target.api_base.trim_end_matches('/'));
+        let mut url = format!(
+            "{}/{endpoint}",
+            self.inference_base(target)?.trim_end_matches('/')
+        );
         let body = if target.protocol == WireProtocol::Responses {
             build_responses_body(
                 &target.model,
                 messages,
                 Some(max_tokens),
-                Some(temperature),
+                // Reasoning models may reject temperature; use the provider default.
+                None,
                 true,
                 target.allow_vision,
             )
@@ -782,6 +992,10 @@ impl LlmBackend for ReqwestLlmBackend {
             let refreshed =
                 refresh_oauth_bundle(&self.client, &self.secrets, preset, secret_ref).await?;
             key = Some(refreshed.access_token);
+            url = format!(
+                "{}/{endpoint}",
+                self.inference_base(target)?.trim_end_matches('/')
+            );
             resp = self
                 .send_with_retries(&url, key.as_deref(), &target.provider, &body)
                 .await?;
@@ -789,9 +1003,8 @@ impl LlmBackend for ReqwestLlmBackend {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
             return Err(GmError::Provider(format!(
-                "API returned error {status}: {text}"
+                "Provider request failed ({status}). Check authentication, model access, and quota."
             )));
         }
 
@@ -1422,7 +1635,7 @@ mod tests {
             .await;
         assert!(result.is_ok());
         let resp = result.unwrap();
-        assert_eq!(resp.model, "grok-4"); // fallback succeeded!
+        assert_eq!(resp.model, fallback.as_ref().unwrap().model); // fallback succeeded!
     }
 
     #[tokio::test]
@@ -1469,7 +1682,7 @@ mod tests {
                 .await;
             // Fallback succeeded, but primary failed
             assert!(res.is_ok());
-            assert_eq!(res.unwrap().model, "grok-4");
+            assert_eq!(res.unwrap().model, fallback.as_ref().unwrap().model);
         }
 
         // Now circuit for Meta must be OPEN
@@ -1480,7 +1693,7 @@ mod tests {
             .execute_routed(&primary, fallback.as_ref(), &msgs)
             .await;
         assert!(res.is_ok());
-        assert_eq!(res.unwrap().model, "grok-4");
+        assert_eq!(res.unwrap().model, fallback.as_ref().unwrap().model);
     }
 
     #[tokio::test]
@@ -1563,5 +1776,23 @@ mod tests {
         // local: $0.0
         let local_cost = estimate_cost_usd("local-vlm-smol", 1_000_000, 1_000_000, 5);
         assert_eq!(local_cost, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn account_visibility_and_real_metadata_are_preserved() {
+        let models=parse_model_catalog(&json!({"models":[{"slug":"visible","display_name":"Visible","visibility":"list","context_window":1000,"input_modalities":["text","image"],"output_modalities":["text"],"supports_tools":true},{"slug":"hidden","visibility":"hidden"},{"slug":"visible","visibility":"list"}]})).unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].input_modalities, ["text", "image"]);
+        assert_eq!(models[0].output_modalities, ["text"]);
+        assert_eq!(models[0].context_window, Some(1000));
+        assert_eq!(models[0].supports_tools, Some(true));
+        assert!(parse_model_catalog(&json!({"error":"denied"})).is_err());
+        let xai=parse_model_catalog(&json!({"models":[{"id":"grok-fixture","input_modalities":["text"],"output_modalities":["text"]}]})).unwrap();
+        assert_eq!(xai[0].input_modalities, ["text"]);
     }
 }

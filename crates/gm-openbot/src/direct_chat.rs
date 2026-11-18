@@ -198,6 +198,27 @@ impl DirectChatStore {
         })
     }
 
+    /// One query returns bounded, non-secret conversation summaries for the sidebar.
+    pub fn conversation_previews(&self) -> Result<serde_json::Value> {
+        let conn = self.conn.lock();
+        let mut statement=conn.prepare("SELECT m.bot_id,substr(m.content,1,160),m.created_at FROM direct_messages_v1 m JOIN (SELECT bot_id,max(seq) AS seq FROM direct_messages_v1 GROUP BY bot_id) latest ON m.seq=latest.seq ORDER BY m.seq DESC LIMIT 1000").map_err(|e|GmError::Platform(e.to_string()))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let mut result = serde_json::Map::new();
+        for row in rows {
+            let (id, content, date) = row.map_err(|e| GmError::Platform(e.to_string()))?;
+            result.insert(id,serde_json::json!({"preview":content.lines().collect::<Vec<_>>().join(" "),"created_at":date}));
+        }
+        Ok(result.into())
+    }
+
     pub fn list_messages(
         &self,
         bot_id: &str,

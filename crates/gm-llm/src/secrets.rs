@@ -160,16 +160,15 @@ impl KeychainSecrets {
         }
 
         // Check provider-specific aliases (e.g. GROK_API_KEY, MUSE_API_KEY)
-        let alias = match account {
-            META_KEY_ACCOUNT => Some("MUSE_API_KEY"),
-            XAI_KEY_ACCOUNT => Some("GROK_API_KEY"),
-            _ => None,
+        let aliases: &[&str] = match account {
+            META_KEY_ACCOUNT => &["MODEL_API_KEY", "MUSE_API_KEY"],
+            XAI_KEY_ACCOUNT => &["GROK_API_KEY"],
+            _ => &[],
         };
-        if let Some(alt) = alias
-            && let Ok(val) = std::env::var(alt)
-        {
-            debug!("Loaded secret '{account}' from environment variable alias {alt}");
-            return Ok(val);
+        for alias in aliases {
+            if let Ok(value) = std::env::var(alias) {
+                return Ok(value);
+            }
         }
 
         Err(GmError::Config(format!(
@@ -215,30 +214,34 @@ impl KeychainSecrets {
     pub fn delete_secret(&self, account: &str) -> Result<()> {
         #[cfg(test)]
         if let Some(memory) = &self.memory {
-            return memory
-                .lock()
-                .remove(account)
-                .map(|_| ())
-                .ok_or_else(|| GmError::Config(format!("Test secret '{account}' not found")));
+            memory.lock().remove(account);
+            return Ok(());
         }
 
         #[cfg(target_os = "macos")]
         {
-            security_framework::passwords::delete_generic_password(&self.service, account)
-                .map_err(|e| {
-                    GmError::Config(format!(
-                        "Failed to delete '{account}' from macOS Keychain: {e}"
-                    ))
-                })?;
+            if let Err(error) =
+                security_framework::passwords::delete_generic_password(&self.service, account)
+                && error.code() != -25300
+            {
+                return Err(GmError::Config(format!(
+                    "Failed to delete '{account}' from macOS Keychain: {error}"
+                )));
+            }
             info!("Deleted secret '{account}' from macOS Keychain");
             Ok(())
         }
 
         #[cfg(not(target_os = "macos"))]
         {
-            keyring::Entry::new(&self.service, account)
+            match keyring::Entry::new(&self.service, account)
                 .and_then(|entry| entry.delete_credential())
-                .map_err(|e| GmError::Config(format!("OS credential store unavailable: {e}")))
+            {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(error) => Err(GmError::Config(format!(
+                    "OS credential store unavailable: {error}"
+                ))),
+            }
         }
     }
 
@@ -276,7 +279,7 @@ mod tests {
         assert_eq!(secrets.get_secret(account).unwrap(), "second");
         secrets.delete_secret(account).unwrap();
         assert!(clone.get_secret(account).is_err());
-        assert!(secrets.delete_secret(account).is_err());
+        assert!(secrets.delete_secret(account).is_ok());
         assert!(KeychainSecrets::in_memory().get_secret(account).is_err());
         unsafe { std::env::remove_var(account) };
     }

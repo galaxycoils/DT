@@ -181,7 +181,7 @@ async fn provider_presets_oauth_responses_discovery_and_revalidation_fixtures() 
     assert!(pkce.authorize_url.contains("code_challenge_method=S256"));
 
     let http = reqwest::Client::new();
-    let chatgpt_bundle = exchange_oauth_code(
+    let mut chatgpt_bundle = exchange_oauth_code(
         &http,
         ProviderPreset::ChatGpt,
         &format!("{base}/oauth/token"),
@@ -194,6 +194,14 @@ async fn provider_presets_oauth_responses_discovery_and_revalidation_fixtures() 
     )
     .await
     .unwrap();
+    chatgpt_bundle.identity = Some(crate::OAuthIdentity {
+        subject: "fixture-subject".into(),
+        email: None,
+        client_id: "client_123".into(),
+        id_token: "fixture-id-token".into(),
+        scopes: vec!["chatgpt.tokens.use.direct".into()],
+        host_id: "fixture-host".into(),
+    });
     let chatgpt_ref =
         store_oauth_bundle(&secrets, ProviderPreset::ChatGpt, &chatgpt_bundle).unwrap();
     assert!(chatgpt_ref.contains("gm_chatgpt_oauth_acct_work"));
@@ -244,6 +252,8 @@ async fn provider_presets_oauth_responses_discovery_and_revalidation_fixtures() 
         expires_at: None,
         token_endpoint: format!("{base}/oauth/token"),
         client_id: "nous_client".into(),
+        identity: None,
+        inference_base_url: None,
     };
     let nous_ref = store_oauth_bundle(&secrets, ProviderPreset::NousPortal, &nous_bundle).unwrap();
     assert!(nous_ref.contains("gm_nous_portal_nous_1"));
@@ -336,6 +346,9 @@ async fn provider_presets_oauth_responses_discovery_and_revalidation_fixtures() 
         fallback_profile_id: None,
         connection_state: gm_core::config::ProviderConnectionState::Connected,
         last_error: None,
+        model_catalog: Vec::new(),
+        health: Default::default(),
+        revision: 0,
     };
     cfg.upsert_profile(prof.clone(), true).unwrap();
     prof.base_url = "http://127.0.0.1:1/changed/v1".to_string();

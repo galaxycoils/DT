@@ -197,19 +197,7 @@ impl LlmRouter {
                 }
                 _ => profile.allow_screenshot_egress,
             };
-        let api_base = match provider {
-            ProviderKind::Meta
-                if !self.config.meta_api_base.is_empty() && profile.id == "meta-default" =>
-            {
-                self.config.meta_api_base.clone()
-            }
-            ProviderKind::Xai
-                if !self.config.xai_api_base.is_empty() && profile.id == "xai-default" =>
-            {
-                self.config.xai_api_base.clone()
-            }
-            _ => profile.base_url.clone(),
-        };
+        let api_base = profile.base_url.clone();
         let validated_origin =
             if profile.connection_state == ProviderConnectionState::NeedsRevalidation {
                 None
@@ -445,13 +433,13 @@ mod tests {
         let router = LlmRouter::new(ProvidersConfig::default());
         let (primary, fallback) = router.route(TaskType::CuVisionStep);
         assert_eq!(primary.provider, ProviderKind::Meta);
-        assert_eq!(primary.model, "muse-spark");
+        assert_eq!(primary.model, "muse-spark-1.3");
         assert!(fallback.is_some());
         assert_eq!(fallback.unwrap().provider, ProviderKind::Xai);
 
         let (primary, fallback) = router.route(TaskType::LiveWebSearch);
         assert_eq!(primary.provider, ProviderKind::Xai);
-        assert_eq!(primary.model, "grok-4");
+        assert_eq!(primary.model, "grok-4.7");
         assert!(fallback.is_some());
     }
 

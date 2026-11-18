@@ -42,6 +42,7 @@ pub fn build_responses_body(
         "model": model,
         "input": serialize_responses_input(messages, allow_vision),
         "stream": stream,
+        "store": false,
     });
     if let Some(mt) = max_tokens
         && let Some(obj) = body.as_object_mut()
@@ -141,7 +142,6 @@ pub async fn parse_responses_sse_stream(
             if let Some(payload) = line.strip_prefix("data:") {
                 let data = payload.trim();
                 if data == "[DONE]" {
-                    finished = true;
                     break 'stream;
                 }
                 let val: serde_json::Value = serde_json::from_str(data)
@@ -169,7 +169,11 @@ pub async fn parse_responses_sse_stream(
                         .await
                         .map_err(|_| GmError::Provider("Stream consumer disconnected".into()))?;
                     full_text.push_str(delta);
-                } else if ev_type == "response.completed" || ev_type == "response.done" {
+                } else if ev_type == "response.incomplete" {
+                    return Err(GmError::Provider(
+                        "Provider returned an incomplete response".into(),
+                    ));
+                } else if ev_type == "response.completed" {
                     finished = true;
                     if let Some(id) = val["response"]["id"].as_str() {
                         response_id = id.to_string();

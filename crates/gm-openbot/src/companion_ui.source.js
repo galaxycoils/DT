@@ -1,110 +1,1943 @@
-'use strict';
-const $=id=>document.getElementById(id), enc=encodeURIComponent;
-const state={_token:'',_data:{},_view:'Bots',_kind:'dm',_target:'muse',_history:[],_at:-1,_sidebar:null,_details:false,_tab:'Overview',_reply:null,_attachments:[],_mode:'chat',_composing:false,_arrow:null,_epoch:0,_messages:[],_windowStart:null,_stream:null,_modal:null,_live:false,_liveTimer:null,_filter:'all',_cursor:0,_library:[],_search:'',_chatSeq:0};
-function node(tag,text,cls){const el=document.createElement(tag);if(text!=null)el.textContent=text;if(cls)el.className=cls;return el;}
-function add(el,...children){el.append(...children.filter(Boolean));return el;}
-function notice(text=''){ $('notice').textContent=text; }
-function button(text,action,cls){const b=node('button',text,cls);b.type='button';b.onclick=()=>run(action,b);return b;}
-async function run(action,b){if(b)b.disabled=true;try{return await action();}catch(e){notice(e.message);}finally{if(b)b.disabled=false;}}
-async function api(path,body,method=body===undefined?'GET':'POST',signal){const response=await fetch(path,{method,headers:{Authorization:'Bearer '+state._token,...(body===undefined?{}:{'Content-Type':'application/json'})},body:body===undefined?undefined:JSON.stringify(body),signal,cache:'no-store'});let value;const type=response.headers.get('content-type')||'';value=type.includes('json')?await response.json():await response.text();if(!response.ok){const e=new Error(value.error||`HTTP ${response.status}`);e.status=response.status;e.current_sha256=value.current_sha256;throw e;}return value;}
-async function mutate(path,body={},method='POST'){const value=await api(path,body,method);await bootstrap();return value;}
-const row=(...items)=>add(node('div',null,'row'),...items), card=(...items)=>add(node('article',null,'card'),...items);
-function field(label,value='',type='text'){const input=node(type==='textarea'?'textarea':type==='select'?'select':'input');if(type!=='textarea'&&type!=='select')input.type=type;if(type==='checkbox')input.checked=!!value;else input.value=value??'';if(type==='password')input.autocomplete='off';if(type==='number')input.step='any';input.setAttribute('aria-label',label);return [add(node('label',label),input),input];}
-function select(label,value,values){const [wrap,input]=field(label,'','select');for(const v of values){const option=node('option',Array.isArray(v)?v[1]:v);option.value=Array.isArray(v)?v[0]:v;input.append(option);}input.value=value;return [wrap,input];}
-function form(parent,values,spec,save,label='Save Changes'){const f=node('form'),inputs={};for(const item of spec){const [key,title,type='text',opts]=item;const [wrap,input]=type==='select'?select(title,values[key],opts):field(title,values[key],type);inputs[key]=input;f.append(wrap);}const submit=node('button',label,'accent');submit.type='submit';f.append(submit);f.onsubmit=e=>{e.preventDefault();run(async()=>{const data={...values};for(const [key,,type]of spec){const input=inputs[key];data[key]=type==='checkbox'?input.checked:type==='number'?Number(input.value):input.value;}for(const [key,,type]of spec)if(type==='password')inputs[key].value='';try{await save(data);}finally{for(const [key,,type]of spec)if(type==='password'){inputs[key].value='';data[key]='';}}},submit);};parent.append(f);return inputs;}
-function clearSecrets(root){root.querySelectorAll('input[type=password],textarea').forEach(i=>i.value='');}
-function closeModal(){stopLive();clearSecrets($('overlay'));$('overlay').replaceChildren();$('overlay').hidden=true;state._modal=null;}
-function modal(title,wide=false){closeModal();state._modal=title;const box=node('section',null,'modal'+(wide?' wide':''));box.setAttribute('role','dialog');box.setAttribute('aria-modal','true');box.setAttribute('aria-label',title);box.append(row(node('h2',title),button('✕',closeModal)));$('overlay').replaceChildren(box);$('overlay').hidden=false;queueMicrotask(()=>box.querySelector('input,textarea,button')?.focus());return box;}
-function textView(title,value){const box=modal(title);box.append(node('pre',typeof value==='string'?value:JSON.stringify(value,null,2)));}
-function confirmAction(title,action){const box=modal(title);const [label,check]=field('I confirm this action',false,'checkbox');const b=button('Confirm',async()=>{if(check.checked){await action();if(state._modal===title)closeModal();}},'danger');b.disabled=true;check.onchange=()=>b.disabled=!check.checked;box.append(label,b);}
-function download(name,text){const url=URL.createObjectURL(new Blob([text],{type:'text/plain'}));const a=node('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
-function copy(text){return navigator.clipboard.writeText(String(text));}
-const avatarUrls=new Map();
-function avatar(bot){const el=node('span',(bot.display_name||bot.id||'?').slice(0,1),'avatar '+(bot.avatar_shape||'circle').toLowerCase().replace('roundedsquare','rounded_square'));el.style.setProperty('--bot',bot.avatar_color||bot.color||'#2f7cf6');if(bot.avatar_asset){const key=bot.id+':'+bot.avatar_asset;let pending=avatarUrls.get(key);if(!pending){pending=fetch('/api/bots/'+enc(bot.id)+'/avatar',{headers:{Authorization:'Bearer '+state._token}}).then(r=>{if(!r.ok)throw new Error('Avatar unavailable');return r.blob();}).then(blob=>URL.createObjectURL(blob));avatarUrls.set(key,pending);if(avatarUrls.size>32){const old=avatarUrls.keys().next().value;avatarUrls.get(old).then(URL.revokeObjectURL).catch(()=>{});avatarUrls.delete(old);}}pending.then(url=>{if(el.isConnected){const img=node('img');img.src=url;img.alt=bot.display_name||bot.id;img.width=32;img.height=32;el.replaceChildren(img);}}).catch(()=>{});}return el;}
-function theme(){const ui=state._data.ui||{};const dark=ui.theme==='dark'||(ui.theme!=='light'&&matchMedia('(prefers-color-scheme: dark)').matches);document.documentElement.dataset.theme=dark?'dark':'light';const bot=(state._data.bots||[]).find(b=>b.id===state._target)||{};document.documentElement.style.setProperty('--accent',bot.avatar_color||'#2f7cf6');document.documentElement.style.setProperty('--outgoing',ui.accent_mode==='black'?(dark?'#272b36':'#1c1f26'):(bot.avatar_color||'#2f7cf6'));$('space-iframe').contentWindow?.postMessage({type:'hatch:space:theme',theme:dark?'dark':'light'},'*');}
-function tabs(parent,names,current,onSelect){const bar=node('div',null,'tabs');for(const name of names){const b=button(name,()=>onSelect(name));b.setAttribute('aria-selected',name===current);bar.append(b);}parent.append(bar);}
-function navigate(view=state._view,kind=state._kind,target=state._target,record=true){if(kind!==state._kind||target!==state._target){state._messages=[];state._windowStart=null;}if(record){const next={view,kind,target};if(JSON.stringify(state._history[state._at])!==JSON.stringify(next)){state._history.splice(state._at+1);state._history.push(next);if(state._history.length>100)state._history.shift();state._at=state._history.length-1;}}state._view=view;state._kind=kind;state._target=target;state._epoch++;state._reply=null;if(innerWidth<900)state._sidebar=false;renderChrome();renderWorkspace();if(view==='Bots'&&state._token)run(loadMessages);if(state._details)renderDetails();}
-function historyMove(delta){const at=state._at+delta;if(at<0||at>=state._history.length)return;state._at=at;const x=state._history[at];navigate(x.view,x.kind,x.target,false);}
-function renderChrome(){theme();const rail=$('rail');rail.replaceChildren();for(const [name,icon]of [['Bots','◉'],['Feed','⚡'],['Goals','◎'],['Spaces','◫'],['Audit','⛨']]){const b=button(icon,()=>navigate(name));b.title=name;b.setAttribute('aria-label',name);b.setAttribute('aria-selected',state._view===name);rail.append(b);}rail.append(node('div',null,'spacer'));for(const [name,icon,action]of [['Connect Apps','⊞',connectApps],['Shortcuts','?',shortcuts],['Settings','⚙',settings],['Emergency Kill','⛔',()=>mutate('/api/system/kill')]]){const b=button(icon,action,'utility');b.title=name;b.setAttribute('aria-label',name);rail.append(b);}renderSidebar();const header=$('header');const bot=(state._data.bots||[]).find(b=>b.id===state._target)||{id:state._target};const group=(state._data.channels||[]).find(c=>c.id===state._target);const title=state._view==='Bots'?(state._kind==='channel'?'#'+state._target:bot.display_name||bot.id):state._view;header.replaceChildren(button('<',()=>historyMove(-1)),button('>',()=>historyMove(1)),button('☰',()=>{state._sidebar=$('sidebar').classList.contains('collapsed');renderSidebar();}),node('h2',title));if(state._view==='Bots'){header.append(button('Computer',liveComputer),button('ⓘ',()=>{state._details=!state._details;renderDetails();}));if(state._kind==='channel'&&group)header.append(button('Edit group',()=>editChannel(group)));}header.append(button('⌘',palette),button('⚙',settings));$('composer').hidden=state._view!=='Bots';renderChips();}
-function renderSidebar(){const aside=$('sidebar'),bots=state._data.bots||[],channels=state._data.channels||[],visible=bots.filter(b=>!b.hidden_from_sidebar),count=visible.length+channels.filter(c=>!c.archived).length;const collapse=state._sidebar===false||(state._sidebar===null&&(count<=1||innerWidth<900));aside.className=collapse?'collapsed':count<=4&&state._sidebar!==true?'compact':'';aside.replaceChildren();const menu=button('＋',()=>{const box=modal('Create');box.append(button('Create Bot',()=>editBot()),button('New Group Chat',()=>editChannel()),button('New Section',()=>sectionEditor()));});aside.append(row(node('strong','Grok Muse','name'),menu));const filter=node('input',null,'filter');filter.placeholder='Filter bots and groups';filter.setAttribute('aria-label','Filter bots and groups');filter.value=state._search;filter.oninput=()=>{state._search=filter.value;renderSidebar();const el=aside.querySelector('input');el?.focus();el?.setSelectionRange(state._search.length,state._search.length);};aside.append(filter);const needle=state._search.toLowerCase();const matches=x=>!needle||JSON.stringify([x.id,x.display_name,x.name,x.topic]).toLowerCase().includes(needle);function botRow(bot){const b=button('',()=>navigate('Bots','dm',bot.id),'chat'+(state._target===bot.id&&state._kind==='dm'?' active':''));const phrase=state._data.bot_statuses?.[bot.id]||{};b.append(avatar(bot),add(node('span',null,'name'),node('strong',(bot.is_primary?'★ ':'')+(bot.display_name||bot.id)),node('small',phrase.phrase||phrase.status_phrase||bot.role_title)));const unread=state._data.unread_counts?.['dm:'+bot.id]||0;if(unread||phrase.needs_attention)b.append(node('span',phrase.needs_attention?'!':String(unread),'badge'));b.title=bot.display_name||bot.id;b.oncontextmenu=e=>{e.preventDefault();botMenu(bot);};aside.append(b);}const sorted=visible.filter(matches).sort((a,b)=>Number(b.pinned)-Number(a.pinned));for(const b of sorted.filter(b=>b.pinned||!b.section_id))botRow(b);for(const section of state._data.sections||[]){const d=node('details',null,'section');d.open=!section.collapsed;const summary=node('summary',section.name);d.append(summary);const container=node('div');d.append(container);aside.append(d);d.ontoggle=()=>run(()=>mutate('/api/sections/'+enc(section.id),{collapsed:!d.open},'PATCH'));for(const b of sorted.filter(b=>!b.pinned&&b.section_id===section.id)){botRow(b);container.append(aside.lastChild);}}for(const c of channels.filter(matches)){const b=button('# '+(c.name||c.id)+(c.archived?' · archived':''),()=>navigate('Bots','channel',c.id),'chat');const n=state._data.unread_counts?.['channel:'+c.id];if(n)b.append(node('span',n,'badge'));b.oncontextmenu=e=>{e.preventDefault();editChannel(c);};aside.append(b);}const hidden=bots.filter(b=>b.hidden_from_sidebar&&matches(b));if(hidden.length){const d=node('details',null,'section');d.append(node('summary',`Hidden Bots (${hidden.length})`));aside.append(d);for(const b of hidden){botRow(b);d.append(aside.lastChild);}}const status=state._data.status||{};aside.append(add(node('footer'),node('div',`$${Number(status.daily_spend_usd||0).toFixed(2)} / $${Number(status.daily_cap_usd||0).toFixed(2)}`),node('small',`${state._token?'● Daemon':'○ Disconnected'} · ${state._data.version||''}`),button(`Connect apps (${state._data.connected_app_count||0})`,connectApps)));}
-async function bootstrap(){const epoch=state._epoch;const data=await api('/api/bootstrap');if(epoch!==state._epoch)return;state._data=data;renderChrome();renderWorkspace();}
-function botMenu(bot){const box=modal(bot.display_name||bot.id),prefs=values=>mutate('/api/bots/'+enc(bot.id)+'/ui-prefs',values,'PUT');for(const [label,values]of [[bot.pinned?'Unpin':'Pin to top',{pinned:!bot.pinned}],['Set as primary Bot',{is_primary:true}],[bot.hidden_from_sidebar?'Show in sidebar':'Hide from sidebar',{hidden_from_sidebar:!bot.hidden_from_sidebar}],[bot.notifications_enabled?'Mute notifications':'Enable notifications',{notifications_enabled:!bot.notifications_enabled}]])box.append(button(label,async()=>{await prefs(values);closeModal();}));box.append(button('Edit Bot',()=>editBot(bot)),button('Avatar',()=>avatarPicker(bot)),button('Export template',()=>exportTemplate(bot.id)),button('Duplicate',()=>{const d=modal('Duplicate Bot');form(d,{source_bot_id:bot.id,new_bot_id:'',display_name:bot.display_name},[['new_bot_id','New ID'],['display_name','Name']],async v=>{await mutate('/api/bots/'+enc(bot.id)+'/duplicate',v);closeModal();});}));const [wrap,s]=select('Move to section',bot.section_id||'', [['','None'],...(state._data.sections||[]).map(x=>[x.id,x.name])]);box.append(wrap);s.onchange=()=>run(()=>prefs({section_id:s.value||null}));if(!bot.is_primary&&bot.id!=='muse')box.append(button('Delete Bot',()=>confirmAction('Delete '+bot.id,()=>mutate('/api/bots/'+enc(bot.id),undefined,'DELETE')),'danger'));}
-function sectionEditor(){const box=modal('New Section');form(box,{name:''},[['name','Section name']],async v=>{await mutate('/api/sections',v);closeModal();});}
-function editBot(bot){const box=modal(bot?'Edit Bot':'Create Bot');const data=bot||{id:'',display_name:'',role_title:'Specialist',system_prompt:'You are a helpful specialist.',avatar_shape:'Circle',avatar_color:'#2f7cf6',allow_gui:false,allow_shell:false,allow_network:false,preferred_provider:null,preferred_model:null,notifications_enabled:true,drafts_enabled:true,task_mode_default:'chat'};form(box,data,[['id','Bot ID'],['display_name','Name'],['role_title','Role'],['system_prompt','Instructions','textarea'],['allow_gui','Allow GUI','checkbox'],['allow_shell','Allow Shell','checkbox'],['allow_network','Allow Network','checkbox'],['preferred_provider','Provider'],['preferred_model','Model'],['task_mode_default','Default mode','select',['chat','queue']],['notifications_enabled','Notifications','checkbox'],['drafts_enabled','Drafts','checkbox']],async v=>{v.preferred_provider||=null;v.preferred_model||=null;await mutate('/api/bots',v);closeModal();});box.append(button('Browse / Import templates',templates));}
-function editChannel(channel){const box=modal(channel?'Edit Group':'New Group Chat');const values=channel?{...channel,participants:(channel.participants||[]).join(',')}:{id:'',topic:'',instructions:'',participants:state._target,paused:false,archived:false};form(box,values,[['id','Channel ID'],['topic','Topic'],['instructions','Instructions','textarea'],['participants','Bot IDs (comma separated)'],['paused','Paused','checkbox'],['archived','Archived','checkbox']],async v=>{v.participants=v.participants.split(',').map(s=>s.trim()).filter(Boolean);await mutate(channel?'/api/channels/'+enc(channel.id):'/api/channels',v,channel?'PATCH':'POST');closeModal();});}
-function avatarPicker(bot){const box=modal('Bot Avatar');form(box,bot,[['avatar_shape','Shape','select',['Circle','Hex','RoundedSquare','Diamond','Pill','Spark']],['avatar_color','Color','color']],v=>mutate('/api/bots/'+enc(bot.id)+'/ui-prefs',{avatar_shape:v.avatar_shape,avatar_color:v.avatar_color},'PUT'));box.append(button('Upload image ≤25 MB',()=>{$('avatar-file').onchange=()=>run(async()=>{const file=$('avatar-file').files[0];if(!file)return;const bytes_base64=await fileBase64(file);await mutate('/api/bots/'+enc(bot.id)+'/avatar',{bytes_base64,extension:file.type==='image/jpeg'?'jpg':file.type==='image/webp'?'webp':'png'});$('avatar-file').value='';});$('avatar-file').click();}),button('Generate image',()=>notice('Configure an image generation bridge in Connect Apps.')));}
-async function exportTemplate(id){download('grokbot-team.json',JSON.stringify(await api('/api/templates/export',{bot_ids:[id]}),null,2));}
-function templates(){const box=modal('Import Bot Template');form(box,{bundle_json:'',overwrite:false},[['bundle_json','Template JSON','textarea'],['overwrite','Overwrite existing bots','checkbox']],async v=>{const preview=await api('/api/templates/preview',v);confirmAction('Import template: '+JSON.stringify(preview),()=>mutate('/api/templates/import',v));},'Preview Import');}
-async function loadMessages(before){const epoch=state._epoch,seq=++state._chatSeq;const path=state._kind==='dm'?`/api/dm/${enc(state._target)}/messages?limit=100${before?'&before_seq='+before:''}`:`/api/channels/${enc(state._target)}/messages`;const data=await api(path);if(epoch!==state._epoch||seq!==state._chatSeq)return;const messages=Array.isArray(data)?data:data.messages||[];state._messages=[...new Map([...state._messages,...messages].map(m=>[m.id,m])).values()].sort((a,b)=>a.seq-b.seq);if(before)state._windowStart=0;renderMessages();await api('/api/chats/read',{chat_kind:state._kind,chat_id:state._target});}
-function safeUrl(raw){try{const u=new URL(raw,location.href);if(['http:','https:'].includes(u.protocol))return u.href;}catch{}return null;}
-function markdown(text){const root=node('div',null,'body'),lines=String(text||'').split('\n');let i=0;while(i<lines.length){const line=lines[i];if(line.startsWith('```')){const code=[];i++;while(i<lines.length&&!lines[i].startsWith('```'))code.push(lines[i++]);const pre=node('pre',code.join('\n'));root.append(button('Copy code',()=>copy(code.join('\n'))),pre);i++;continue;}if(line.trim().startsWith('|')&&/\|?\s*:?-{3}/.test(lines[i+1]||'')){const raw=[line,lines[i+1]],cells=l=>l.trim().replace(/^\||\|$/g,'').split('|').map(c=>c.trim()),headers=cells(line),rows=[];i+=2;while(i<lines.length&&lines[i].trim().startsWith('|')){raw.push(lines[i]);rows.push(cells(lines[i++]));}root.append(tableView(headers,rows,raw.join('\n')));continue;}const h=/^(#{1,6}) (.*)/.exec(line);const p=node(h?'h'+h[1].length:line.startsWith('> ')?'blockquote':'div');inline(p,h?h[2]:line.replace(/^> /,''));root.append(p);i++;}return root;}
-function inline(parent,text){const re=/(`+)(.*?)\1|\*\*(.*?)\*\*|\[([^\]]+)\]\(([^)]+)\)|【([^】]+)】/g;let at=0,m;while((m=re.exec(text))){parent.append(document.createTextNode(text.slice(at,m.index)));if(m[2]!=null)parent.append(node('code',m[2]));else if(m[3]!=null)parent.append(node('strong',m[3]));else if(m[4]!=null){const url=safeUrl(m[5]);if(url){const a=node('a',m[4]);a.href=url;a.rel='noopener noreferrer';a.target='_blank';parent.append(a);}else parent.append(document.createTextNode(m[0]));}else parent.append(node('span',m[6],'badge'));at=re.lastIndex;}parent.append(document.createTextNode(text.slice(at)));}
-function tableView(headers,rows,raw,expanded=false){const wrap=node('div',null,'table-wrap'),table=node('table'),head=node('tr');for(const h of headers)head.append(node('th',h));table.append(add(node('thead'),head));const body=node('tbody');for(const r of rows){const tr=node('tr');for(const c of r)tr.append(node('td',c));body.append(tr);}table.append(body);wrap.append(row(button('Copy Markdown',()=>copy(raw)),button('Copy for Slack',()=>copy('```\n'+[headers,...rows].map(r=>r.join('\t')).join('\n')+'\n```')),expanded?null:button('Expand ⤢',()=>modal('Expanded Table',true).append(tableView(headers,rows,raw,true)))),table);return wrap;}
-function renderMessages(){if(state._view!=='Bots')return;const area=$('workspace'),oldScroll=area.scrollTop,nearEnd=area.scrollHeight-oldScroll-area.clientHeight<100;let content=area.querySelector('.transcript');if(!content){content=node('div',null,'transcript');area.replaceChildren(content);}const start=state._windowStart??Math.max(0,state._messages.length-200),messages=state._messages.slice(start,start+200);const existing=new Map([...content.children].map(x=>[x.dataset.id,x]));const desired=[];if(state._messages.length)desired.push(button('Load earlier messages',()=>start>0?(state._windowStart=Math.max(0,start-100),renderMessages()):loadMessages(state._messages[0].seq)));if(start+200<state._messages.length)desired.push(button('Newer messages',()=>{state._windowStart=Math.min(state._messages.length-200,start+100);renderMessages();}));for(const m of messages){const key=String(m.id||m.seq),signature=JSON.stringify(m);let el=existing.get(key);if(!el||el.dataset.signature!==signature){el=node('article',null,'message'+(m.role==='user'||m.author==='You'?' user':''));el.tabIndex=0;el.dataset.id=key;el.dataset.signature=signature;el.append(row(node('strong',m.author||m.bot_id||'Muse'),node('small',m.created_at?new Date(m.created_at).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'')));if(m.reply_to_id)el.append(node('small','Reply to '+m.reply_to_id));for(const part of String(m.content||m.text||'').split(/<message_break\s*\/>/).slice(0,20))el.append(markdown(part.replace(/<options>[\s\S]*?(<\/options>|$)/g,'')));const options=/<options>([\s\S]*?)<\/options>/.exec(m.content||'');if(options)for(const label of options[1].split('\n').map(x=>x.replace(/^[-*\d.)\s]+/,'').trim()).filter(Boolean))el.append(button(label,()=>sendMessage(label)));if(m.card||m.card_json){let c=m.card||m.card_json;if(typeof c==='string'){try{c=JSON.parse(c);}catch{c={summary:c};}}el.append(chatCard(c,m));}const actions=node('div',null,'row actions');actions.append(button('Reply',()=>{state._reply={id:m.id,text:(m.content||'').slice(0,80)};renderChips();$('draft').focus();}),button('Copy',()=>copy(m.content||'')),button('Request ID',()=>copy(m.request_id||m.id)));for(const emoji of ['👍','❤️','😂','🎉','👀','🚀'])actions.append(button(emoji,()=>api('/api/messages/'+enc(m.id)+'/reactions',{emoji,chat_kind:state._kind,chat_id:state._target})));el.append(actions);}desired.push(el);}for(const child of [...content.children])if(!desired.includes(child)){clearSecrets(child);child.remove();}desired.forEach((el,index)=>{if(content.children[index]!==el)content.insertBefore(el,content.children[index]||null);});if(nearEnd)area.scrollTop=area.scrollHeight;}
-function chatCard(c,m){const box=card(),kind=c.kind||c.type||'info',id=c.request_id||m.request_id||m.id,status=c.status||'pending';box.append(row(node('strong',c.title||kind.replaceAll('_',' ')),node('span',status,'badge')));if(c.summary||c.details)box.append(node('p',c.summary||c.details));const pending=status==='pending';const approve=(approved,remember)=>api('/api/approvals/'+enc(id)+'/respond',{approved,...(remember?{remember_rule:remember}:{})}).then(r=>{if(remember&&r.rule_saved)notice('Saved to Custom Rules');return loadMessages();});if(['approval','terminal_approval','ask_first'].includes(kind)){if(c.command)box.append(node('pre',c.command),node('small','CWD: '+(c.cwd||'workspace')));if(pending){box.append(row(button('Allow once',()=>approve(true)),button('Deny',()=>approve(false)),button('Manage settings',()=>settings('Computer'))));if(kind==='approval')box.append(button('Always allow',()=>{const d=modal('Always allow');form(d,{pattern:c.pattern||c.title||''},[['pattern','Custom rule pattern']],async v=>{await approve(true,v.pattern);closeModal();});}));}}
-else if(['secret_prompt','secure_form'].includes(kind)&&pending){const inputs={},f=node('form');for(const key of c.fields||['password']){const name=typeof key==='string'?key:key.key;const [w,input]=field(name,'','password');inputs[name]=input;f.append(w);}const [w,save]=field("Save securely to Bot's Vault",false,'checkbox');f.append(w);const submit=node('button','Submit securely','accent');submit.type='submit';f.append(submit,button('Cancel',async()=>{clearSecrets(f);await api('/api/secrets/'+enc(id)+'/submit',{cancelled:true});loadMessages();}));f.onsubmit=e=>{e.preventDefault();run(async()=>{const fields=Object.entries(inputs).map(([k,v])=>[k,v.value]);clearSecrets(f);let body={fields,bot_id:state._target,save_to_vault:save.checked};try{await api('/api/secrets/'+enc(id)+'/submit',body);}finally{fields.forEach(p=>p[1]='');body=null;}await loadMessages();},submit);};box.append(f);}
-else if(['question','clarifying_question'].includes(kind)&&pending){const answers=[];for(const option of c.options||[]){const [w,input]=field(option,false,c.allow_multiple?'checkbox':'radio');input.name='answer-'+id;input.value=option;box.append(w);answers.push(input);}const [w,other]=field('Something else');box.append(w,button('Respond',async()=>{await api('/api/questions/'+enc(id)+'/respond',{answer:[...answers.filter(x=>x.checked).map(x=>x.value),other.value].filter(Boolean).join('\n')});await loadMessages();}));}
-else if(['wheel_handoff','take_control'].includes(kind)){box.append(node('p',c.instructions||c.blocker||''),button('Take over',liveComputer));form(box,{note:''},[['note','Handback note']],v=>mutate('/api/tasks/'+enc(c.task_id)+'/resume',v),"I'm done");}
-else if(kind==='draft'){box.append(node('p',[c.to,c.subject,c.body].filter(Boolean).join('\n')),button('Edit inline',()=>textView('Edit draft',c.body||c.content||'')),button('Send message',()=>connectApps()),button('Discard',()=>notice('Draft discarded from this view.')));box.append(node('small','Connect Gmail/Slack in Connect Apps to send through an adapter.'));}
-else if(['order_approval','shopping'].includes(kind)){box.append(node('p',`${c.merchant||''} · ${c.item_title||''} · $${Number(c.amount_usd||0).toFixed(2)}`),node('small','Payment Checkout Adapter not connected'),button('Configure Checkout',connectApps));if(pending)box.append(button('Cancel',()=>approve(false)));}
-else if(['phone_call','meeting','connect_app','reauth'].includes(kind))box.append(node('p','Connect Voice / Meeting Bridge or the requested app in Connect Apps.'),button('Connect / Configure',connectApps));
-else if(['file_output','page','space_preview'].includes(kind))box.append(button('Open split view',()=>c.slug?openSpace(c.slug):openFile(c.path||c.file)),button('Copy link',()=>copy(c.url||c.path||'')));
-else if(['media_output','media'].includes(kind))box.append(button('Open Lightbox',()=>lightbox(c.uri||c.path,c.mime,c.title)));
-else if(['initiative','digest_brief'].includes(kind)){box.append(button('Accept & Run',()=>sendMessage(c.instruction||c.summary||c.title)),button('Edit prompt',()=>{$('draft').value=c.instruction||c.summary||'';composerChanged();}),button('Mute check-ins',()=>mutate('/api/bots/'+enc(state._target)+'/ui-prefs',{notifications_enabled:false},'PUT')));}
-else if(['subagent_spawn','a2a_handoff'].includes(kind)){box.append(button('Open @'+(c.target_bot_id||c.bot_id),()=>navigate('Bots','dm',c.target_bot_id||c.bot_id)),node('pre',JSON.stringify(c.steps||c.trace||[],null,2)));}
-else box.append(node('pre',JSON.stringify(c,null,2)));return box;}
-function renderChips(){const chips=$('chips');chips.replaceChildren();if(state._reply)chips.append(button('Reply: '+state._reply.text+' ✕',()=>{state._reply=null;renderChips();}));state._attachments.forEach((a,i)=>chips.append(button(a.name+' ✕',()=>{state._attachments.splice(i,1);renderChips();})));$('send').textContent=$('draft').value.trim()||state._attachments.length?'Send ↑':'Start Voice Chat';$('mode').textContent=state._mode==='chat'?'Chat':'Queue Task';}
-function arrowEdit(text){let ticks=0;for(let i=0;i<text.length;i++){if(text[i]==='`'){let n=1;while(text[i+n]==='`')n++;if(!ticks)ticks=n;else if(ticks===n)ticks=0;i+=n-1;}else if(!ticks&&text.slice(i,i+2)==='->')return {text:text.slice(0,i)+'→'+text.slice(i+2),position:i};}return {text,position:null};}
-function composerChanged(){const draft=$('draft');if(!state._composing){const result=arrowEdit(draft.value);if(result.position!==null){const cursor=draft.selectionStart;draft.value=result.text;draft.setSelectionRange(Math.max(0,cursor-1),Math.max(0,cursor-1));state._arrow=result.position;}}renderChips();const match=/(?:^|\s)([@/][\w:-]*)$/.exec(draft.value);const pop=$('suggestions');pop.replaceChildren();pop.hidden=!match;if(match){const values=match[1][0]==='@'?['@everyone',...(state._data.bots||[]).map(b=>'@'+b.id),...(state._data.routines||[]).map(x=>'@routine:'+(x.routine||x).id),...(state._data.integrations||[]).map(x=>'@app:'+x.id)]:['/do',...(Array.isArray(state._data.skills)?state._data.skills:state._data.skills?.skills||[]).map(x=>'/'+(x.name||x.id))];for(const text of values.filter(x=>x.toLowerCase().startsWith(match[1].toLowerCase())).slice(0,20))pop.append(button(text,()=>{draft.value=draft.value.slice(0,draft.value.length-match[1].length)+text+' ';pop.hidden=true;draft.focus();renderChips();}));}}
-async function sendMessage(text){text=(text??$('draft').value).trim();if(!text&&!state._attachments.length){notice('Configure STT/TTS voice bridge in Connect Apps.');return;}const epoch=state._epoch,target=state._target,kind=state._kind;const content=[(state._mode==='queue'&&!text.startsWith('/do ')?'/do ':'')+text,...state._attachments.map(a=>'Attached file: '+a.path)].filter(Boolean).join('\n');const body=kind==='dm'?{content,reply_to_id:state._reply?.id||null}:{content,author:'You',reply_to_id:state._reply?.id||null};await api(kind==='dm'?'/api/dm/'+enc(target)+'/messages':'/api/channels/'+enc(target)+'/messages',body);if(epoch!==state._epoch)return;$('draft').value='';state._attachments=[];state._reply=null;renderChips();await loadMessages();}
-async function fileBase64(file){if(file.size>25*1024*1024)throw new Error('File exceeds 25 MB');return new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=reject;reader.readAsDataURL(file);});}
-async function attachFiles(files){for(const file of files){const res=await api('/api/bots/'+enc(state._target)+'/attachments',{filename:file.name,bytes_base64:await fileBase64(file)});state._attachments.push({name:file.name,path:res.attachment_path||res.path||res.relative_path||res.attachment?.path||res.uri});}renderChips();}
-function openLibrary(item){const uri=item.uri_or_path||'';if(item.kind==='pages')return openSpace(uri);if(item.kind==='apps')return connectApps();if(item.kind==='media')return lightbox(uri,/\.mp4$/i.test(uri)?'video/mp4':'image/png',item.title);if(item.kind==='links'){const url=safeUrl(uri);if(url)window.open(url,'_blank','noopener,noreferrer');return;}return openFile(uri.replace(/^sandbox:\/\//,''));}
-async function openFile(file){const res=await api('/api/bots/'+enc(state._target)+'/files/preview?path='+enc(file));$('split').hidden=false;$('space-iframe').hidden=true;$('page').hidden=false;$('split-head').replaceChildren(node('strong',file),button('Message about page',()=>{$('draft').value+=' About '+file+': ';composerChanged();}),button('✕',closeSplit));$('page').replaceChildren(markdown(res.content||res.text||JSON.stringify(res)));}
-function closeSplit(){$('split').hidden=true;$('space-iframe').removeAttribute('src');$('page').replaceChildren();}
-async function openSpace(slug){const res=await api('/api/spaces/'+enc(slug)+'/url'),url=new URL(res.url);if(url.origin!==`http://127.0.0.1:${state._data.status.spaces_port}`||url.pathname!==`/spaces/v2/${enc(slug)}/`||!url.searchParams.get('token'))throw new Error('Rejected isolated Space URL');$('split').hidden=false;$('page').hidden=true;const frame=$('space-iframe');frame.hidden=false;frame.src=url.href;frame.onload=theme;$('split-head').replaceChildren(node('strong',slug),button('Edit HTML',()=>spaceEditor(slug)),button('Publish',()=>confirmAction('Publish '+slug,()=>mutate('/api/spaces/'+enc(slug)+'/publish',{confirmed:true}))),button('Unpublish',()=>mutate('/api/spaces/'+enc(slug)+'/unpublish')),button('✕',closeSplit));}
-async function spaceEditor(slug){const value=await api('/api/spaces/'+enc(slug)+'/file?path=index.html');const box=modal('Edit Space HTML');form(box,{content:value.content||'',expected_sha256:value.sha256,path:'index.html'},[['content','HTML','textarea']],async v=>{await api('/api/spaces/'+enc(slug)+'/file',v,'PUT');closeModal();openSpace(slug);});}
-async function lightbox(uri,mime='image/png',title='Media'){const box=modal(title,true);let url=safeUrl(uri);if(String(uri).startsWith('sandbox://')){const relative=String(uri).slice(10);if(relative.split('/').includes('..')||relative.startsWith('/')||relative.includes('\\'))throw new Error('Unsafe sandbox media path');const value=await api('/api/bots/'+enc(state._target)+'/files/preview?path='+enc(relative));url=value.data_url||value.url;if(!url)throw new Error('Media preview unavailable');}if(!url)throw new Error('Unsupported media URL');const media=node(mime.startsWith('video')?'video':'img');if(media.tagName==='VIDEO')media.controls=true;media.src=url;media.alt=title;let zoom=1;const controls=row(button('−',()=>{zoom=Math.max(.25,zoom-.25);media.style.transform=`scale(${zoom})`;}),button('+',()=>{zoom=Math.min(4,zoom+.25);media.style.transform=`scale(${zoom})`;}),button('Reset',()=>{zoom=1;media.style.transform='';}),button('Download',()=>{const a=node('a');a.href=url;a.download=title;a.click();}));if(media.tagName==='VIDEO'){const [w,s]=select('Speed','1',['0.5','1','1.25','1.5','2']);s.onchange=()=>media.playbackRate=Number(s.value);controls.append(w);}box.append(controls,media);}
-function renderWorkspace(){if(state._view==='Bots'){renderMessages();return;}const area=$('workspace'),content=node('div',null,'content');area.replaceChildren(content);if(state._view==='Feed'){form(content,{prompt:state._data.feed?.brief_prompt||''},[['prompt','Brief topic prompt','textarea']],v=>mutate('/api/activity/prompt',v),'Save brief prompt');form(content,{title:'',body:''},[['title','Post title'],['body','Post','textarea']],v=>mutate('/api/activity',v),'Post');for(const p of state._data.feed?.posts||[]){const stars=row();for(let rating=1;rating<=5;rating++)stars.append(button('★'.repeat(rating),()=>mutate('/api/activity/'+enc(p.id)+'/rate',{rating})));content.append(card(node('h3',p.title),markdown(p.body),stars));}content.append(node('h2','Ideas'),button('Generate Ideas',async()=>{const ideas=await api('/api/ideas',{});state._data.feed.ideas=ideas;renderWorkspace();}));form(content,{title:'',description:'',action_prompt:''},[['title','Idea title'],['description','Description'],['action_prompt','Action prompt','textarea']],v=>mutate('/api/ideas',v),'Create Idea');for(const idea of state._data.feed?.ideas||[])content.append(card(node('h3',idea.title),node('p',idea.description),row(button('Run',()=>mutate('/api/ideas/'+enc(idea.id)+'/run',{bot_id:state._target})),button('Dismiss',()=>mutate('/api/ideas/'+enc(idea.id)+'/dismiss')))));}
-if(state._view==='Goals'){content.append(button('New Goal',()=>goalEditor()));for(const entry of state._data.goals||[]){const goal=entry.goal||entry;content.append(card(node('h3',goal.title),node('p',goal.description),node('small',`${goal.status||''} · ${goal.category||''}`),node('pre',JSON.stringify(goal.stop_conditions||[],null,2)),row(button('Edit',()=>goalEditor(goal)),button('Subgoal',()=>goalEditor(null,goal.slug)),button('Complete',()=>mutate('/api/goals',{slug:goal.slug,action:'complete',verified:true},'PATCH')),button('Abandon',()=>confirmAction('Abandon goal',()=>mutate('/api/goals',{slug:goal.slug,action:'abandon'},'PATCH'))))));}}
-if(state._view==='Spaces'){content.append(button('New Static Space',()=>{const box=modal('New Static Space');form(box,{slug:'',title:'',kind:'static',html:'<!doctype html><h1>Hello</h1>'},[['slug','Slug'],['title','Title'],['html','HTML','textarea']],async v=>{await mutate('/api/spaces',v);closeModal();});}));for(const entry of state._data.spaces||[]){const sp=entry.meta||entry;content.append(card(node('h3',sp.title||sp.slug),node('small',sp.published?'Published':'Local'),row(button('Open split view',()=>openSpace(sp.slug)),button('Edit HTML',()=>spaceEditor(sp.slug)),button('Publish',()=>confirmAction('Publish Space',()=>mutate('/api/spaces/'+enc(sp.slug)+'/publish',{confirmed:true}))),button('Unpublish',()=>mutate('/api/spaces/'+enc(sp.slug)+'/unpublish')),button('Delete',()=>confirmAction('Delete Space',()=>mutate('/api/spaces/'+enc(sp.slug),undefined,'DELETE'))))));}}
-if(state._view==='Audit'){const [wrap,filter]=select('Category','',['','permitted','refused','failed']);const list=node('div');const load=async()=>{const records=await api('/api/audit?limit=100&category='+enc(filter.value));list.replaceChildren(...(Array.isArray(records)?records:records.records||[]).map(r=>card(node('strong',r.category||r.kind),node('pre',JSON.stringify(r,null,2)))));};filter.onchange=()=>run(load);content.append(wrap,row(button('Weekly Report',()=>report(7)),button('Monthly Report',()=>report(30))),list,node('h2','Task Queue'));run(load);for(const task of state._data.recent_tasks||[])content.append(card(node('strong',task.instruction||task.id),node('small',task.status),row(...['retry','resume','pause','cancel'].map(action=>button(action,()=>mutate('/api/tasks/'+enc(task.id)+'/'+action,{note:''}))))));}}
-function report(days){const records=state._data.recent_tasks||[];textView(`${days===7?'Weekly':'Monthly'} Report`,{since:new Date(Date.now()-days*86400000).toISOString(),spend:state._data.status,recent_tasks:records});}
-function goalEditor(goal,parent){const box=modal(goal?'Edit Goal':'New Goal');const values=goal||{title:'',description:'',category:'',parent_goal_id:parent||null,stop_conditions:[]};form(box,{...values,stop:JSON.stringify(values.stop_conditions||[])},[['title','Title'],['description','Description','textarea'],['category','Category'],['stop','Stop conditions (JSON)','textarea']],async v=>{v.stop_conditions=JSON.parse(v.stop);delete v.stop;if(goal)v.action='update';await mutate('/api/goals',v,goal?'PATCH':'POST');closeModal();});}
-function renderDetails(){const drawer=$('details');drawer.hidden=!state._details;if(!state._details)return;drawer.replaceChildren(row(node('h2','Bot Details'),button('✕',()=>{state._details=false;drawer.hidden=true;})));tabs(drawer,['Overview','Routines','Library','Memory'],state._tab,name=>{state._tab=name;renderDetails();});const body=node('div');drawer.append(body);const bot=(state._data.bots||[]).find(b=>b.id===state._target)||{};if(state._tab==='Overview'){body.append(avatar(bot),node('h3',bot.display_name||state._target),button('Edit Profile',()=>editBot(bot)),button('Avatar',()=>avatarPicker(bot)),button('Share template',()=>exportTemplate(state._target)),button('Teach a task',teachTask),node('h3','Upcoming Meetings'),node('p','Connect Calendar / Meeting Bridge in Connect Apps.'),button('Add to meeting',connectApps),button('Live Computer',liveComputer));}
-if(state._tab==='Routines'){body.append(button('＋ New Routine',()=>routineEditor()));for(const entry of state._data.routines||[]){const routine=entry.routine||entry;if(routine.bot_id!==state._target)continue;const [wrap,enabled]=field(routine.name,routine.enabled,'checkbox');enabled.onchange=()=>run(()=>mutate('/api/routines',{...routine,enabled:enabled.checked}));body.append(card(wrap,node('small','Next: '+(entry.next_run_utc||'manual')),row(button('Test',async()=>{await mutate('/api/routines/'+enc(routine.id)+'/test');notice('Running…');}),button('Edit',()=>routineEditor(routine)),button('Delete',()=>confirmAction('Delete Routine',()=>mutate('/api/routines/'+enc(routine.id),undefined,'DELETE'))),button('History',async()=>textView('Last 20 runs',(await api('/api/routines/'+enc(routine.id)+'/runs')).slice(0,20))),button('Webhook',()=>webhook(routine)))));}}
-if(state._tab==='Library'){tabs(body,['all','pinned','pages','media','links','files','apps'],state._filter,filter=>{state._filter=filter;state._cursor=0;state._library=[];renderDetails();});const list=node('div');body.append(list);const epoch=state._epoch;run(async()=>{const page=await api('/api/bots/'+enc(state._target)+`/library?filter=${state._filter}&cursor=${state._cursor}&limit=5`);if(epoch!==state._epoch||state._tab!=='Library')return;const items=page.items||[];state._library=state._cursor?[...state._library,...items]:items;for(const group of ['Pinned','Today','This week','Older']){const grouped=state._library.filter(x=>(x.group||'Older').toLowerCase().replaceAll('_',' ')===group.toLowerCase());if(!grouped.length)continue;list.append(node('h3',group));for(const item of grouped)list.append(card(node('strong',item.title||item.uri_or_path),row(button(item.pinned?'Unpin':'Pin',()=>mutate('/api/library/'+enc(item.id)+'/pin',{pinned:!item.pinned,bot_id:state._target})),button('Open',()=>openLibrary(item)))));}if(page.next_cursor!=null)body.append(button('Show more',()=>{state._cursor=page.next_cursor;renderDetails();}));});}
-if(state._tab==='Memory'){body.append(button('Runtime Identity / Memory Files',identityEditor),button('Explain Memory',()=>{const box=modal('Explain Memory');form(box,{target:''},[['target','Why does Muse know X?']],async v=>textView('Provenance',await api('/api/memory/explain',v)),'Explain');}),button('Import Memory',memoryImport),button('Two-Phase Forget',forget),button('Side-Chat Discretion',discretion));}}
-function routineEditor(routine){const box=modal('Routine Editor');const initial=routine||{id:'rtn-'+crypto.randomUUID().slice(0,8),name:'',bot_id:state._target,instruction:'',timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hour:9,minute:0,weekdays:[],quiet_hours:null,interval_minutes:null,enabled:true};form(box,{...initial,weekdays:initial.weekdays.join(','),quiet:initial.quiet_hours?JSON.stringify(initial.quiet_hours):''},[['name','Name'],['instruction','Instruction','textarea'],['timezone','IANA Timezone'],['hour','Hour','number'],['minute','Minute','number'],['weekdays','Weekdays 0=Mon … 6=Sun (empty = daily)'],['interval_minutes','Interval minutes (empty = daily)'],['quiet','Quiet hours JSON {"start_hour":22,"end_hour":7}'],['enabled','Enabled','checkbox']],async v=>{v.weekdays=v.weekdays.split(',').filter(Boolean).map(Number);v.interval_minutes=v.interval_minutes?Number(v.interval_minutes):null;if(v.interval_minutes!==null&&v.interval_minutes<5)throw new Error('Minimum routine interval is 5 minutes');v.quiet_hours=v.quiet?JSON.parse(v.quiet):null;delete v.quiet;await mutate('/api/routines',v);closeModal();});if(routine)box.append(button('Webhook',()=>webhook(routine)));}
-async function webhook(routine){const box=modal('Routine Webhook'),url=location.origin+'/api/routines/'+enc(routine.id)+'/trigger';box.append(node('pre','POST '+url),button('Copy URL',()=>copy(url)),node('small','Use x-webhook-key. Duplicate deliveries are deduplicated by the server.'));const [w,key]=field('Webhook key','','password');box.append(w,button('Reveal key',async()=>{const value=await api('/api/routines/'+enc(routine.id)+'/webhook-key');key.value=value.webhook_key||value.key||'';for(const name of Object.keys(value))value[name]='';}),button('Copy key',()=>copy(key.value)));}
-async function identityEditor(){const box=modal('Identity & Memory'),[wrap,file]=select('Runtime file','SOUL.md',['SOUL.md','IDENTITY.md','USER.md','MEMORY.md','AGENTS.md','HEARTBEAT.md','TOOLS.md','PROACTIVE_PREFERENCES.md']),[edit,text]=field('Content','','textarea');let sha=null;const path=()=>'/api/identity/'+enc(state._target)+'/'+enc(file.value);const load=async()=>{const value=await api(path());text.value=value.content;sha=value.sha256;};file.onchange=()=>run(load);box.append(wrap,edit,button('Reload latest',load),button('Save Changes',async()=>{const value=await api(path(),{content:text.value,expected_sha256:sha},'PUT');sha=value.sha256;notice('Saved with SHA-256 verification.');}));await load();}
-function memoryImport(){const box=modal('Import Memory');form(box,{input:'',apply:false,report_sha256:null,expected_sha256:null},[['input','Portable memory text','textarea']],async v=>{const report=await api('/api/memory/import',v);confirmAction('Apply memory import: '+JSON.stringify(report),()=>api('/api/memory/import',{...v,apply:true,report_sha256:report.report_sha256}));},'Dry run');}
-function forget(){const box=modal('Two-Phase Forget');form(box,{request:'',bot_id:state._target},[['request','What should be forgotten?']],async v=>{const plan=await api('/api/memory/forget/plan',v),next=modal('Confirm Forget');next.append(node('pre',JSON.stringify(plan,null,2)));form(next,{confirmed:false,verification_query:'',plan_id:plan.plan_id,bot_id:state._target},[['confirmed','I confirm permanent forgetting','checkbox'],['verification_query','Verification query']],async body=>{if(!body.confirmed)throw new Error('Confirmation required');textView('Forget verification report',await api('/api/memory/forget/confirm',body));},'Execute Confirm');},'Plan');}
-async function discretion(){const chatId=state._kind+':'+state._target,path='/api/side-chats/'+enc(chatId)+'/discretion',value=await api(path),box=modal('Side-Chat Discretion');box.append(node('pre',(value.default_rules||[]).join('\n')));form(box,{rules_text:(value.user_rules||[]).join('\n'),loosens:false,expected_sha256:value.sha256},[['rules_text','User rules','textarea'],['loosens','Loosens existing restrictions','checkbox']],async v=>{const res=await api(path,v,'PUT');v.expected_sha256=res.sha256;notice('Discretion policy saved.');});}
-function stopLive(){state._live=false;clearTimeout(state._liveTimer);state._liveTimer=null;}
-async function liveComputer(){const box=modal('Live Computer',true),image=node('img',null,'live');image.alt='Live Computer';box.append(row(button('Watch Only',()=>notice('Watching only; actions stay behind approval policy.')),button('Emergency Stop',()=>mutate('/api/system/kill')),button('Teach a task',teachTask)),image);state._live=true;const tick=async()=>{if(!state._live)return;if(!document.hidden){try{const frame=await api('/api/computer/preview?max_long_edge=1280&quality=75');if(state._live)image.src='data:image/jpeg;base64,'+frame.jpeg_base64;}catch(e){notice(e.message);stopLive();return;}}if(state._live)state._liveTimer=setTimeout(tick,400);};await tick();}
-async function teachTask(){const box=modal('Teach a Task');await api('/api/teach/start',{bot_id:state._target});box.append(node('p','Recording for up to 10 minutes. Recorded steps are scrubbed before becoming a skill.'));form(box,{step:''},[['step','Demonstrated step']],v=>api('/api/teach/step',v),'Record step');form(box,{save_skill_name:''},[['save_skill_name','Skill name (empty = preview only)']],async v=>textView('Recorded Skill',await api('/api/teach/stop',v)),'Stop & Review');}
-async function savePrefs(v){for(const key of ['quiet_hours_start','quiet_hours_end','microphone_device'])if(v[key]==='')v[key]=null;return mutate('/api/ui-settings',v,'PUT');}
-function settings(pane='General'){const box=modal('Settings');tabs(box,['General','Computer','Vault','Usage & Billing','Updates'],pane,settings);const ui=state._data.ui||{};if(pane==='General')form(box,ui,[['theme','Theme','select',['system','dark','light']],['accent_mode','Accent','select',[['bot_color','Bot color'],['black','Black']]],['hardware_acceleration','Use hardware acceleration (restart required)','checkbox'],['language','Language'],['timezone','Timezone'],['spellcheck','Spellcheck','checkbox'],['notifications_enabled','Desktop alerts','checkbox'],['notification_sound','Alert sound','checkbox'],['suppress_notifications_when_active','Suppress when active','checkbox'],['quiet_hours_start','Quiet hours start'],['quiet_hours_end','Quiet hours end'],['microphone_device','Microphone device']],v=>savePrefs(v));
-if(pane==='Computer'){form(box,ui,[['computer_execution_mode','Execution on this computer','select',[['ask','Ask every time'],['always','Always'],['never','Never']]],['route_traffic_through_computer','Route traffic through this computer','checkbox'],['auto_review_approvals','Auto-review eligible approvals','checkbox']],v=>savePrefs(v));box.append(node('p','Immutable blocklist and irreversible-action gates remain enforced.'),button('Helper health',async()=>textView('Computer health',await api('/api/system/health'))),button('Live Computer',liveComputer),button(state._data.status?.paused?'Resume':'Pause',()=>mutate('/api/system/pause',{paused:!state._data.status?.paused})),node('h3','Custom Rules'));form(box,{mode:'allow',pattern:'',description:'',enabled:true},[['mode','Mode','select',[['allow','Allow'],['ask_first','Ask first']]],['pattern','Pattern (≤1000 characters)'],['description','Description']],async v=>{if(v.pattern.length>1000)throw new Error('Pattern exceeds 1000 characters');await mutate('/api/rules',v);settings('Computer');},'Add Rule');for(const rule of state._data.custom_rules||[])box.append(card(node('strong',rule.mode+': '+rule.pattern),button('Delete',()=>mutate('/api/rules/'+enc(rule.id),undefined,'DELETE'))));}
-if(pane==='Vault')vault(box);
-if(pane==='Usage & Billing'){const P='/api/system/providers',S='/api/ui-settings',us=state._data['ui_settings']||{},pv=us['providers']||{},f=n=>Number(n||0).toFixed(2);form(box,us['budget']||{},[['daily_spend_cap_usd','Daily cap','number'],['per_job_spend_cap_usd','Job cap','number'],['max_daily_notifications','Alerts','number']],v=>mutate(S,{budget:v},'PUT'));form(box,pv,[['meta_api_base','Meta base'],['meta_reasoning_model','Meta model'],['xai_api_base','xAI base'],['xai_model','xAI model'],['allow_screenshot_egress_meta','Meta img','checkbox'],['allow_screenshot_egress_xai','xAI img','checkbox']],v=>mutate(S,{providers:v},'PUT'));run(async()=>{const u=await api('/api/usage?days=7'),go=(i,op)=>api(P+'/'+enc(i)+op,{}).then(r=>textView(i,r));box.append(node('p','Daily $'+f(u['daily_spent_usd'])+'/$'+f(u['daily_cap_usd'])+' · Weekly $'+f(u['weekly_spent_usd'])+' · ChatGPT '+(u['chatgpt_allowance_requests']||0)+'/'+(u['chatgpt_allowance_tokens']||0)));for(const p of pv['profiles']||[])box.append(card(node('strong',p['display_name']+' ('+p['connection_state']+')'),row((p['auth_mode']||'').includes('o_auth')?button('OAuth',()=>go(p.id,'/oauth/start')):null,button('Models',()=>go(p.id,'/discover-models')))));box.append(node('pre',JSON.stringify([u['by_bot'],u['by_source']])));});form(box,{provider:'xai',api_key:''},[['provider','Provider','select',['meta','xai','kilo_gateway','openrouter','nous_portal','custom']],['api_key','Key','password']],v=>api(P+'/key',v),'Save');}
-if(pane==='Updates'){box.append(node('p','Version '+(state._data.version||'')),button('Check for Updates',async()=>textView('Updates',await api('/api/system/updates/check',{}))),button('Download & Verify Update',()=>confirmAction('Download verified update',async()=>textView('Verified Update',await api('/api/system/updates/download',{confirmed:true})))),button('Export Support Bundle',async()=>textView('Support Bundle',await api('/api/system/support-bundle',{}))));form(box,{note:'',include_diagnostics:false},[['note','Feedback','textarea'],['include_diagnostics','Include redacted diagnostics','checkbox']],v=>api('/api/system/feedback',v),'Send Feedback');form(box,ui,[['auto_updates','Automatic updates when idle','checkbox']],v=>savePrefs(v));}}
-function vault(box,tab='Logins'){const body=node('div');box.append(body);const names=['Logins','Cards','Contact Info','Hints','Payments','Password Managers','Import CSV'];tabs(body,names,tab,name=>{box.replaceChildren(row(node('h2','Vault'),button('✕',closeModal)));vault(box,name);});if(tab==='Import CSV'){form(body,{source:'chrome',csv_text:''},[['source','Source','select',['1password','chrome','edge','safari','firefox','bitwarden','lastpass']],['csv_text','CSV (<5 MB)','textarea']],async v=>{if(new TextEncoder().encode(v.csv_text).length>5*1024*1024)throw new Error('CSV exceeds 5 MB');try{textView('Import summary',await mutate('/api/vault/import',v));}finally{v.csv_text='';}},'Import into OS Keychain');return;}if(tab==='Password Managers'){body.append(node('p','1Password requires the local op CLI and an op:// secret reference. Configure the 1Password integration in Connect Apps.'),button('Configure',connectApps));return;}const kind={'Logins':'login','Cards':'card','Contact Info':'contact_info','Hints':'hint','Payments':'payment_method'}[tab];form(body,{kind,label:'',username:'',domain:'',secret_value:''},[['label','Label'],['username','Username / Contact'],['domain','Domain'],['secret_value','Secret','password']],async v=>{await mutate('/api/vault',{...v,item:v});settings('Vault');},'Save to OS Keychain');for(const item of (state._data.vault_items||[]).filter(x=>x.kind===kind))body.append(card(node('strong',item.label),node('small',item.subtitle_or_last4||item.domain||''),row(button('Reveal',()=>confirmAction('Reveal secret',async()=>{const res=await api('/api/vault/'+enc(item.id)+'/reveal',{confirmed:true}),d=modal('Vault Secret'),[w,input]=field('Secret',res.secret,'password');res.secret='';d.append(w,button('Copy',()=>copy(input.value)));})),button('Delete',()=>confirmAction('Delete Vault item',()=>mutate('/api/vault/'+enc(item.id),undefined,'DELETE'))),tab==='Payments'?button('Set default',()=>mutate('/api/vault/'+enc(item.id)+'/default-payment')):null)));}
-function connectApps(tab='Apps'){const box=modal('Connect Apps & Skills');tabs(box,['Apps','Custom MCP','Skills'],tab,connectApps);if(tab==='Apps')for(const app of state._data.integrations||[])box.append(card(node('h3',app.name),node('span',app.status,'badge'),node('p',app.account_summary),node('p',app.setup_hint),button('Configure',()=>textView(app.name,app.setup_hint||'Setup / Connect bridge required'))));
-if(tab==='Custom MCP'){const edit=c=>{const d=modal('Custom MCP Connector');form(d,{name:'',transport:'remote_https',url_or_command:'',args:'[]',auth_header_name:'Authorization',auth_secret:'',account_label:'',enabled:true,bot_ids:[],...c,args:JSON.stringify(c?.args||[])},[['name','Name'],['transport','Transport','select',['remote_https','stdio_command']],['url_or_command','HTTPS URL or binary'],['args','Arguments (JSON array)'],['auth_header_name','Auth header'],['auth_secret','Secret (OS Keychain)','password'],['account_label','Account label'],['enabled','Enabled','checkbox']],async v=>{v.args=JSON.parse(v.args);if(!v.auth_secret)delete v.auth_secret;await mutate('/api/connectors/custom',v);connectApps('Custom MCP');});};box.append(button('Add custom connector',()=>edit()));for(const c of state._data.custom_connectors||[])box.append(card(node('strong',c.name),node('small',c.status_text||c.url_or_command),row(button('Edit',()=>edit(c)),button('Test',async()=>textView('Connection Test',await api('/api/connectors/custom/'+enc(c.id)+'/test',{}))),button('Delete',()=>mutate('/api/connectors/custom/'+enc(c.id),undefined,'DELETE')))));}
-if(tab==='Skills'){const [w,search]=field('Search Skills');const list=node('div');box.append(w,list,button('Create Skill',()=>{const d=modal('Custom Skill');form(d,{name:'',title:'',description:'',body_markdown:''},[['name','Name'],['title','Title'],['description','Description'],['body_markdown','SKILL.md','textarea']],v=>mutate('/api/skills/custom',v));}));const load=async()=>{const values=await api('/api/skills?q='+enc(search.value));list.replaceChildren();for(const skill of Array.isArray(values)?values:values.skills||[])list.append(card(node('strong',skill.title||skill.name),node('p',skill.description),button('Inspect',async()=>textView(skill.name,await api('/api/skills?load='+enc(skill.name)))),button('Export',()=>download('SKILL.md',skill.body_markdown||JSON.stringify(skill,null,2)))));};search.oninput=()=>run(load);run(load);}}
-function shortcuts(){textView('Keyboard Shortcuts','Cmd/Ctrl+N — New Bot\nCmd/Ctrl+K — Commands & Search\nCmd/Ctrl+B — Sidebar\nCmd/Ctrl+Alt+B — Details\nCmd/Ctrl+, — Settings\nCmd/Ctrl+Shift+M — Connect Apps\nCmd/Ctrl+Shift+F — Bot filter\nCmd/Ctrl+Shift+A — Attach\nCmd/Ctrl+D — Dictation\nCmd/Ctrl+[ / ] — Back / Forward\nCmd/Ctrl+1…5 — Workspaces\nEnter — Send; Shift+Enter — Newline\nEscape — Dismiss top layer');}
-function palette(){const box=modal('Commands & Search'),[wrap,input]=field('Search commands or recent messages'),results=node('div',null,'results');box.append(wrap,results);let selected=0,actions=[];function render(){actions=[...(state._data.bots||[]).map(b=>['@'+b.id,()=>{closeModal();navigate('Bots','dm',b.id);}]),...(state._data.channels||[]).map(c=>['#'+c.id,()=>{closeModal();navigate('Bots','channel',c.id);}]),...['Bots','Feed','Goals','Spaces','Audit'].map(v=>[v,()=>{closeModal();navigate(v);}]),['Settings',settings],['Connect Apps',connectApps],['New Bot',()=>editBot()],['Templates',templates]].filter(([label])=>label.toLowerCase().includes(input.value.toLowerCase()));results.replaceChildren();actions.forEach(([label,action],i)=>results.append(button(label,action,i===selected?'selected':'')));for(const m of state._messages.filter(m=>(m.content||'').toLowerCase().includes(input.value.toLowerCase())).slice(-10))results.append(node('p',(m.content||'').slice(0,160)));results.append(node('small','Searched recent messages'),button('Search older history',async()=>textView('Older history',await api('/api/search/messages?q='+enc(input.value)+'&include_older=true'))));}input.oninput=()=>{selected=0;render();};input.onkeydown=e=>{if(e.key==='ArrowDown'||e.ctrlKey&&e.key==='n'){e.preventDefault();selected=Math.min(actions.length-1,selected+1);render();}else if(e.key==='ArrowUp'||e.ctrlKey&&e.key==='p'){e.preventDefault();selected=Math.max(0,selected-1);render();}else if(e.key==='Enter'){e.preventDefault();run(actions[selected]?.[1]||(()=>{}));}};render();input.focus();}
-function parseSseFrames(buffer,dispatch){let match;while((match=/\r?\n\r?\n/.exec(buffer))){const frame=buffer.slice(0,match.index);buffer=buffer.slice(match.index+match[0].length);let type='message';const data=[];for(const line of frame.split(/\r?\n/)){const colon=line.indexOf(':'),field=colon<0?line:line.slice(0,colon),value=colon<0?'':line.slice(colon+1).replace(/^ /,'');if(field==='event')type=value;if(field==='data')data.push(value);}if(data.length)dispatch(type,data.join('\n'));}if(buffer.length>1048576)throw new Error('SSE frame exceeds limit');return buffer;}
-let resync=null;
-function eventUpdate(type,raw){let event;try{event=JSON.parse(raw);}catch{return;}const data=event.payload||event.data||event;const upsert=(key,value,id='id')=>{const values=state._data[key]||[];const index=values.findIndex(x=>x[id]===value[id]);if(index<0)values.push(value);else values[index]=value;state._data[key]=values;};if(type==='BOT_STATUS_PHRASE'){(state._data.bot_statuses||={})[data.bot_id]=data;renderSidebar();return;}if(type==='BOT_UPDATED'&&data.id){upsert('bots',data);renderChrome();return;}if(type==='TASK_UPDATED'&&data.id){upsert('recent_tasks',data);if(state._view==='Audit')renderWorkspace();return;}if(type==='BUDGET_UPDATED'){Object.assign(state._data.status||{},data);renderSidebar();return;}if(/MESSAGE|CARD|REACTION/.test(type)){if(!document.hidden)run(loadMessages);return;}if(resync===null)resync=setTimeout(()=>{resync=null;if(!document.hidden)run(bootstrap);},80);}
-async function connectEvents(){state._stream?.abort();const controller=new AbortController();state._stream=controller;let attempt=0;await bootstrap();while(!controller.signal.aborted){let reader,received=false;try{const response=await fetch('/ag-ui/events',{headers:{Authorization:'Bearer '+state._token},signal:controller.signal,cache:'no-store'});if(response.status===401){login();return;}if(!response.ok)throw new Error('Event stream unavailable');reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';if(attempt)await bootstrap();if(state._view==='Bots')await loadMessages();while(!controller.signal.aborted){const {value,done}=await reader.read();if(done)throw new Error('Stream disconnected');buffer+=decoder.decode(value,{stream:true});buffer=parseSseFrames(buffer,(type,data)=>{received=true;eventUpdate(type,data);});}}catch(e){if(controller.signal.aborted)return;notice('Reconnecting…');}finally{if(reader){await reader.cancel().catch(()=>{});reader.releaseLock();}}if(received)attempt=0;await new Promise(resolve=>{const finish=()=>{clearTimeout(timer);controller.signal.removeEventListener('abort',finish);resolve();};const timer=setTimeout(finish,[1000,2000,5000,15000][Math.min(attempt++,3)]*(.8+Math.random()*.4));controller.signal.addEventListener('abort',finish,{once:true});if(controller.signal.aborted)finish();});}}
-function login(){const box=modal('Connect to Grok Muse');form(box,{token:''},[['token','Companion bearer token','password']],async v=>{state._stream?.abort();state._epoch++;state._token=v.token;v.token='';closeModal();await connectEvents();},'Connect');}
-function escapeLayer(){if(!$('suggestions').hidden){$('suggestions').hidden=true;return;}if(state._modal){closeModal();return;}if(!$('split').hidden){closeSplit();return;}if(state._details){state._details=false;renderDetails();return;}if(state._reply){state._reply=null;renderChips();}}
-function dictation(){const Speech=window.SpeechRecognition||window.webkitSpeechRecognition;if(!Speech){notice('Enable Microphone permission / Local Whisper adapter in Connect Apps.');return;}const recognition=new Speech();recognition.onresult=e=>{$('draft').value+=e.results[0][0].transcript;composerChanged();};recognition.onerror=e=>notice(e.error);recognition.start();}
-$('composer').onsubmit=e=>{e.preventDefault();run(()=>sendMessage(),$('send'));};$('draft').oncompositionstart=()=>state._composing=true;$('draft').oncompositionend=()=>{state._composing=false;composerChanged();};$('draft').oninput=composerChanged;$('draft').onkeydown=e=>{if(e.key==='Backspace'&&state._arrow!==null&&$('draft').selectionStart===state._arrow+1&&$('draft').value[state._arrow]==='→'){e.preventDefault();const at=state._arrow;$('draft').value=$('draft').value.slice(0,at)+'->'+$('draft').value.slice(at+1);$('draft').setSelectionRange(at+2,at+2);state._arrow=null;return;}if(e.key==='Enter'&&!e.shiftKey&&!e.altKey&&!state._composing&&!e.isComposing){e.preventDefault();if(!$('suggestions').hidden){$('suggestions').querySelector('button')?.click();return;}run(()=>sendMessage(),$('send'));}};$('mode').onclick=()=>{state._mode=state._mode==='chat'?'queue':'chat';renderChips();};$('attach').onclick=()=>$('file').click();$('file').onchange=()=>run(async()=>{await attachFiles($('file').files);$('file').value='';});$('dictate').onclick=dictation;
-document.addEventListener('dragover',e=>e.preventDefault());document.addEventListener('drop',e=>{e.preventDefault();run(()=>attachFiles(e.dataTransfer.files));});$('draft').addEventListener('paste',e=>{if(e.clipboardData.files.length){e.preventDefault();run(()=>attachFiles(e.clipboardData.files));}});
-document.addEventListener('keydown',e=>{if(e.key==='Escape'){e.preventDefault();escapeLayer();return;}if(e.key==='Tab'&&state._modal){const focusable=[...$('overlay').querySelectorAll('button,input,select,textarea,a[href]')].filter(el=>!el.disabled);const first=focusable[0],last=focusable.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}if(!(e.metaKey||e.ctrlKey))return;const key=e.key.toLowerCase();const actions={'k':palette,',':settings,'n':()=>editBot(),'b':()=>{if(e.altKey){state._details=!state._details;renderDetails();}else{state._sidebar=$('sidebar').classList.contains('collapsed');renderSidebar();}},'d':dictation,'/':shortcuts,'[':()=>historyMove(-1),']':()=>historyMove(1)};if(e.shiftKey&&key==='m'){e.preventDefault();connectApps();}else if(e.shiftKey&&key==='a'){e.preventDefault();$('file').click();}else if(e.shiftKey&&key==='f'){e.preventDefault();state._sidebar=true;renderSidebar();$('sidebar').querySelector('input')?.focus();}else if(/^[1-5]$/.test(key)){e.preventDefault();navigate(['Bots','Feed','Goals','Spaces','Audit'][Number(key)-1]);}else if(actions[key]){e.preventDefault();actions[key]();}});
-window.addEventListener('resize',renderSidebar);matchMedia('(prefers-color-scheme: dark)').addEventListener('change',theme);document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state._token)run(async()=>{await bootstrap();if(state._view==='Bots')await loadMessages();});});window.addEventListener('pagehide',()=>{state._stream?.abort();stopLive();state._token='';clearSecrets(document);});$('overlay').onclick=e=>{if(e.target===$('overlay'))closeModal();};
+"use strict";
+
+const $ = id => document.getElementById(id), enc = encodeURIComponent;
+
+const state = {
+    _token: "",
+    _data: {},
+    _view: "Bots",
+    _kind: "dm",
+    _target: "muse",
+    _history: [],
+    _at: -1,
+    _sidebar: null,
+    _details: false,
+    _tab: "Overview",
+    _reply: null,
+    _attachments: [],
+    _mode: "chat",
+    _composing: false,
+    _arrow: null,
+    _epoch: 0,
+    _messages: [],
+    _windowStart: null,
+    _stream: null,
+    _modal: null,
+    _live: false,
+    _liveTimer: null,
+    _filter: "all",
+    _cursor: 0,
+    _library: [],
+    _search: "",
+    _chatSeq: 0,
+    _providerTimer: null,
+    _settingsPane: "General"
+};
+
+function node(tag, text, cls) {
+    const el = document.createElement(tag);
+    if (text != null) el.textContent = text;
+    if (cls) el.className = cls;
+    return el;
+}
+
+function add(el, ...children) {
+    el.append(...children.filter(Boolean));
+    return el;
+}
+
+function notice(text = "") {
+    $("notice").textContent = text;
+}
+
+function button(text, action, cls) {
+    const b = node("button", text, cls);
+    b.type = "button";
+    b.onclick = () => run(action, b);
+    return b;
+}
+
+async function run(action, b) {
+    if (b) b.disabled = true;
+    try {
+        return await action();
+    } catch (e) {
+        notice(e.message);
+    } finally {
+        if (b) b.disabled = false;
+    }
+}
+
+async function api(path, body, method = (body === undefined ? "GET" : "POST"), signal) {
+    const response = await fetch(path, {
+        method: method,
+        headers: {
+            Authorization: "Bearer " + state._token,
+            ...body === undefined ? {} : {
+                "Content-Type": "application/json"
+            }
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: signal,
+        cache: "no-store"
+    });
+    let value;
+    const type = response.headers.get("content-type") || "";
+    value = type.includes("json") ? await response.json() : await response.text();
+    if (!response.ok) {
+        const e = new Error(value.error || `HTTP ${response.status}`);
+        e.status = response.status;
+        e.current_sha256 = value.current_sha256;
+        throw e;
+    }
+    return value;
+}
+
+async function mutate(path, body = {}, method = "POST") {
+    const value = await api(path, body, method);
+    await bootstrap();
+    return value;
+}
+
+const row = (...items) => add(node("div", null, "row"), ...items), card = (...items) => add(node("article", null, "card"), ...items);
+
+function field(label, value = "", type = "text") {
+    const input = node(type === "textarea" ? "textarea" : type === "select" ? "select" : "input");
+    if (type !== "textarea" && type !== "select") input.type = type;
+    if (type === "checkbox") input.checked = !!value; else input.value = value ?? "";
+    if (type === "password") input.autocomplete = "off";
+    if (type === "number") input.step = "any";
+    input.setAttribute("aria-label", label);
+    return [ add(node("label", label), input), input ];
+}
+
+function select(label, value, values) {
+    const [wrap, input] = field(label, "", "select");
+    for (const v of values) {
+        const option = node("option", Array.isArray(v) ? v[1] : v);
+        option.value = Array.isArray(v) ? v[0] : v;
+        input.append(option);
+    }
+    input.value = value;
+    return [ wrap, input ];
+}
+
+function form(parent, values, spec, save, label = "Save Changes") {
+    const f = node("form"), inputs = {};
+    for (const item of spec) {
+        const [key, title, type = "text", opts] = item;
+        const [wrap, input] = type === "select" ? select(title, values[key], opts) : field(title, values[key], type);
+        inputs[key] = input;
+        f.append(wrap);
+    }
+    const submit = node("button", label, "accent");
+    submit.type = "submit";
+    f.append(submit);
+    f.onsubmit = e => {
+        e.preventDefault();
+        run(async () => {
+            const data = {
+                ...values
+            };
+            for (const [key, , type] of spec) {
+                const input = inputs[key];
+                data[key] = type === "checkbox" ? input.checked : type === "number" ? Number(input.value) : input.value;
+            }
+            for (const [key, , type] of spec) if (type === "password") inputs[key].value = "";
+            try {
+                await save(data);
+            } finally {
+                for (const [key, , type] of spec) if (type === "password") {
+                    inputs[key].value = "";
+                    data[key] = "";
+                }
+            }
+        }, submit);
+    };
+    parent.append(f);
+    return inputs;
+}
+
+function clearSecrets(root) {
+    root.querySelectorAll("input[type=password],textarea").forEach(i => i.value = "");
+}
+
+function closeModal() {
+    stopLive();
+    clearTimeout(state._providerTimer);state._providerTimer=null;
+    clearSecrets($("overlay"));
+    $("overlay").replaceChildren();
+    $("overlay").hidden = true;
+    state._modal = null;
+}
+
+function modal(title, wide = false) {
+    closeModal();
+    state._modal = title;
+    const box = node("section", null, "modal" + (wide ? " wide" : ""));
+    box.setAttribute("role", "dialog");
+    box.setAttribute("aria-modal", "true");
+    box.setAttribute("aria-label", title);
+    box.append(row(node("h2", title), button("✕", closeModal)));
+    $("overlay").replaceChildren(box);
+    $("overlay").hidden = false;
+    queueMicrotask(() => box.querySelector("input,textarea,button")?.focus());
+    return box;
+}
+
+function textView(title, value) {
+    const box = modal(title);
+    box.append(node("pre", typeof value === "string" ? value : JSON.stringify(value, null, 2)));
+}
+
+function confirmAction(title, action) {
+    const box = modal(title);
+    const [label, check] = field("I confirm this action", false, "checkbox");
+    const b = button("Confirm", async () => {
+        if (check.checked) {
+            await action();
+            if (state._modal === title) closeModal();
+        }
+    }, "danger");
+    b.disabled = true;
+    check.onchange = () => b.disabled = !check.checked;
+    box.append(label, b);
+}
+
+function download(name, text) {
+    const url = URL.createObjectURL(new Blob([ text ], {
+        type: "text/plain"
+    }));
+    const a = node("a");
+    a.href = url;
+    a.download = name;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1e3);
+}
+
+function copy(text) {
+    return navigator.clipboard.writeText(String(text));
+}
+
+const avatarUrls = new Map;
+
+function avatar(bot) {
+    const el = node("span", null, "avatar " + (bot.avatar_shape || "circle").toLowerCase().replace("roundedsquare", "rounded_square"));
+    el.setAttribute("aria-hidden","true");
+    el.append(node("span",null,"eyes"));
+    el.style.setProperty("--bot", bot.avatar_color || bot.color || "#2f7cf6");
+    if (bot.avatar_asset) {
+        const key = bot.id + ":" + bot.avatar_asset;
+        let pending = avatarUrls.get(key);
+        if (!pending) {
+            pending = fetch("/api/bots/" + enc(bot.id) + "/avatar", {
+                headers: {
+                    Authorization: "Bearer " + state._token
+                }
+            }).then(r => {
+                if (!r.ok) throw new Error("Avatar unavailable");
+                return r.blob();
+            }).then(blob => URL.createObjectURL(blob));
+            avatarUrls.set(key, pending);
+            if (avatarUrls.size > 32) {
+                const old = avatarUrls.keys().next().value;
+                avatarUrls.get(old).then(URL.revokeObjectURL).catch(() => {});
+                avatarUrls.delete(old);
+            }
+        }
+        pending.then(url => {
+            if (el.isConnected) {
+                const img = node("img");
+                img.src = url;
+                img.alt = bot.display_name || bot.id;
+                img.width = 32;
+                img.height = 32;
+                el.replaceChildren(img);
+            }
+        }).catch(() => {});
+    }
+    return el;
+}
+
+function theme() {
+    const ui = state._data.ui || {};
+    const dark = ui.theme === "dark" || ui.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+    $("space-iframe").contentWindow?.postMessage({
+        type: "hatch:space:theme",
+        theme: dark ? "dark" : "light"
+    }, "*");
+}
+
+function tabs(parent, names, current, onSelect) {
+    const bar = node("div", null, "tabs");
+    for (const name of names) {
+        const b = button(name, () => onSelect(name));
+        b.setAttribute("aria-selected", name === current);
+        bar.append(b);
+    }
+    parent.append(bar);
+}
+
+function navigate(view = state._view, kind = state._kind, target = state._target, record = true) {
+    if (kind !== state._kind || target !== state._target) {
+        state._messages = [];
+        state._windowStart = null;
+    }
+    if (record) {
+        const next = {
+            view: view,
+            kind: kind,
+            target: target
+        };
+        if (JSON.stringify(state._history[state._at]) !== JSON.stringify(next)) {
+            state._history.splice(state._at + 1);
+            state._history.push(next);
+            if (state._history.length > 100) state._history.shift();
+            state._at = state._history.length - 1;
+        }
+    }
+    saveDraft();
+    state._view = view;
+    state._kind = kind;
+    state._target = target;
+    restoreDraft();
+    state._epoch++;
+    state._reply = null;
+    if (innerWidth < 900) state._sidebar = false;
+    renderChrome();
+    renderWorkspace();
+    if (view === "Bots" && state._token) run(loadMessages);
+    if (state._details) renderDetails();
+}
+
+function historyMove(delta) {
+    const at = state._at + delta;
+    if (at < 0 || at >= state._history.length) return;
+    state._at = at;
+    const x = state._history[at];
+    navigate(x.view, x.kind, x.target, false);
+}
+
+function icon(name) {
+    const svg=document.createElementNS("http://www.w3.org/2000/svg","svg");
+    svg.setAttribute("viewBox","0 0 24 24");svg.setAttribute("width","20");svg.setAttribute("height","20");svg.setAttribute("fill","none");svg.setAttribute("stroke","currentColor");svg.setAttribute("stroke-width","1.6");svg.setAttribute("stroke-linecap","round");svg.setAttribute("stroke-linejoin","round");svg.setAttribute("aria-hidden","true");
+    const paths={search:"M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0",sidebar:"M8 3v18M4 3h16a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1",plus:"M12 4v16M4 12h16",activity:"M12 7v6l4 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0",more:"M4 12h.1M12 12h.1M20 12h.1",pages:"M6 2h9l4 4v16H6zM9 11h7M9 15h7",settings:"M12 8a4 4 0 1 1 0 8 4 4 0 0 1 0-8M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"};
+    const path=document.createElementNS(svg.namespaceURI,"path");path.setAttribute("d",paths[name]||paths.more);svg.append(path);return svg;
+}
+function iconButton(name,label,action){const b=button("",action,"icon-button");b.append(icon(name));b.title=label;b.setAttribute("aria-label",label);return b;}
+function toggleSidebar(){state._sidebar=state._sidebar===null?!!state._data.ui?.sidebar_collapsed:!state._sidebar;renderSidebar();if(innerWidth>=760)run(()=>savePrefs({sidebar_collapsed:!state._sidebar}));}
+function activityMenu(){const box=modal("Activity");for(const view of ["Feed","Goals","Audit"]){box.append(button(view,()=>{closeModal();navigate(view);}));}box.append(button(state._data.status?.paused?"Resume tasks":"Pause tasks",()=>mutate("/api/system/pause",{paused:!state._data.status?.paused})),button("Stop all tasks",()=>mutate("/api/system/kill"),"danger"),button("Studio · templates, skills & routines",templates));}
+function renderChrome() {
+    theme();$("rail").replaceChildren();$("rail").hidden=true;
+    renderSidebar();
+    const header=$("header"),bot=(state._data.bots||[]).find(b=>b.id===state._target)||{id:state._target};
+    const group=(state._data.channels||[]).find(c=>c.id===state._target);
+    const title=state._view==="Bots"?(state._kind==="channel"?"# "+state._target:bot.display_name||bot.id):(state._view==="Spaces"?"Pages":state._view);
+    const chip=button("",()=>{state._details=!state._details;renderDetails();},"conversation-title");
+    if(state._view==="Bots")chip.append(avatar(bot));chip.append(node("strong",title));
+    header.replaceChildren(iconButton("sidebar","Toggle sidebar",toggleSidebar),chip,iconButton("more","Conversation options",()=>{
+        const box=modal("Conversation options");
+        box.append(button("Previous conversation",()=>{closeModal();historyMove(-1);}),button("Next conversation",()=>{closeModal();historyMove(1);}),button("Search conversations",()=>{closeModal();state._sidebar=true;renderSidebar();$("sidebar").querySelector("input")?.focus();}));
+        if(state._view==="Bots"){box.append(button("Live computer",liveComputer),button("Bot details",()=>{closeModal();state._details=!state._details;renderDetails();}));if(group)box.append(button("Edit group",()=>editChannel(group)));}
+        box.append(button("Command palette",palette));
+    }));
+    $("composer").hidden=state._view!=="Bots";
+    $("draft").placeholder="Message "+title+"…";
+    const providers=state._data.providers||{},p=(providers.profiles||[]).find(p=>p.id===(providers.workspace_default_profile_id||providers.account_default_profile_id));
+    $("model-picker").textContent=p?.selected_model||"Choose model";
+    renderChips();
+}
+function renderSidebar(){
+    const aside=$("sidebar"),bots=state._data.bots||[],channels=state._data.channels||[];
+    const expanded=state._sidebar??!state._data.ui?.sidebar_collapsed;
+    aside.className=expanded?"":"compact";aside.dataset.mobileOpen=String(state._sidebar===true);
+    aside.style.width=expanded?Math.min(480,Math.max(240,state._data.ui?.sidebar_width||316))+"px":"72px";
+    aside.replaceChildren();
+    const create=()=>{const box=modal("Create");box.append(button("Create bot",()=>editBot()),button("New group chat",()=>editChannel()),button("New section",sectionEditor),button("Studio · templates, skills & routines",templates));};
+    aside.append(add(node("div",null,"sidebar-head"),node("strong","Grok Muse","name"),iconButton("search","Search conversations",()=>{const filter=aside.querySelector("input");filter.hidden=!filter.hidden;if(!filter.hidden)filter.focus();}),iconButton("plus","Create",create),iconButton("sidebar","Collapse sidebar",toggleSidebar)));
+    const filter=node("input",null,"filter");filter.placeholder="Search conversations…";filter.setAttribute("aria-label","Search conversations");filter.value=state._search;filter.hidden=!state._search;
+    filter.oninput=()=>{state._search=filter.value;renderSidebar();const el=aside.querySelector("input");el.hidden=false;el.focus();el.setSelectionRange(state._search.length,state._search.length);};aside.append(filter);
+    aside.append(add(node("div",null,"sidebar-nav"),button("Activity",activityMenu),button("Pages",()=>navigate("Spaces"))));
+    const list=node("div",null,"conversation-list");aside.append(list);list.append(node("small","Personal","section-label"));
+    const needle=state._search.toLowerCase(),matches=x=>!needle||JSON.stringify([x.id,x.display_name,x.name,x.topic]).toLowerCase().includes(needle);
+    function botRow(bot,parent=list){
+        const b=button("",()=>navigate("Bots","dm",bot.id),"chat"+(state._view==="Bots"&&state._target===bot.id&&state._kind==="dm"?" active":""));
+        const phrase=state._data.bot_statuses?.[bot.id]||{},preview=state._data.conversation_previews?.[bot.id];
+        b.append(avatar(bot),add(node("span",null,"name"),node("strong",bot.display_name||bot.id),node("small",preview?.preview||phrase.phrase||phrase.status_phrase||bot.role_title||"Start a conversation")));
+        const meta=node("span",null,"chat-meta");if(preview?.created_at)meta.append(node("small",new Date(preview.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})));
+        const unread=state._data.unread_counts?.["dm:"+bot.id]||0;if(unread||phrase.needs_attention)meta.append(node("span",phrase.needs_attention?"!":String(unread),"badge"));b.append(meta);
+        b.title=bot.display_name||bot.id;b.setAttribute("aria-label",b.title);b.oncontextmenu=e=>{e.preventDefault();botMenu(bot);};parent.append(b);
+    }
+    const visible=bots.filter(b=>!b.hidden_from_sidebar&&matches(b)).sort((a,b)=>Number(b.pinned)-Number(a.pinned));
+    for(const bot of visible.filter(b=>b.pinned||!b.section_id))botRow(bot);
+    for(const section of state._data.sections||[]){const details=node("details",null,"section");details.open=!section.collapsed;details.append(node("summary",section.name));list.append(details);details.ontoggle=()=>run(()=>mutate("/api/sections/"+enc(section.id),{collapsed:!details.open},"PATCH"));for(const bot of visible.filter(b=>!b.pinned&&b.section_id===section.id))botRow(bot,details);}
+    if(channels.length)list.append(node("small","Groups","section-label"));
+    for(const channel of channels.filter(matches)){
+        const b=button("",()=>navigate("Bots","channel",channel.id),"chat"+(state._kind==="channel"&&state._target===channel.id?" active":"")),group=node("span",null,"group-avatar");
+        for(let index=0;index<3;index++){const bot=bots.find(b=>b.id===channel.participants?.[index])||{id:"group",avatar_color:["#4D9BFF","#D85AA6","#35BFA5"][index]};group.append(avatar(bot));}
+        const name=String(channel.name||channel.id).replace(/^#+/,""),preview=state._data.channel_previews?.[channel.id];
+        b.append(group,add(node("span",null,"name"),node("strong",name),node("small",preview?.preview||channel.topic||"Shared conversation")));
+        const unread=state._data.unread_counts?.["channel:"+channel.id];if(unread)b.append(node("span",String(unread),"badge"));
+        b.title=name;b.setAttribute("aria-label",name);b.oncontextmenu=e=>{e.preventDefault();editChannel(channel);};list.append(b);
+    }
+
+    const hidden=bots.filter(b=>b.hidden_from_sidebar&&matches(b));if(hidden.length){const d=node("details",null,"section");d.append(node("summary",`Hidden bots (${hidden.length})`));for(const b of hidden)botRow(b,d);list.append(d);}
+    aside.append(add(node("footer"),button("Connect apps",connectApps,"connect-apps"),add(node("div",null,"account-row"),iconButton("settings","Settings",settings),button("Your workspace",()=>{const box=modal("Your workspace");box.append(button("Providers & models",()=>settings("Providers & models")),button("Settings",settings),button("Keyboard shortcuts",shortcuts),button("Bots",()=>{closeModal();navigate("Bots");}));}))));
+    const handle=node("div",null,"resize-handle");handle.setAttribute("role","separator");handle.setAttribute("aria-label","Sidebar width");handle.tabIndex=0;handle.setAttribute("aria-orientation","vertical");
+    function width(value){state._data.ui||={};state._data.ui.sidebar_width=Math.min(480,Math.max(240,value));aside.style.width=state._data.ui.sidebar_width+"px";}
+    handle.onpointerdown=e=>{handle.setPointerCapture(e.pointerId);handle.onpointermove=e=>width(e.clientX);handle.onpointerup=()=>{handle.onpointermove=null;run(()=>savePrefs({sidebar_width:state._data.ui.sidebar_width}));};};
+    handle.onkeydown=e=>{if(["ArrowLeft","ArrowRight"].includes(e.key)){e.preventDefault();width((state._data.ui?.sidebar_width||316)+(e.key==="ArrowRight"?16:-16));run(()=>savePrefs({sidebar_width:state._data.ui.sidebar_width}));}};aside.append(handle);
+}
+
+async function bootstrap() {
+    const epoch = state._epoch;
+    const data = await api("/api/bootstrap");
+    if (epoch !== state._epoch) return;
+    state._data = data;
+    renderChrome();
+    renderWorkspace();
+}
+
+function botMenu(bot) {
+    const box = modal(bot.display_name || bot.id), prefs = values => mutate("/api/bots/" + enc(bot.id) + "/ui-prefs", values, "PUT");
+    for (const [label, values] of [ [ bot.pinned ? "Unpin" : "Pin to top", {
+        pinned: !bot.pinned
+    } ], [ "Set as primary Bot", {
+        is_primary: true
+    } ], [ bot.hidden_from_sidebar ? "Show in sidebar" : "Hide from sidebar", {
+        hidden_from_sidebar: !bot.hidden_from_sidebar
+    } ], [ bot.notifications_enabled ? "Mute notifications" : "Enable notifications", {
+        notifications_enabled: !bot.notifications_enabled
+    } ] ]) box.append(button(label, async () => {
+        await prefs(values);
+        closeModal();
+    }));
+    box.append(button("Edit Bot", () => editBot(bot)), button("Avatar", () => avatarPicker(bot)), button("Export template", () => exportTemplate(bot.id)), button("Duplicate", () => {
+        const d = modal("Duplicate Bot");
+        form(d, {
+            source_bot_id: bot.id,
+            new_bot_id: "",
+            display_name: bot.display_name
+        }, [ [ "new_bot_id", "New ID" ], [ "display_name", "Name" ] ], async v => {
+            await mutate("/api/bots/" + enc(bot.id) + "/duplicate", v);
+            closeModal();
+        });
+    }));
+    const [wrap, s] = select("Move to section", bot.section_id || "", [ [ "", "None" ], ...(state._data.sections || []).map(x => [ x.id, x.name ]) ]);
+    box.append(wrap);
+    s.onchange = () => run(() => prefs({
+        section_id: s.value || null
+    }));
+    if (!bot.is_primary && bot.id !== "muse") box.append(button("Delete Bot", () => confirmAction("Delete " + bot.id, () => mutate("/api/bots/" + enc(bot.id), undefined, "DELETE")), "danger"));
+}
+
+function sectionEditor() {
+    const box = modal("New Section");
+    form(box, {
+        name: ""
+    }, [ [ "name", "Section name" ] ], async v => {
+        await mutate("/api/sections", v);
+        closeModal();
+    });
+}
+
+function editBot(bot) {
+    const box = modal(bot ? "Edit Bot" : "Create Bot");
+    const data = bot || {
+        id: "",
+        display_name: "",
+        role_title: "Specialist",
+        system_prompt: "You are a helpful specialist.",
+        avatar_shape: "Circle",
+        avatar_color: "#2f7cf6",
+        allow_gui: false,
+        allow_shell: false,
+        allow_network: false,
+        preferred_provider: null,
+        preferred_model: null,
+        notifications_enabled: true,
+        drafts_enabled: true,
+        task_mode_default: "chat"
+    };
+    form(box, data, [ [ "id", "Bot ID" ], [ "display_name", "Name" ], [ "role_title", "Role" ], [ "system_prompt", "Instructions", "textarea" ], [ "allow_gui", "Allow GUI", "checkbox" ], [ "allow_shell", "Allow Shell", "checkbox" ], [ "allow_network", "Allow Network", "checkbox" ], [ "preferred_provider", "Provider" ], [ "preferred_model", "Model" ], [ "task_mode_default", "Default mode", "select", [ "chat", "queue" ] ], [ "notifications_enabled", "Notifications", "checkbox" ], [ "drafts_enabled", "Drafts", "checkbox" ] ], async v => {
+        v.preferred_provider ||= null;
+        v.preferred_model ||= null;
+        await mutate("/api/bots", v);
+        closeModal();
+    });
+    box.append(button("Browse / Import templates", templates));
+}
+
+function editChannel(channel) {
+    const box = modal(channel ? "Edit Group" : "New Group Chat");
+    const values = channel ? {
+        ...channel,
+        participants: (channel.participants || []).join(",")
+    } : {
+        id: "",
+        topic: "",
+        instructions: "",
+        participants: state._target,
+        paused: false,
+        archived: false
+    };
+    form(box, values, [ [ "id", "Channel ID" ], [ "topic", "Topic" ], [ "instructions", "Instructions", "textarea" ], [ "participants", "Bot IDs (comma separated)" ], [ "paused", "Paused", "checkbox" ], [ "archived", "Archived", "checkbox" ] ], async v => {
+        v.participants = v.participants.split(",").map(s => s.trim()).filter(Boolean);
+        await mutate(channel ? "/api/channels/" + enc(channel.id) : "/api/channels", v, channel ? "PATCH" : "POST");
+        closeModal();
+    });
+}
+
+function avatarPicker(bot) {
+    const box = modal("Bot Avatar");
+    form(box, bot, [ [ "avatar_shape", "Shape", "select", [ "Circle", "Hex", "RoundedSquare", "Diamond", "Pill", "Spark" ] ], [ "avatar_color", "Color", "color" ] ], v => mutate("/api/bots/" + enc(bot.id) + "/ui-prefs", {
+        avatar_shape: v.avatar_shape,
+        avatar_color: v.avatar_color
+    }, "PUT"));
+    box.append(button("Upload image ≤25 MB", () => {
+        $("avatar-file").onchange = () => run(async () => {
+            const file = $("avatar-file").files[0];
+            if (!file) return;
+            const bytes_base64 = await fileBase64(file);
+            await mutate("/api/bots/" + enc(bot.id) + "/avatar", {
+                bytes_base64: bytes_base64,
+                extension: file.type === "image/jpeg" ? "jpg" : file.type === "image/webp" ? "webp" : "png"
+            });
+            $("avatar-file").value = "";
+        });
+        $("avatar-file").click();
+    }), button("Generate image", () => notice("Configure an image generation bridge in Connect Apps.")));
+}
+
+async function exportTemplate(id) {
+    download("grokbot-team.json", JSON.stringify(await api("/api/templates/export", {
+        bot_ids: [ id ]
+    }), null, 2));
+}
+
+function templates() {
+    const box = modal("Import Bot Template");
+    form(box, {
+        bundle_json: "",
+        overwrite: false
+    }, [ [ "bundle_json", "Template JSON", "textarea" ], [ "overwrite", "Overwrite existing bots", "checkbox" ] ], async v => {
+        const preview = await api("/api/templates/preview", v);
+        confirmAction("Import template: " + JSON.stringify(preview), () => mutate("/api/templates/import", v));
+    }, "Preview Import");
+}
+
+async function loadMessages(before) {
+    const epoch = state._epoch, seq = ++state._chatSeq;
+    const path = state._kind === "dm" ? `/api/dm/${enc(state._target)}/messages?limit=100${before ? "&before_seq=" + before : ""}` : `/api/channels/${enc(state._target)}/messages`;
+    const data = await api(path);
+    if (epoch !== state._epoch || seq !== state._chatSeq) return;
+    const messages = Array.isArray(data) ? data : data.messages || [];
+    state._messages = [ ...new Map([ ...state._messages, ...messages ].map(m => [ m.id, m ])).values() ].sort((a, b) => a.seq - b.seq);
+    if (before) state._windowStart = 0;
+    renderMessages();
+    await api("/api/chats/read", {
+        chat_kind: state._kind,
+        chat_id: state._target
+    });
+}
+
+function safeUrl(raw) {
+    try {
+        const u = new URL(raw, location.href);
+        if ([ "http:", "https:" ].includes(u.protocol)) return u.href;
+    } catch {}
+    return null;
+}
+
+function markdown(text) {
+    const root = node("div", null, "body"), lines = String(text || "").split("\n");
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+        if (line.startsWith("```")) {
+            const code = [];
+            i++;
+            while (i < lines.length && !lines[i].startsWith("```")) code.push(lines[i++]);
+            const pre = node("pre", code.join("\n"));
+            root.append(button("Copy code", () => copy(code.join("\n"))), pre);
+            i++;
+            continue;
+        }
+        if (line.trim().startsWith("|") && /\|?\s*:?-{3}/.test(lines[i + 1] || "")) {
+            const raw = [ line, lines[i + 1] ], cells = l => l.trim().replace(/^\||\|$/g, "").split("|").map(c => c.trim()), headers = cells(line), rows = [];
+            i += 2;
+            while (i < lines.length && lines[i].trim().startsWith("|")) {
+                raw.push(lines[i]);
+                rows.push(cells(lines[i++]));
+            }
+            root.append(tableView(headers, rows, raw.join("\n")));
+            continue;
+        }
+        const h = /^(#{1,6}) (.*)/.exec(line);
+        const p = node(h ? "h" + h[1].length : line.startsWith("> ") ? "blockquote" : "div");
+        inline(p, h ? h[2] : line.replace(/^> /, ""));
+        root.append(p);
+        i++;
+    }
+    return root;
+}
+
+function inline(parent, text) {
+    const re = /(`+)(.*?)\1|\*\*(.*?)\*\*|\[([^\]]+)\]\(([^)]+)\)|【([^】]+)】/g;
+    let at = 0, m;
+    while (m = re.exec(text)) {
+        parent.append(document.createTextNode(text.slice(at, m.index)));
+        if (m[2] != null) parent.append(node("code", m[2])); else if (m[3] != null) parent.append(node("strong", m[3])); else if (m[4] != null) {
+            const url = safeUrl(m[5]);
+            if (url) {
+                const a = node("a", m[4]);
+                a.href = url;
+                a.rel = "noopener noreferrer";
+                a.target = "_blank";
+                parent.append(a);
+            } else parent.append(document.createTextNode(m[0]));
+        } else parent.append(node("span", m[6], "badge"));
+        at = re.lastIndex;
+    }
+    parent.append(document.createTextNode(text.slice(at)));
+}
+
+function tableView(headers, rows, raw, expanded = false) {
+    const wrap = node("div", null, "table-wrap"), table = node("table"), head = node("tr");
+    for (const h of headers) head.append(node("th", h));
+    table.append(add(node("thead"), head));
+    const body = node("tbody");
+    for (const r of rows) {
+        const tr = node("tr");
+        for (const c of r) tr.append(node("td", c));
+        body.append(tr);
+    }
+    table.append(body);
+    wrap.append(row(button("Copy Markdown", () => copy(raw)), button("Copy for Slack", () => copy("```\n" + [ headers, ...rows ].map(r => r.join("\t")).join("\n") + "\n```")), expanded ? null : button("Expand ⤢", () => modal("Expanded Table", true).append(tableView(headers, rows, raw, true)))), table);
+    return wrap;
+}
+
+function renderMessages() {
+    if (state._view !== "Bots") return;
+    const area = $("workspace"), oldScroll = area.scrollTop, nearEnd = area.scrollHeight - oldScroll - area.clientHeight < 100;
+    let content = area.querySelector(".transcript");
+    if (!content) {
+        content = node("div", null, "transcript");
+        area.replaceChildren(content);
+    }
+    const start = state._windowStart ?? Math.max(0, state._messages.length - 200), messages = state._messages.slice(start, start + 200);
+    const existing = new Map([ ...content.children ].map(x => [ x.dataset.id, x ]));
+    const desired = [];
+    if (start>0||state._messages.length>=50) desired.push(button("Load earlier messages", () => start > 0 ? (state._windowStart = Math.max(0, start - 100),
+    renderMessages()) : loadMessages(state._messages[0].seq)));
+    if (start + 200 < state._messages.length) desired.push(button("Newer messages", () => {
+        state._windowStart = Math.min(state._messages.length - 200, start + 100);
+        renderMessages();
+    }));
+    for (const m of messages) {
+        const key = String(m.id || m.seq), signature = JSON.stringify(m);
+        let el = existing.get(key);
+        if (!el || el.dataset.signature !== signature) {
+            el = node("article", null, "message" + (m.role === "user" || m.author === "You" ? " user" : ""));
+            el.tabIndex = 0;
+            el.dataset.id = key;
+            el.dataset.signature = signature;
+            if(!el.classList.contains("user")){
+                const bot=(state._data.bots||[]).find(b=>b.id===m.bot_id||b.id===m.author||b.display_name===m.author)||{id:m.bot_id||m.author,display_name:m.author,avatar_color:"#9E9E9E"};
+                const author=row(avatar(bot),node("strong",m.author||m.bot_id||"Muse"));author.classList.add("message-author");author.style.color=bot.avatar_color||bot.color||"var(--secondary)";el.append(author);
+            }
+            const bubble=node("div",null,"bubble");el.append(bubble);
+            if (m.reply_to_id) bubble.append(node("small", "Reply", "reply-context"));
+            for (const part of String(m.content || m.text || "").split(/<message_break\s*\/>/).slice(0, 20)) bubble.append(markdown(part.replace(/<options>[\s\S]*?(<\/options>|$)/g, "")));
+            const options = /<options>([\s\S]*?)<\/options>/.exec(m.content || "");
+            if (options) for (const label of options[1].split("\n").map(x => x.replace(/^[-*\d.)\s]+/, "").trim()).filter(Boolean)) bubble.append(button(label, () => sendMessage(label)));
+            if (m.card || m.card_json) {
+                let c = m.card || m.card_json;
+                if (typeof c === "string") {
+                    try {
+                        c = JSON.parse(c);
+                    } catch {
+                        c = {
+                            summary: c
+                        };
+                    }
+                }
+                bubble.append(chatCard(c, m));
+            }
+            const actions = node("div", null, "row actions");
+            actions.append(node("small",m.created_at?new Date(m.created_at).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}):""));
+            actions.append(button("Reply", () => {
+                state._reply = {
+                    id: m.id,
+                    text: (m.content || "").slice(0, 80)
+                };
+                renderChips();
+                $("draft").focus();
+            }), button("Copy", () => copy(m.content || "")), button("Request ID", () => copy(m.request_id || m.id)));
+            for (const emoji of [ "👍", "❤️", "😂", "🎉", "👀", "🚀" ]) actions.append(button(emoji, () => api("/api/messages/" + enc(m.id) + "/reactions", {
+                emoji: emoji,
+                chat_kind: state._kind,
+                chat_id: state._target
+            })));
+            el.append(actions);
+        }
+        desired.push(el);
+    }
+    for (const child of [ ...content.children ]) if (!desired.includes(child)) {
+        clearSecrets(child);
+        child.remove();
+    }
+    desired.forEach((el, index) => {
+        if (content.children[index] !== el) content.insertBefore(el, content.children[index] || null);
+    });
+    if (nearEnd) area.scrollTop = area.scrollHeight;
+}
+
+function chatCard(c, m) {
+    const box = card(), kind = c.kind || c.type || "info", id = c.request_id || m.request_id || m.id, status = c.status || "pending";
+    box.append(row(node("strong", c.title || kind.replaceAll("_", " ")), node("span", status, "badge")));
+    if (c.summary || c.details) box.append(node("p", c.summary || c.details));
+    const pending = status === "pending";
+    const approve = (approved, remember) => api("/api/approvals/" + enc(id) + "/respond", {
+        approved: approved,
+        ...remember ? {
+            remember_rule: remember
+        } : {}
+    }).then(r => {
+        if (remember && r.rule_saved) notice("Saved to Custom Rules");
+        return loadMessages();
+    });
+    if ([ "approval", "terminal_approval", "ask_first" ].includes(kind)) {
+        if (c.command) box.append(node("pre", c.command), node("small", "CWD: " + (c.cwd || "workspace")));
+        if (pending) {
+            box.append(row(button("Allow once", () => approve(true)), button("Deny", () => approve(false)), button("Manage settings", () => settings("Computer"))));
+            if (kind === "approval") box.append(button("Always allow", () => {
+                const d = modal("Always allow");
+                form(d, {
+                    pattern: c.pattern || c.title || ""
+                }, [ [ "pattern", "Custom rule pattern" ] ], async v => {
+                    await approve(true, v.pattern);
+                    closeModal();
+                });
+            }));
+        }
+    } else if ([ "secret_prompt", "secure_form" ].includes(kind) && pending) {
+        const inputs = {}, f = node("form");
+        for (const key of c.fields || [ "password" ]) {
+            const name = typeof key === "string" ? key : key.key;
+            const [w, input] = field(name, "", "password");
+            inputs[name] = input;
+            f.append(w);
+        }
+        const [w, save] = field("Save securely to Bot's Vault", false, "checkbox");
+        f.append(w);
+        const submit = node("button", "Submit securely", "accent");
+        submit.type = "submit";
+        f.append(submit, button("Cancel", async () => {
+            clearSecrets(f);
+            await api("/api/secrets/" + enc(id) + "/submit", {
+                cancelled: true
+            });
+            loadMessages();
+        }));
+        f.onsubmit = e => {
+            e.preventDefault();
+            run(async () => {
+                const fields = Object.entries(inputs).map(([k, v]) => [ k, v.value ]);
+                clearSecrets(f);
+                let body = {
+                    fields: fields,
+                    bot_id: state._target,
+                    save_to_vault: save.checked
+                };
+                try {
+                    await api("/api/secrets/" + enc(id) + "/submit", body);
+                } finally {
+                    fields.forEach(p => p[1] = "");
+                    body = null;
+                }
+                await loadMessages();
+            }, submit);
+        };
+        box.append(f);
+    } else if ([ "question", "clarifying_question" ].includes(kind) && pending) {
+        const answers = [];
+        for (const option of c.options || []) {
+            const [w, input] = field(option, false, c.allow_multiple ? "checkbox" : "radio");
+            input.name = "answer-" + id;
+            input.value = option;
+            box.append(w);
+            answers.push(input);
+        }
+        const [w, other] = field("Something else");
+        box.append(w, button("Respond", async () => {
+            await api("/api/questions/" + enc(id) + "/respond", {
+                answer: [ ...answers.filter(x => x.checked).map(x => x.value), other.value ].filter(Boolean).join("\n")
+            });
+            await loadMessages();
+        }));
+    } else if ([ "wheel_handoff", "take_control" ].includes(kind)) {
+        box.append(node("p", c.instructions || c.blocker || ""), button("Take over", liveComputer));
+        form(box, {
+            note: ""
+        }, [ [ "note", "Handback note" ] ], v => mutate("/api/tasks/" + enc(c.task_id) + "/resume", v), "I'm done");
+    } else if (kind === "draft") {
+        box.append(node("p", [ c.to, c.subject, c.body ].filter(Boolean).join("\n")), button("Edit inline", () => textView("Edit draft", c.body || c.content || "")), button("Send message", () => connectApps()), button("Discard", () => notice("Draft discarded from this view.")));
+        box.append(node("small", "Connect Gmail/Slack in Connect Apps to send through an adapter."));
+    } else if ([ "order_approval", "shopping" ].includes(kind)) {
+        box.append(node("p", `${c.merchant || ""} · ${c.item_title || ""} · $${Number(c.amount_usd || 0).toFixed(2)}`), node("small", "Payment Checkout Adapter not connected"), button("Configure Checkout", connectApps));
+        if (pending) box.append(button("Cancel", () => approve(false)));
+    } else if ([ "phone_call", "meeting", "connect_app", "reauth" ].includes(kind)) box.append(node("p", "Connect Voice / Meeting Bridge or the requested app in Connect Apps."), button("Connect / Configure", connectApps)); else if ([ "file_output", "page", "space_preview" ].includes(kind)) box.append(button("Open split view", () => c.slug ? openSpace(c.slug) : openFile(c.path || c.file)), button("Copy link", () => copy(c.url || c.path || ""))); else if ([ "media_output", "media" ].includes(kind)) box.append(button("Open Lightbox", () => lightbox(c.uri || c.path, c.mime, c.title))); else if ([ "initiative", "digest_brief" ].includes(kind)) {
+        box.append(button("Accept & Run", () => sendMessage(c.instruction || c.summary || c.title)), button("Edit prompt", () => {
+            $("draft").value = c.instruction || c.summary || "";
+            composerChanged();
+        }), button("Mute check-ins", () => mutate("/api/bots/" + enc(state._target) + "/ui-prefs", {
+            notifications_enabled: false
+        }, "PUT")));
+    } else if ([ "subagent_spawn", "a2a_handoff" ].includes(kind)) {
+        box.append(button("Open @" + (c.target_bot_id || c.bot_id), () => navigate("Bots", "dm", c.target_bot_id || c.bot_id)), node("pre", JSON.stringify(c.steps || c.trace || [], null, 2)));
+    } else box.append(node("pre", JSON.stringify(c, null, 2)));
+    return box;
+}
+
+function renderChips() {
+    const chips = $("chips");
+    chips.replaceChildren();
+    if (state._reply) chips.append(button("Reply: " + state._reply.text + " ✕", () => {
+        state._reply = null;
+        renderChips();
+    }));
+    state._attachments.forEach((a, i) => chips.append(button(a.name + " ✕", () => {
+        state._attachments.splice(i, 1);
+        renderChips();
+    })));
+    $("send").textContent="↑";
+    $("send").disabled=!$("draft").value.trim()&&!state._attachments.length;
+    $("mode").textContent = state._mode === "chat" ? "Chat" : "Queue Task";
+}
+
+function arrowEdit(text) {
+    let ticks = 0;
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] === "`") {
+            let n = 1;
+            while (text[i + n] === "`") n++;
+            if (!ticks) ticks = n; else if (ticks === n) ticks = 0;
+            i += n - 1;
+        } else if (!ticks && text.slice(i, i + 2) === "->") return {
+            text: text.slice(0, i) + "→" + text.slice(i + 2),
+            position: i
+        };
+    }
+    return {
+        text: text,
+        position: null
+    };
+}
+
+function composerChanged() {
+    saveDraft();
+    const draft = $("draft");
+    if (!state._composing) {
+        const result = arrowEdit(draft.value);
+        if (result.position !== null) {
+            const cursor = draft.selectionStart;
+            draft.value = result.text;
+            draft.setSelectionRange(Math.max(0, cursor - 1), Math.max(0, cursor - 1));
+            state._arrow = result.position;
+        }
+    }
+    renderChips();
+    const match = /(?:^|\s)([@/][\w:-]*)$/.exec(draft.value);
+    const pop = $("suggestions");
+    pop.replaceChildren();
+    pop.hidden = !match;
+    if (match) {
+        const values = match[1][0] === "@" ? [ "@everyone", ...(state._data.bots || []).map(b => "@" + b.id), ...(state._data.routines || []).map(x => "@routine:" + (x.routine || x).id), ...(state._data.integrations || []).map(x => "@app:" + x.id) ] : [ "/do", ...(Array.isArray(state._data.skills) ? state._data.skills : state._data.skills?.skills || []).map(x => "/" + (x.name || x.id)) ];
+        for (const text of values.filter(x => x.toLowerCase().startsWith(match[1].toLowerCase())).slice(0, 20)) pop.append(button(text, () => {
+            draft.value = draft.value.slice(0, draft.value.length - match[1].length) + text + " ";
+            pop.hidden = true;
+            draft.focus();
+            renderChips();
+        }));
+    }
+}
+
+async function sendMessage(text) {
+    text = (text ?? $("draft").value).trim();
+    if (!text && !state._attachments.length) {
+        notice("Configure STT/TTS voice bridge in Connect Apps.");
+        return;
+    }
+    const epoch = state._epoch, target = state._target, kind = state._kind;
+    const content = [ (state._mode === "queue" && !text.startsWith("/do ") ? "/do " : "") + text, ...state._attachments.map(a => "Attached file: " + a.path) ].filter(Boolean).join("\n");
+    const body = kind === "dm" ? {
+        content: content,
+        reply_to_id: state._reply?.id || null
+    } : {
+        content: content,
+        author: "You",
+        reply_to_id: state._reply?.id || null
+    };
+    await api(kind === "dm" ? "/api/dm/" + enc(target) + "/messages" : "/api/channels/" + enc(target) + "/messages", body);
+    if (epoch !== state._epoch) return;
+    $("draft").value = "";
+    saveDraft();
+    state._attachments = [];
+    state._reply = null;
+    renderChips();
+    await loadMessages();
+}
+
+async function fileBase64(file) {
+    if (file.size > 25 * 1024 * 1024) throw new Error("File exceeds 25 MB");
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader;
+        reader.onload = () => resolve(String(reader.result).split(",")[1]);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+async function attachFiles(files) {
+    for (const file of files) {
+        const res = await api("/api/bots/" + enc(state._target) + "/attachments", {
+            filename: file.name,
+            bytes_base64: await fileBase64(file)
+        });
+        state._attachments.push({
+            name: file.name,
+            path: res.attachment_path || res.path || res.relative_path || res.attachment?.path || res.uri
+        });
+    }
+    renderChips();
+}
+
+function openLibrary(item) {
+    const uri = item.uri_or_path || "";
+    if (item.kind === "pages") return openSpace(uri);
+    if (item.kind === "apps") return connectApps();
+    if (item.kind === "media") return lightbox(uri, /\.mp4$/i.test(uri) ? "video/mp4" : "image/png", item.title);
+    if (item.kind === "links") {
+        const url = safeUrl(uri);
+        if (url) window.open(url, "_blank", "noopener,noreferrer");
+        return;
+    }
+    return openFile(uri.replace(/^sandbox:\/\//, ""));
+}
+
+async function openFile(file) {
+    const res = await api("/api/bots/" + enc(state._target) + "/files/preview?path=" + enc(file));
+    $("split").hidden = false;
+    $("space-iframe").hidden = true;
+    $("page").hidden = false;
+    $("split-head").replaceChildren(node("strong", file), button("Message about page", () => {
+        $("draft").value += " About " + file + ": ";
+        composerChanged();
+    }), button("✕", closeSplit));
+    $("page").replaceChildren(markdown(res.content || res.text || JSON.stringify(res)));
+}
+
+function closeSplit() {
+    $("split").hidden = true;
+    $("space-iframe").removeAttribute("src");
+    $("page").replaceChildren();
+}
+
+async function openSpace(slug) {
+    const res = await api("/api/spaces/" + enc(slug) + "/url"), url = new URL(res.url);
+    if (url.origin !== `http://127.0.0.1:${state._data.status.spaces_port}` || url.pathname !== `/spaces/v2/${enc(slug)}/` || !url.searchParams.get("token")) throw new Error("Rejected isolated Space URL");
+    $("split").hidden = false;
+    $("page").hidden = true;
+    const frame = $("space-iframe");
+    frame.hidden = false;
+    frame.src = url.href;
+    frame.onload = theme;
+    $("split-head").replaceChildren(node("strong", slug), button("Edit HTML", () => spaceEditor(slug)), button("Publish", () => confirmAction("Publish " + slug, () => mutate("/api/spaces/" + enc(slug) + "/publish", {
+        confirmed: true
+    }))), button("Unpublish", () => mutate("/api/spaces/" + enc(slug) + "/unpublish")), button("✕", closeSplit));
+}
+
+async function spaceEditor(slug) {
+    const value = await api("/api/spaces/" + enc(slug) + "/file?path=index.html");
+    const box = modal("Edit Space HTML");
+    form(box, {
+        content: value.content || "",
+        expected_sha256: value.sha256,
+        path: "index.html"
+    }, [ [ "content", "HTML", "textarea" ] ], async v => {
+        await api("/api/spaces/" + enc(slug) + "/file", v, "PUT");
+        closeModal();
+        openSpace(slug);
+    });
+}
+
+async function lightbox(uri, mime = "image/png", title = "Media") {
+    const box = modal(title, true);
+    let url = safeUrl(uri);
+    if (String(uri).startsWith("sandbox://")) {
+        const relative = String(uri).slice(10);
+        if (relative.split("/").includes("..") || relative.startsWith("/") || relative.includes("\\")) throw new Error("Unsafe sandbox media path");
+        const value = await api("/api/bots/" + enc(state._target) + "/files/preview?path=" + enc(relative));
+        url = value.data_url || value.url;
+        if (!url) throw new Error("Media preview unavailable");
+    }
+    if (!url) throw new Error("Unsupported media URL");
+    const media = node(mime.startsWith("video") ? "video" : "img");
+    if (media.tagName === "VIDEO") media.controls = true;
+    media.src = url;
+    media.alt = title;
+    let zoom = 1;
+    const controls = row(button("−", () => {
+        zoom = Math.max(.25, zoom - .25);
+        media.style.transform = `scale(${zoom})`;
+    }), button("+", () => {
+        zoom = Math.min(4, zoom + .25);
+        media.style.transform = `scale(${zoom})`;
+    }), button("Reset", () => {
+        zoom = 1;
+        media.style.transform = "";
+    }), button("Download", () => {
+        const a = node("a");
+        a.href = url;
+        a.download = title;
+        a.click();
+    }));
+    if (media.tagName === "VIDEO") {
+        const [w, s] = select("Speed", "1", [ "0.5", "1", "1.25", "1.5", "2" ]);
+        s.onchange = () => media.playbackRate = Number(s.value);
+        controls.append(w);
+    }
+    box.append(controls, media);
+}
+
+function renderWorkspace() {
+    if (state._view === "Bots") {
+        renderMessages();
+        return;
+    }
+    const area = $("workspace"), content = node("div", null, "content");
+    area.replaceChildren(content);
+    if (state._view === "Feed") {
+        form(content, {
+            prompt: state._data.feed?.brief_prompt || ""
+        }, [ [ "prompt", "Brief topic prompt", "textarea" ] ], v => mutate("/api/activity/prompt", v), "Save brief prompt");
+        form(content, {
+            title: "",
+            body: ""
+        }, [ [ "title", "Post title" ], [ "body", "Post", "textarea" ] ], v => mutate("/api/activity", v), "Post");
+        for (const p of state._data.feed?.posts || []) {
+            const stars = row();
+            for (let rating = 1; rating <= 5; rating++) stars.append(button("★".repeat(rating), () => mutate("/api/activity/" + enc(p.id) + "/rate", {
+                rating: rating
+            })));
+            content.append(card(node("h3", p.title), markdown(p.body), stars));
+        }
+        content.append(node("h2", "Ideas"), button("Generate Ideas", async () => {
+            const ideas = await api("/api/ideas", {});
+            state._data.feed.ideas = ideas;
+            renderWorkspace();
+        }));
+        form(content, {
+            title: "",
+            description: "",
+            action_prompt: ""
+        }, [ [ "title", "Idea title" ], [ "description", "Description" ], [ "action_prompt", "Action prompt", "textarea" ] ], v => mutate("/api/ideas", v), "Create Idea");
+        for (const idea of state._data.feed?.ideas || []) content.append(card(node("h3", idea.title), node("p", idea.description), row(button("Run", () => mutate("/api/ideas/" + enc(idea.id) + "/run", {
+            bot_id: state._target
+        })), button("Dismiss", () => mutate("/api/ideas/" + enc(idea.id) + "/dismiss")))));
+    }
+    if (state._view === "Goals") {
+        content.append(button("New Goal", () => goalEditor()));
+        for (const entry of state._data.goals || []) {
+            const goal = entry.goal || entry;
+            content.append(card(node("h3", goal.title), node("p", goal.description), node("small", `${goal.status || ""} · ${goal.category || ""}`), node("pre", JSON.stringify(goal.stop_conditions || [], null, 2)), row(button("Edit", () => goalEditor(goal)), button("Subgoal", () => goalEditor(null, goal.slug)), button("Complete", () => mutate("/api/goals", {
+                slug: goal.slug,
+                action: "complete",
+                verified: true
+            }, "PATCH")), button("Abandon", () => confirmAction("Abandon goal", () => mutate("/api/goals", {
+                slug: goal.slug,
+                action: "abandon"
+            }, "PATCH"))))));
+        }
+    }
+    if (state._view === "Spaces") {
+        content.append(button("New Page", () => {
+            const box = modal("New Page");
+            form(box, {
+                slug: "",
+                title: "",
+                kind: "static",
+                html: "<!doctype html><h1>Hello</h1>"
+            }, [ [ "slug", "Slug" ], [ "title", "Title" ], [ "html", "HTML", "textarea" ] ], async v => {
+                await mutate("/api/spaces", v);
+                closeModal();
+            });
+        }));
+        for (const entry of state._data.spaces || []) {
+            const sp = entry.meta || entry;
+            content.append(card(node("h3", sp.title || sp.slug), node("small", sp.published ? "Published" : "Local"), row(button("Open split view", () => openSpace(sp.slug)), button("Edit HTML", () => spaceEditor(sp.slug)), button("Publish", () => confirmAction("Publish Space", () => mutate("/api/spaces/" + enc(sp.slug) + "/publish", {
+                confirmed: true
+            }))), button("Unpublish", () => mutate("/api/spaces/" + enc(sp.slug) + "/unpublish")), button("Delete", () => confirmAction("Delete Space", () => mutate("/api/spaces/" + enc(sp.slug), undefined, "DELETE"))))));
+        }
+    }
+    if (state._view === "Audit") {
+        const [wrap, filter] = select("Category", "", [ "", "permitted", "refused", "failed" ]);
+        const list = node("div");
+        const load = async () => {
+            const records = await api("/api/audit?limit=100&category=" + enc(filter.value));
+            list.replaceChildren(...(Array.isArray(records) ? records : records.records || []).map(r => card(node("strong", r.category || r.kind), node("pre", JSON.stringify(r, null, 2)))));
+        };
+        filter.onchange = () => run(load);
+        content.append(wrap, row(button("Weekly Report", () => report(7)), button("Monthly Report", () => report(30))), list, node("h2", "Task Queue"));
+        run(load);
+        for (const task of state._data.recent_tasks || []) content.append(card(node("strong", task.instruction || task.id), node("small", task.status), row(...[ "retry", "resume", "pause", "cancel" ].map(action => button(action, () => mutate("/api/tasks/" + enc(task.id) + "/" + action, {
+            note: ""
+        }))))));
+    }
+}
+
+function report(days) {
+    const records = state._data.recent_tasks || [];
+    textView(`${days === 7 ? "Weekly" : "Monthly"} Report`, {
+        since: new Date(Date.now() - days * 864e5).toISOString(),
+        spend: state._data.status,
+        recent_tasks: records
+    });
+}
+
+function goalEditor(goal, parent) {
+    const box = modal(goal ? "Edit Goal" : "New Goal");
+    const values = goal || {
+        title: "",
+        description: "",
+        category: "",
+        parent_goal_id: parent || null,
+        stop_conditions: []
+    };
+    form(box, {
+        ...values,
+        stop: JSON.stringify(values.stop_conditions || [])
+    }, [ [ "title", "Title" ], [ "description", "Description", "textarea" ], [ "category", "Category" ], [ "stop", "Stop conditions (JSON)", "textarea" ] ], async v => {
+        v.stop_conditions = JSON.parse(v.stop);
+        delete v.stop;
+        if (goal) v.action = "update";
+        await mutate("/api/goals", v, goal ? "PATCH" : "POST");
+        closeModal();
+    });
+}
+
+function renderDetails() {
+    const drawer = $("details");
+    drawer.hidden = !state._details;
+    if (!state._details) return;
+    drawer.replaceChildren(row(node("h2", "Bot Details"), button("✕", () => {
+        state._details = false;
+        drawer.hidden = true;
+    })));
+    tabs(drawer, [ "Overview", "Routines", "Library", "Memory" ], state._tab, name => {
+        state._tab = name;
+        renderDetails();
+    });
+    const body = node("div");
+    drawer.append(body);
+    const bot = (state._data.bots || []).find(b => b.id === state._target) || {};
+    if (state._tab === "Overview") {
+        body.append(avatar(bot), node("h3", bot.display_name || state._target), button("Edit Profile", () => editBot(bot)), button("Avatar", () => avatarPicker(bot)), button("Share template", () => exportTemplate(state._target)), button("Teach a task", teachTask), node("h3", "Upcoming Meetings"), node("p", "Connect Calendar / Meeting Bridge in Connect Apps."), button("Add to meeting", connectApps), button("Live Computer", liveComputer));
+    }
+    if (state._tab === "Routines") {
+        body.append(button("＋ New Routine", () => routineEditor()));
+        for (const entry of state._data.routines || []) {
+            const routine = entry.routine || entry;
+            if (routine.bot_id !== state._target) continue;
+            const [wrap, enabled] = field(routine.name, routine.enabled, "checkbox");
+            enabled.onchange = () => run(() => mutate("/api/routines", {
+                ...routine,
+                enabled: enabled.checked
+            }));
+            body.append(card(wrap, node("small", "Next: " + (entry.next_run_utc || "manual")), row(button("Test", async () => {
+                await mutate("/api/routines/" + enc(routine.id) + "/test");
+                notice("Running…");
+            }), button("Edit", () => routineEditor(routine)), button("Delete", () => confirmAction("Delete Routine", () => mutate("/api/routines/" + enc(routine.id), undefined, "DELETE"))), button("History", async () => textView("Last 20 runs", (await api("/api/routines/" + enc(routine.id) + "/runs")).slice(0, 20))), button("Webhook", () => webhook(routine)))));
+        }
+    }
+    if (state._tab === "Library") {
+        tabs(body, [ "all", "pinned", "pages", "media", "links", "files", "apps" ], state._filter, filter => {
+            state._filter = filter;
+            state._cursor = 0;
+            state._library = [];
+            renderDetails();
+        });
+        const list = node("div");
+        body.append(list);
+        const epoch = state._epoch;
+        run(async () => {
+            const page = await api("/api/bots/" + enc(state._target) + `/library?filter=${state._filter}&cursor=${state._cursor}&limit=5`);
+            if (epoch !== state._epoch || state._tab !== "Library") return;
+            const items = page.items || [];
+            state._library = state._cursor ? [ ...state._library, ...items ] : items;
+            for (const group of [ "Pinned", "Today", "This week", "Older" ]) {
+                const grouped = state._library.filter(x => (x.group || "Older").toLowerCase().replaceAll("_", " ") === group.toLowerCase());
+                if (!grouped.length) continue;
+                list.append(node("h3", group));
+                for (const item of grouped) list.append(card(node("strong", item.title || item.uri_or_path), row(button(item.pinned ? "Unpin" : "Pin", () => mutate("/api/library/" + enc(item.id) + "/pin", {
+                    pinned: !item.pinned,
+                    bot_id: state._target
+                })), button("Open", () => openLibrary(item)))));
+            }
+            if (page.next_cursor != null) body.append(button("Show more", () => {
+                state._cursor = page.next_cursor;
+                renderDetails();
+            }));
+        });
+    }
+    if (state._tab === "Memory") {
+        body.append(button("Runtime Identity / Memory Files", identityEditor), button("Explain Memory", () => {
+            const box = modal("Explain Memory");
+            form(box, {
+                target: ""
+            }, [ [ "target", "Why does Muse know X?" ] ], async v => textView("Provenance", await api("/api/memory/explain", v)), "Explain");
+        }), button("Import Memory", memoryImport), button("Two-Phase Forget", forget), button("Side-Chat Discretion", discretion));
+    }
+}
+
+function routineEditor(routine) {
+    const box = modal("Routine Editor");
+    const initial = routine || {
+        id: "rtn-" + crypto.randomUUID().slice(0, 8),
+        name: "",
+        bot_id: state._target,
+        instruction: "",
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        hour: 9,
+        minute: 0,
+        weekdays: [],
+        quiet_hours: null,
+        interval_minutes: null,
+        enabled: true
+    };
+    form(box, {
+        ...initial,
+        weekdays: initial.weekdays.join(","),
+        quiet: initial.quiet_hours ? JSON.stringify(initial.quiet_hours) : ""
+    }, [ [ "name", "Name" ], [ "instruction", "Instruction", "textarea" ], [ "timezone", "IANA Timezone" ], [ "hour", "Hour", "number" ], [ "minute", "Minute", "number" ], [ "weekdays", "Weekdays 0=Mon … 6=Sun (empty = daily)" ], [ "interval_minutes", "Interval minutes (empty = daily)" ], [ "quiet", 'Quiet hours JSON {"start_hour":22,"end_hour":7}' ], [ "enabled", "Enabled", "checkbox" ] ], async v => {
+        v.weekdays = v.weekdays.split(",").filter(Boolean).map(Number);
+        v.interval_minutes = v.interval_minutes ? Number(v.interval_minutes) : null;
+        if (v.interval_minutes !== null && v.interval_minutes < 5) throw new Error("Minimum routine interval is 5 minutes");
+        v.quiet_hours = v.quiet ? JSON.parse(v.quiet) : null;
+        delete v.quiet;
+        await mutate("/api/routines", v);
+        closeModal();
+    });
+    if (routine) box.append(button("Webhook", () => webhook(routine)));
+}
+
+async function webhook(routine) {
+    const box = modal("Routine Webhook"), url = location.origin + "/api/routines/" + enc(routine.id) + "/trigger";
+    box.append(node("pre", "POST " + url), button("Copy URL", () => copy(url)), node("small", "Use x-webhook-key. Duplicate deliveries are deduplicated by the server."));
+    const [w, key] = field("Webhook key", "", "password");
+    box.append(w, button("Reveal key", async () => {
+        const value = await api("/api/routines/" + enc(routine.id) + "/webhook-key");
+        key.value = value.webhook_key || value.key || "";
+        for (const name of Object.keys(value)) value[name] = "";
+    }), button("Copy key", () => copy(key.value)));
+}
+
+async function identityEditor() {
+    const box = modal("Identity & Memory"), [wrap, file] = select("Runtime file", "SOUL.md", [ "SOUL.md", "IDENTITY.md", "USER.md", "MEMORY.md", "AGENTS.md", "HEARTBEAT.md", "TOOLS.md", "PROACTIVE_PREFERENCES.md" ]), [edit, text] = field("Content", "", "textarea");
+    let sha = null;
+    const path = () => "/api/identity/" + enc(state._target) + "/" + enc(file.value);
+    const load = async () => {
+        const value = await api(path());
+        text.value = value.content;
+        sha = value.sha256;
+    };
+    file.onchange = () => run(load);
+    box.append(wrap, edit, button("Reload latest", load), button("Save Changes", async () => {
+        const value = await api(path(), {
+            content: text.value,
+            expected_sha256: sha
+        }, "PUT");
+        sha = value.sha256;
+        notice("Saved with SHA-256 verification.");
+    }));
+    await load();
+}
+
+function memoryImport() {
+    const box = modal("Import Memory");
+    form(box, {
+        input: "",
+        apply: false,
+        report_sha256: null,
+        expected_sha256: null
+    }, [ [ "input", "Portable memory text", "textarea" ] ], async v => {
+        const report = await api("/api/memory/import", v);
+        confirmAction("Apply memory import: " + JSON.stringify(report), () => api("/api/memory/import", {
+            ...v,
+            apply: true,
+            report_sha256: report.report_sha256
+        }));
+    }, "Dry run");
+}
+
+function forget() {
+    const box = modal("Two-Phase Forget");
+    form(box, {
+        request: "",
+        bot_id: state._target
+    }, [ [ "request", "What should be forgotten?" ] ], async v => {
+        const plan = await api("/api/memory/forget/plan", v), next = modal("Confirm Forget");
+        next.append(node("pre", JSON.stringify(plan, null, 2)));
+        form(next, {
+            confirmed: false,
+            verification_query: "",
+            plan_id: plan.plan_id,
+            bot_id: state._target
+        }, [ [ "confirmed", "I confirm permanent forgetting", "checkbox" ], [ "verification_query", "Verification query" ] ], async body => {
+            if (!body.confirmed) throw new Error("Confirmation required");
+            textView("Forget verification report", await api("/api/memory/forget/confirm", body));
+        }, "Execute Confirm");
+    }, "Plan");
+}
+
+async function discretion() {
+    const chatId = state._kind + ":" + state._target, path = "/api/side-chats/" + enc(chatId) + "/discretion", value = await api(path), box = modal("Side-Chat Discretion");
+    box.append(node("pre", (value.default_rules || []).join("\n")));
+    form(box, {
+        rules_text: (value.user_rules || []).join("\n"),
+        loosens: false,
+        expected_sha256: value.sha256
+    }, [ [ "rules_text", "User rules", "textarea" ], [ "loosens", "Loosens existing restrictions", "checkbox" ] ], async v => {
+        const res = await api(path, v, "PUT");
+        v.expected_sha256 = res.sha256;
+        notice("Discretion policy saved.");
+    });
+}
+
+function stopLive() {
+    state._live = false;
+    clearTimeout(state._liveTimer);
+    state._liveTimer = null;
+}
+
+async function liveComputer() {
+    const box = modal("Live Computer", true), image = node("img", null, "live");
+    image.alt = "Live Computer";
+    box.append(row(button("Watch Only", () => notice("Watching only; actions stay behind approval policy.")), button("Emergency Stop", () => mutate("/api/system/kill")), button("Teach a task", teachTask)), image);
+    state._live = true;
+    const tick = async () => {
+        if (!state._live) return;
+        if (!document.hidden) {
+            try {
+                const frame = await api("/api/computer/preview?max_long_edge=1280&quality=75");
+                if (state._live) image.src = "data:image/jpeg;base64," + frame.jpeg_base64;
+            } catch (e) {
+                notice(e.message);
+                stopLive();
+                return;
+            }
+        }
+        if (state._live) state._liveTimer = setTimeout(tick, 400);
+    };
+    await tick();
+}
+
+async function teachTask() {
+    const box = modal("Teach a Task");
+    await api("/api/teach/start", {
+        bot_id: state._target
+    });
+    box.append(node("p", "Recording for up to 10 minutes. Recorded steps are scrubbed before becoming a skill."));
+    form(box, {
+        step: ""
+    }, [ [ "step", "Demonstrated step" ] ], v => api("/api/teach/step", v), "Record step");
+    form(box, {
+        save_skill_name: ""
+    }, [ [ "save_skill_name", "Skill name (empty = preview only)" ] ], async v => textView("Recorded Skill", await api("/api/teach/stop", v)), "Stop & Review");
+}
+
+async function savePrefs(v) {
+    for (const key of [ "quiet_hours_start", "quiet_hours_end", "microphone_device" ]) if (v[key] === "") v[key] = null;
+    return mutate("/api/ui-settings", v, "PUT");
+}
+
+function settings(pane = "General") {
+    const shell=modal("Settings",true);shell.classList.add("settings-shell");state._settingsPane=pane;
+    const layout=node("div",null,"settings-layout"),nav=node("nav",null,"settings-nav"),box=node("div",null,"settings-content");
+    nav.setAttribute("aria-label","Settings sections");tabs(nav,["General","Providers & models","Computer","Vault","Usage & Billing","Updates"],pane,settings);layout.append(nav,box);shell.append(layout);
+    if(pane==="Providers & models"){providerSettings(box);return;}
+    const ui = state._data.ui || {};
+    if (pane === "General") form(box, ui, [ [ "theme", "Theme", "select", [ "system", "dark", "light" ] ], [ "hardware_acceleration", "Use hardware acceleration (restart required)", "checkbox" ], [ "language", "Language" ], [ "timezone", "Timezone" ], [ "spellcheck", "Spellcheck", "checkbox" ], [ "notifications_enabled", "Desktop alerts", "checkbox" ], [ "notification_sound", "Alert sound", "checkbox" ], [ "suppress_notifications_when_active", "Suppress when active", "checkbox" ], [ "quiet_hours_start", "Quiet hours start" ], [ "quiet_hours_end", "Quiet hours end" ], [ "microphone_device", "Microphone device" ] ], v => savePrefs(v));
+    if (pane === "Computer") {
+        form(box, ui, [ [ "computer_execution_mode", "Execution on this computer", "select", [ [ "ask", "Ask every time" ], [ "always", "Always" ], [ "never", "Never" ] ] ], [ "route_traffic_through_computer", "Route traffic through this computer", "checkbox" ], [ "auto_review_approvals", "Auto-review eligible approvals", "checkbox" ] ], v => savePrefs(v));
+        box.append(node("p", "Immutable blocklist and irreversible-action gates remain enforced."), button("Helper health", async () => textView("Computer health", await api("/api/system/health"))), button("Live Computer", liveComputer), button(state._data.status?.paused ? "Resume" : "Pause", () => mutate("/api/system/pause", {
+            paused: !state._data.status?.paused
+        })), node("h3", "Custom Rules"));
+        form(box, {
+            mode: "allow",
+            pattern: "",
+            description: "",
+            enabled: true
+        }, [ [ "mode", "Mode", "select", [ [ "allow", "Allow" ], [ "ask_first", "Ask first" ] ] ], [ "pattern", "Pattern (≤1000 characters)" ], [ "description", "Description" ] ], async v => {
+            if (v.pattern.length > 1e3) throw new Error("Pattern exceeds 1000 characters");
+            await mutate("/api/rules", v);
+            settings("Computer");
+        }, "Add Rule");
+        for (const rule of state._data.custom_rules || []) box.append(card(node("strong", rule.mode + ": " + rule.pattern), button("Delete", () => mutate("/api/rules/" + enc(rule.id), undefined, "DELETE"))));
+    }
+    if (pane === "Vault") vault(box);
+    if (pane === "Usage & Billing") {
+        const P = "/api/system/providers", S = "/api/ui-settings", us = state._data["ui_settings"] || {}, pv = us["providers"] || {}, f = n => Number(n || 0).toFixed(2);
+        form(box, us["budget"] || {}, [ [ "daily_spend_cap_usd", "Daily cap", "number" ], [ "per_job_spend_cap_usd", "Job cap", "number" ], [ "max_daily_notifications", "Alerts", "number" ] ], v => mutate(S, {
+            budget: v
+        }, "PUT"));
+        form(box, pv, [ [ "meta_api_base", "Meta base" ], [ "meta_reasoning_model", "Meta model" ], [ "xai_api_base", "xAI base" ], [ "xai_model", "xAI model" ], [ "allow_screenshot_egress_meta", "Meta img", "checkbox" ], [ "allow_screenshot_egress_xai", "xAI img", "checkbox" ] ], v => mutate(S, {
+            providers: v
+        }, "PUT"));
+        run(async()=>{const u=await api("/api/usage?days=7");box.append(node("p","API spend · Today $"+f(u.daily_spent_usd)+" · Week $"+f(u.weekly_spent_usd)),node("p","ChatGPT allowance: "+(u.chatgpt_allowance_requests||0)+" requests · "+(u.chatgpt_allowance_tokens||0)+" tokens"),node("pre",JSON.stringify([u.by_bot,u.by_source],null,2)));});
+    }
+
+    if (pane === "Updates") {
+        box.append(node("p", "Version " + (state._data.version || "")), button("Check for Updates", async () => textView("Updates", await api("/api/system/updates/check", {}))), button("Download & Verify Update", () => confirmAction("Download verified update", async () => textView("Verified Update", await api("/api/system/updates/download", {
+            confirmed: true
+        })))), button("Export Support Bundle", async () => textView("Support Bundle", await api("/api/system/support-bundle", {}))));
+        form(box, {
+            note: "",
+            include_diagnostics: false
+        }, [ [ "note", "Feedback", "textarea" ], [ "include_diagnostics", "Include redacted diagnostics", "checkbox" ] ], v => api("/api/system/feedback", v), "Send Feedback");
+        form(box, ui, [ [ "auto_updates", "Automatic updates when idle", "checkbox" ] ], v => savePrefs(v));
+    }
+}
+
+function vault(box, tab = "Logins") {
+    const body = node("div");
+    box.append(body);
+    const names = [ "Logins", "Cards", "Contact Info", "Hints", "Payments", "Password Managers", "Import CSV" ];
+    tabs(body, names, tab, name => {
+        box.replaceChildren(row(node("h2", "Vault"), button("✕", closeModal)));
+        vault(box, name);
+    });
+    if (tab === "Import CSV") {
+        form(body, {
+            source: "chrome",
+            csv_text: ""
+        }, [ [ "source", "Source", "select", [ "1password", "chrome", "edge", "safari", "firefox", "bitwarden", "lastpass" ] ], [ "csv_text", "CSV (<5 MB)", "textarea" ] ], async v => {
+            if ((new TextEncoder).encode(v.csv_text).length > 5 * 1024 * 1024) throw new Error("CSV exceeds 5 MB");
+            try {
+                textView("Import summary", await mutate("/api/vault/import", v));
+            } finally {
+                v.csv_text = "";
+            }
+        }, "Import into OS Keychain");
+        return;
+    }
+    if (tab === "Password Managers") {
+        body.append(node("p", "1Password requires the local op CLI and an op:// secret reference. Configure the 1Password integration in Connect Apps."), button("Configure", connectApps));
+        return;
+    }
+    const kind = {
+        Logins: "login",
+        Cards: "card",
+        "Contact Info": "contact_info",
+        Hints: "hint",
+        Payments: "payment_method"
+    }[tab];
+    form(body, {
+        kind: kind,
+        label: "",
+        username: "",
+        domain: "",
+        secret_value: ""
+    }, [ [ "label", "Label" ], [ "username", "Username / Contact" ], [ "domain", "Domain" ], [ "secret_value", "Secret", "password" ] ], async v => {
+        await mutate("/api/vault", {
+            ...v,
+            item: v
+        });
+        settings("Vault");
+    }, "Save to OS Keychain");
+    for (const item of (state._data.vault_items || []).filter(x => x.kind === kind)) body.append(card(node("strong", item.label), node("small", item.subtitle_or_last4 || item.domain || ""), row(button("Reveal", () => confirmAction("Reveal secret", async () => {
+        const res = await api("/api/vault/" + enc(item.id) + "/reveal", {
+            confirmed: true
+        }), d = modal("Vault Secret"), [w, input] = field("Secret", res.secret, "password");
+        res.secret = "";
+        d.append(w, button("Copy", () => copy(input.value)));
+    })), button("Delete", () => confirmAction("Delete Vault item", () => mutate("/api/vault/" + enc(item.id), undefined, "DELETE"))), tab === "Payments" ? button("Set default", () => mutate("/api/vault/" + enc(item.id) + "/default-payment")) : null)));
+}
+
+function connectApps(tab = "Apps") {
+    const box = modal("Connect Apps & Skills");
+    tabs(box, [ "Apps", "Custom MCP", "Skills" ], tab, connectApps);
+    if (tab === "Apps") for (const app of state._data.integrations || []) box.append(card(node("h3", app.name), node("span", app.status, "badge"), node("p", app.account_summary), node("p", app.setup_hint), button("Configure", () => textView(app.name, app.setup_hint || "Setup / Connect bridge required"))));
+    if (tab === "Custom MCP") {
+        const edit = c => {
+            const d = modal("Custom MCP Connector");
+            form(d, {
+                name: "",
+                transport: "remote_https",
+                url_or_command: "",
+                args: "[]",
+                auth_header_name: "Authorization",
+                auth_secret: "",
+                account_label: "",
+                enabled: true,
+                bot_ids: [],
+                ...c,
+                args: JSON.stringify(c?.args || [])
+            }, [ [ "name", "Name" ], [ "transport", "Transport", "select", [ "remote_https", "stdio_command" ] ], [ "url_or_command", "HTTPS URL or binary" ], [ "args", "Arguments (JSON array)" ], [ "auth_header_name", "Auth header" ], [ "auth_secret", "Secret (OS Keychain)", "password" ], [ "account_label", "Account label" ], [ "enabled", "Enabled", "checkbox" ] ], async v => {
+                v.args = JSON.parse(v.args);
+                if (!v.auth_secret) delete v.auth_secret;
+                await mutate("/api/connectors/custom", v);
+                connectApps("Custom MCP");
+            });
+        };
+        box.append(button("Add custom connector", () => edit()));
+        for (const c of state._data.custom_connectors || []) box.append(card(node("strong", c.name), node("small", c.status_text || c.url_or_command), row(button("Edit", () => edit(c)), button("Test", async () => textView("Connection Test", await api("/api/connectors/custom/" + enc(c.id) + "/test", {}))), button("Delete", () => mutate("/api/connectors/custom/" + enc(c.id), undefined, "DELETE")))));
+    }
+    if (tab === "Skills") {
+        const [w, search] = field("Search Skills");
+        const list = node("div");
+        box.append(w, list, button("Create Skill", () => {
+            const d = modal("Custom Skill");
+            form(d, {
+                name: "",
+                title: "",
+                description: "",
+                body_markdown: ""
+            }, [ [ "name", "Name" ], [ "title", "Title" ], [ "description", "Description" ], [ "body_markdown", "SKILL.md", "textarea" ] ], v => mutate("/api/skills/custom", v));
+        }));
+        const load = async () => {
+            const values = await api("/api/skills?q=" + enc(search.value));
+            list.replaceChildren();
+            for (const skill of Array.isArray(values) ? values : values.skills || []) list.append(card(node("strong", skill.title || skill.name), node("p", skill.description), button("Inspect", async () => textView(skill.name, await api("/api/skills?load=" + enc(skill.name)))), button("Export", () => download("SKILL.md", skill.body_markdown || JSON.stringify(skill, null, 2)))));
+        };
+        search.oninput = () => run(load);
+        run(load);
+    }
+}
+
+function shortcuts() {
+    textView("Keyboard Shortcuts", "Cmd/Ctrl+N — New Bot\nCmd/Ctrl+K — Commands & Search\nCmd/Ctrl+B — Sidebar\nCmd/Ctrl+Alt+B — Details\nCmd/Ctrl+, — Settings\nCmd/Ctrl+Shift+M — Connect Apps\nCmd/Ctrl+Shift+F — Bot filter\nCmd/Ctrl+Shift+A — Attach\nCmd/Ctrl+D — Dictation\nCmd/Ctrl+[ / ] — Back / Forward\nCmd/Ctrl+1…5 — Workspaces\nEnter — Send; Shift+Enter — Newline\nEscape — Dismiss top layer");
+}
+
+function palette() {
+    const box = modal("Commands & Search"), [wrap, input] = field("Search commands or recent messages"), results = node("div", null, "results");
+    box.append(wrap, results);
+    let selected = 0, actions = [];
+    function render() {
+        actions = [ ...(state._data.bots || []).map(b => [ "@" + b.id, () => {
+            closeModal();
+            navigate("Bots", "dm", b.id);
+        } ]), ...(state._data.channels || []).map(c => [ "#" + c.id, () => {
+            closeModal();
+            navigate("Bots", "channel", c.id);
+        } ]), ...[ "Bots", "Feed", "Goals", "Spaces", "Audit" ].map(v => [ v, () => {
+            closeModal();
+            navigate(v);
+        } ]), [ "Settings", settings ], [ "Connect Apps", connectApps ], [ "New Bot", () => editBot() ], [ "Templates", templates ] ].filter(([label]) => label.toLowerCase().includes(input.value.toLowerCase()));
+        results.replaceChildren();
+        actions.forEach(([label, action], i) => results.append(button(label, action, i === selected ? "selected" : "")));
+        for (const m of state._messages.filter(m => (m.content || "").toLowerCase().includes(input.value.toLowerCase())).slice(-10)) results.append(node("p", (m.content || "").slice(0, 160)));
+        results.append(node("small", "Searched recent messages"), button("Search older history", async () => textView("Older history", await api("/api/search/messages?q=" + enc(input.value) + "&include_older=true"))));
+    }
+    input.oninput = () => {
+        selected = 0;
+        render();
+    };
+    input.onkeydown = e => {
+        if (e.key === "ArrowDown" || e.ctrlKey && e.key === "n") {
+            e.preventDefault();
+            selected = Math.min(actions.length - 1, selected + 1);
+            render();
+        } else if (e.key === "ArrowUp" || e.ctrlKey && e.key === "p") {
+            e.preventDefault();
+            selected = Math.max(0, selected - 1);
+            render();
+        } else if (e.key === "Enter") {
+            e.preventDefault();
+            run(actions[selected]?.[1] || (() => {}));
+        }
+    };
+    render();
+    input.focus();
+}
+
+function parseSseFrames(buffer, dispatch) {
+    let match;
+    while (match = /\r?\n\r?\n/.exec(buffer)) {
+        const frame = buffer.slice(0, match.index);
+        buffer = buffer.slice(match.index + match[0].length);
+        let type = "message";
+        const data = [];
+        for (const line of frame.split(/\r?\n/)) {
+            const colon = line.indexOf(":"), field = colon < 0 ? line : line.slice(0, colon), value = colon < 0 ? "" : line.slice(colon + 1).replace(/^ /, "");
+            if (field === "event") type = value;
+            if (field === "data") data.push(value);
+        }
+        if (data.length) dispatch(type, data.join("\n"));
+    }
+    if (buffer.length > 1048576) throw new Error("SSE frame exceeds limit");
+    return buffer;
+}
+
+let resync = null;
+
+function eventUpdate(type, raw) {
+    let event;
+    try {
+        event = JSON.parse(raw);
+    } catch {
+        return;
+    }
+    const data = event.payload || event.data || event;
+    const upsert = (key, value, id = "id") => {
+        const values = state._data[key] || [];
+        const index = values.findIndex(x => x[id] === value[id]);
+        if (index < 0) values.push(value); else values[index] = value;
+        state._data[key] = values;
+    };
+    if (type === "BOT_STATUS_PHRASE") {
+        (state._data.bot_statuses ||= {})[data.bot_id] = data;
+        renderSidebar();
+        return;
+    }
+    if (type === "BOT_UPDATED" && data.id) {
+        upsert("bots", data);
+        renderChrome();
+        return;
+    }
+    if (type === "TASK_UPDATED" && data.id) {
+        upsert("recent_tasks", data);
+        if (state._view === "Audit") renderWorkspace();
+        return;
+    }
+    if (type === "BUDGET_UPDATED") {
+        Object.assign(state._data.status || {}, data);
+        renderSidebar();
+        return;
+    }
+    if (/MESSAGE|CARD|REACTION/.test(type)) {
+        if (!document.hidden) run(loadMessages);
+        return;
+    }
+    if (resync === null) resync = setTimeout(() => {
+        resync = null;
+        if (!document.hidden) run(bootstrap);
+    }, 80);
+}
+
+async function connectEvents() {
+    state._stream?.abort();
+    const controller = new AbortController;
+    state._stream = controller;
+    let attempt = 0;
+    await bootstrap();
+    while (!controller.signal.aborted) {
+        let reader, received = false;
+        try {
+            const response = await fetch("/ag-ui/events", {
+                headers: {
+                    Authorization: "Bearer " + state._token
+                },
+                signal: controller.signal,
+                cache: "no-store"
+            });
+            if (response.status === 401) {
+                login();
+                return;
+            }
+            if (!response.ok) throw new Error("Event stream unavailable");
+            reader = response.body.getReader();
+            const decoder = new TextDecoder;
+            let buffer = "";
+            if (attempt) await bootstrap();
+            if (state._view === "Bots") await loadMessages();
+            while (!controller.signal.aborted) {
+                const {value: value, done: done} = await reader.read();
+                if (done) throw new Error("Stream disconnected");
+                buffer += decoder.decode(value, {
+                    stream: true
+                });
+                buffer = parseSseFrames(buffer, (type, data) => {
+                    received = true;
+                    eventUpdate(type, data);
+                });
+            }
+        } catch (e) {
+            if (controller.signal.aborted) return;
+            notice("Reconnecting…");
+        } finally {
+            if (reader) {
+                await reader.cancel().catch(() => {});
+                reader.releaseLock();
+            }
+        }
+        if (received) attempt = 0;
+        await new Promise(resolve => {
+            const finish = () => {
+                clearTimeout(timer);
+                controller.signal.removeEventListener("abort", finish);
+                resolve();
+            };
+            const timer = setTimeout(finish, [ 1e3, 2e3, 5e3, 15e3 ][Math.min(attempt++, 3)] * (.8 + Math.random() * .4));
+            controller.signal.addEventListener("abort", finish, {
+                once: true
+            });
+            if (controller.signal.aborted) finish();
+        });
+    }
+}
+
+function login() {
+    const box = modal("Connect to Grok Muse");
+    form(box, {
+        token: ""
+    }, [ [ "token", "Companion bearer token", "password" ] ], async v => {
+        state._stream?.abort();
+        state._epoch++;
+        state._token = v.token;
+        v.token = "";
+        closeModal();
+        await connectEvents();
+    }, "Connect");
+}
+
+function escapeLayer() {
+    if (!$("suggestions").hidden) {
+        $("suggestions").hidden = true;
+        return;
+    }
+    if (state._modal) {
+        closeModal();
+        return;
+    }
+    if (!$("split").hidden) {
+        closeSplit();
+        return;
+    }
+    if (state._details) {
+        state._details = false;
+        renderDetails();
+        return;
+    }
+    if (state._reply) {
+        state._reply = null;
+        renderChips();
+    }
+}
+
+function dictation() {
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Speech) {
+        notice("Enable Microphone permission / Local Whisper adapter in Connect Apps.");
+        return;
+    }
+    const recognition = new Speech;
+    recognition.onresult = e => {
+        $("draft").value += e.results[0][0].transcript;
+        composerChanged();
+    };
+    recognition.onerror = e => notice(e.error);
+    recognition.start();
+}
+
+$("composer").onsubmit = e => {
+    e.preventDefault();
+    run(() => sendMessage(), $("send"));
+};
+
+$("draft").oncompositionstart = () => state._composing = true;
+
+$("draft").oncompositionend = () => {
+    state._composing = false;
+    composerChanged();
+};
+
+$("draft").oninput = composerChanged;
+
+$("draft").onkeydown = e => {
+    if (e.key === "Backspace" && state._arrow !== null && $("draft").selectionStart === state._arrow + 1 && $("draft").value[state._arrow] === "→") {
+        e.preventDefault();
+        const at = state._arrow;
+        $("draft").value = $("draft").value.slice(0, at) + "->" + $("draft").value.slice(at + 1);
+        $("draft").setSelectionRange(at + 2, at + 2);
+        state._arrow = null;
+        return;
+    }
+    if (e.key === "Enter" && !e.shiftKey && !e.altKey && !state._composing && !e.isComposing) {
+        e.preventDefault();
+        if (!$("suggestions").hidden) {
+            $("suggestions").querySelector("button")?.click();
+            return;
+        }
+        run(() => sendMessage(), $("send"));
+    }
+};
+
+$("mode").onclick = () => {
+    state._mode = state._mode === "chat" ? "queue" : "chat";
+    renderChips();
+};
+
+$("attach").onclick = () => $("file").click();
+
+$("file").onchange = () => run(async () => {
+    await attachFiles($("file").files);
+    $("file").value = "";
+});
+
+$("dictate").onclick = dictation;
+
+document.addEventListener("dragover", e => e.preventDefault());
+
+document.addEventListener("drop", e => {
+    e.preventDefault();
+    run(() => attachFiles(e.dataTransfer.files));
+});
+
+$("draft").addEventListener("paste", e => {
+    if (e.clipboardData.files.length) {
+        e.preventDefault();
+        run(() => attachFiles(e.clipboardData.files));
+    }
+});
+
+document.addEventListener("keydown", e => {
+    if (e.key === "Escape") {
+        e.preventDefault();
+        escapeLayer();
+        return;
+    }
+    if (e.key === "Tab" && state._modal) {
+        const focusable = [ ...$("overlay").querySelectorAll("button,input,select,textarea,a[href]") ].filter(el => !el.disabled);
+        const first = focusable[0], last = focusable.at(-1);
+        if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last?.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first?.focus();
+        }
+    }
+    if (!(e.metaKey || e.ctrlKey)) return;
+    const key = e.key.toLowerCase();
+    const actions = {
+        k: palette,
+        ",": settings,
+        n: () => editBot(),
+        b: () => {
+            if (e.altKey) {
+                state._details = !state._details;
+                renderDetails();
+            } else {
+                toggleSidebar();
+            }
+        },
+        d: dictation,
+        "/": shortcuts,
+        "[": () => historyMove(-1),
+        "]": () => historyMove(1)
+    };
+    if (e.shiftKey && key === "m") {
+        e.preventDefault();
+        connectApps();
+    } else if (e.shiftKey && key === "a") {
+        e.preventDefault();
+        $("file").click();
+    } else if (e.shiftKey && key === "f") {
+        e.preventDefault();
+        state._sidebar = true;
+        renderSidebar();
+        $("sidebar").querySelector("input")?.focus();
+    } else if (/^[1-5]$/.test(key)) {
+        e.preventDefault();
+        navigate([ "Bots", "Feed", "Goals", "Spaces", "Audit" ][Number(key) - 1]);
+    } else if (actions[key]) {
+        e.preventDefault();
+        actions[key]();
+    }
+});
+
+window.addEventListener("resize", renderSidebar);
+
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", theme);
+
+document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && state._token) run(async () => {
+        await bootstrap();
+        if (state._view === "Bots") await loadMessages();
+    });
+});
+
+window.addEventListener("pagehide", () => {
+    state._stream?.abort();
+    stopLive();
+    state._token = "";
+    clearSecrets(document);
+});
+
+$("overlay").onclick = e => {
+    if (e.target === $("overlay")) closeModal();
+};
+
 renderChrome();navigate();login();
+function saveDraft(){if(!state._draftReady)return;try{const key="gm-drafts-v1",drafts=JSON.parse(localStorage.getItem(key)||"{}");if($("draft").value.length>100000){notice("Draft is too large to save locally. Copy it before closing this tab.");return;}drafts[state._kind+":"+state._target]=$("draft").value;const entries=Object.entries(drafts).slice(-20);localStorage.setItem(key,JSON.stringify(Object.fromEntries(entries)));}catch{notice("Draft could not be saved locally. Copy it before closing this tab.");}}
+function restoreDraft(){state._draftReady=true;try{$("draft").value=JSON.parse(localStorage.getItem("gm-drafts-v1")||"{}")[state._kind+":"+state._target]||"";}catch{$("draft").value="";}}
+$("model-picker").onclick=()=>settings("Providers & models");
+
+async function providerSettings(box,selectedId="chatgpt-default") {
+    box.append(node("h2","Providers & models"),node("p","Connect an account, load its models, then test a real reply."),node("small","Setup and model changes send a small test request. API credits or ChatGPT allowance may be used."));
+    let providers;
+    try {providers=await api("/api/system/providers");}catch(e){box.append(node("p",e.message));return;}
+    if(!box.isConnected)return;
+    state._data.providers=providers;
+    const profiles=providers.profiles||[];
+    const choices=node("div",null,"provider-choices"),detail=node("div",null,"provider-detail");box.append(choices,detail);
+    const redraw=()=>{if(box.isConnected){clearSecrets(box);box.replaceChildren();providerSettings(box,selectedId);}};
+    const operate=async(p,op,payload={})=>{
+        const result=await api("/api/system/providers/"+enc(p.id)+"/oauth/"+op,payload);
+        if(result.providers)state._data.providers=result.providers;
+        if(result.verified===false)notice(result.error||"Model verification failed");else notice("");
+        renderChrome();redraw();return result;
+    };
+    for(const p of profiles)choices.append(button(p.display_name,()=>{selectedId=p.id;redraw();},p.id===selectedId?"selected":""));
+    choices.append(button("+ Custom",async()=>{
+        const id="custom-"+Date.now(),profile={id,display_name:"Custom provider",preset:"custom",auth_mode:"none",protocol:"chat_completions",base_url:"http://127.0.0.1:1234/v1",selected_model:"",revision:0};
+        await api("/api/system/providers/profile",{profile});selectedId=id;redraw();
+    }));
+    const p=profiles.find(p=>p.id===selectedId)||profiles[0];if(!p)return;selectedId=p.id;
+    detail.append(node("h3",p.display_name));if(p.account_label)detail.append(node("p",p.account_label));
+    const health=p.health||{},statuses=add(node("div",null,"provider-status"),node("span","Account: "+p.connection_state.replaceAll("_"," ")),node("span","Models: "+(health.catalog_status||"not checked").replaceAll("_"," ")),node("span","Reply test: "+(health.verification_status||"not tested").replaceAll("_"," "),health.verification_status==="verified"?"verified":""));detail.append(statuses);
+    if(p.last_error)detail.append(node("p",p.last_error,"provider-error"));
+    if(["chat_gpt_o_auth","nous_portal_o_auth"].includes(p.auth_mode)||["chatgpt_oauth","nous_portal_oauth"].includes(p.auth_mode)){
+        const beginSignIn=async(op="start")=>{
+            // Open during the user gesture so browser popup protection permits the sign-in page.
+            const popup=window.open("about:blank","_blank");if(popup)popup.opener=null;
+            try{const result=await api("/api/system/providers/"+enc(p.id)+"/oauth/"+op,{});if(result.authorize_url){const url=new URL(result.authorize_url);if(!["https://auth.openai.com","https://portal.nousresearch.com"].includes(url.origin))throw new Error("Unexpected sign-in destination");if(popup)popup.location=url.href;else{const link=node("a","Open sign-in page");link.href=url.href;link.target="_blank";link.rel="noopener";detail.append(link);}if(result.user_code)notice("Device code: "+result.user_code);}redraw();}catch(e){popup?.close();throw e;}
+        };
+        const signIn=button(p.preset==="chat_gpt"||p.preset==="chatgpt"?"Continue with ChatGPT":"Continue with Nous Portal",()=>beginSignIn());
+        detail.append(p.connection_state==="connecting"?button("Cancel sign-in",()=>operate(p,"cancel")):signIn);
+        if(p.credential_ref)detail.append(button("Switch account",()=>beginSignIn("switch_account")),button("Disconnect",()=>operate(p,"disconnect")));
+        if(p.preset==="chat_gpt"||p.preset==="chatgpt"){detail.append(node("p","Uses your ChatGPT plan when your account permits it. OpenAI API keys are a separate provider."));const link=node("a","ChatGPT usage");link.href="https://chatgpt.com/settings/usage";link.target="_blank";link.rel="noopener";detail.append(link);}
+        if(p.connection_state==="connecting")state._providerTimer=setTimeout(()=>{if(box.isConnected)redraw();},1000);
+    }else{
+        const formNode=node("form"),[keyLabel,key]=field("API key","","password");key.autocomplete="off";key.placeholder=["authenticated","connected","credentials_saved"].includes(p.connection_state)?"Saved securely. Enter a replacement key…":"Paste API key…";
+        if(p.auth_mode==="api_key")formNode.append(keyLabel);
+        if(p.credential_ref&&["authenticated","connected","credentials_saved"].includes(p.connection_state))detail.append(button("Disconnect",()=>operate(p,"disconnect")));
+        const advanced=node("details"),summary=node("summary","Connection settings");advanced.append(summary);
+        const [nameLabel,name]=field("Name",p.display_name),[urlLabel,url]=field("Base URL",p.base_url),[protocolLabel,protocol]=select("Protocol",p.protocol,["chat_completions","responses"]),[authLabel,auth]=select("Authentication",p.auth_mode,["none","api_key"]),[approveLabel,approve]=field("Approve credentials for this destination",false,"checkbox"),[visionLabel,vision]=field("Allow screenshots to this provider",p.allow_screenshot_egress,"checkbox"),[fallbackLabel,fallback]=field("Fallback profile ID (blank disables fallback)",p.fallback_profile_id||"");
+        advanced.append(nameLabel,urlLabel,protocolLabel);if(p.preset==="custom")advanced.append(authLabel);advanced.append(approveLabel,visionLabel,fallbackLabel);formNode.append(advanced);
+        const save=node("button","Save & connect");save.type="submit";formNode.append(save);formNode.onsubmit=e=>{e.preventDefault();const secret=key.value;key.value="";run(()=>operate(p,"configure",{profile:{...p,display_name:name.value,base_url:url.value,protocol:protocol.value,auth_mode:p.preset==="custom"?auth.value:p.auth_mode,allow_screenshot_egress:vision.checked,fallback_profile_id:fallback.value||null},api_key:secret||null,revalidate_credentials:approve.checked}),save);};detail.append(formNode);
+    }
+    detail.append(node("hr"),row(node("h3","Model"),button("Refresh models",()=>operate(p,"refresh"))));
+    if(health.models_refreshed_at)detail.append(node("small","Updated "+new Date(health.models_refreshed_at).toLocaleString()));
+    const catalog=p.model_catalog?.length?p.model_catalog:(p.discovered_models||[]).map(id=>({id,display_name:id}));
+    const [modelsLabel,models]=select("Select model",p.selected_model,[ ["","Choose a model"],...catalog.map(m=>[m.id,m.display_name||m.id]) ]);models.onchange=()=>run(()=>operate(p,"select_model",{model:models.value}),models);detail.append(modelsLabel);
+    const custom=node("details");custom.append(node("summary","Use a custom model ID"));const [customLabel,customInput]=field("Model ID",p.selected_model);custom.append(customLabel,button("Test this model",()=>operate(p,"select_model",{model:customInput.value})));detail.append(custom);
+    const metadata=catalog.find(m=>m.id===p.selected_model);if(metadata){if(metadata.context_window)detail.append(node("small","Context: "+metadata.context_window+" tokens"));if(metadata.input_modalities?.length)detail.append(node("small","Advertised inputs: "+metadata.input_modalities.join(", ")));if(metadata.output_modalities?.length)detail.append(node("small","Advertised outputs: "+metadata.output_modalities.join(", ")));if(metadata.supports_tools!=null)detail.append(node("small","Advertised tools: "+(metadata.supports_tools?"yes":"no")));}
+    detail.append(node("p","The reply test verifies text generation. Vision and tools require their own working flows."));
+    const verify=button("Test selected model",()=>operate(p,"select_model",{model:p.selected_model}));verify.disabled=!p.selected_model;
+    const makeDefault=button("Use as workspace default",()=>operate(p,"make_default"));makeDefault.disabled=health.verification_status!=="verified";
+    detail.append(row(verify,makeDefault));if(providers.workspace_default_profile_id===p.id)detail.append(node("p","Workspace default","verified"));
+}

@@ -21,6 +21,7 @@ Grok Muse incorporates open-source software distributed under various licenses. 
 | `uuid` | 1.x | Apache-2.0 / MIT | The Rust Project Developers |
 | `ed25519-dalek`, `sha2`, `hex` | 2.x / 0.10.x / 0.4.x | Apache-2.0 / MIT | The Dalek Cryptography and RustCrypto Contributors |
 | `async-trait` | 0.1.x | MIT / Apache-2.0 | David Tolnay |
+| `jsonwebtoken` | 12.x | MIT | Keats and contributors |
 | `keyring` | 3.6.x | MIT / Apache-2.0 | The Rust Keyring Project |
 | `egui`, `eframe` | 0.33.x | MIT / Apache-2.0 | Emil Ernerfeldt and egui contributors |
 | `accesskit` | 0.17.x | MIT / Apache-2.0 | Matt Campbell and AccessKit Contributors |
@@ -37,7 +38,7 @@ Portions copyright (c) 2025-2026 Darius Maintainers.
 
 ### Rakazo (`elie222/rakazo`) UI Tokens, Parity Patterns & Component Attribution
 
-Grok Muse incorporates and adapts UI design tokens, styling contracts, and workflow parity components inspired by or adapted from Rakazo (`https://github.com/elie222/rakazo`, commit `3b4faf19540e2883a4bd2833f6c65339e8f7d3f3`), licensed under the **Apache License, Version 2.0**.
+Grok Muse incorporates and adapts UI design tokens, styling contracts, and workflow parity components inspired by or adapted from Rakazo (`https://github.com/elie222/rakazo`, reference commits `3b4faf19540e2883a4bd2833f6c65339e8f7d3f3` and `8aa0f787557697ee7fb5e2f16fb39f4249b35ad4`), licensed under the **Apache License, Version 2.0**.
 
 Per Rakazo's `NOTICE`:
 - Portions derived from `OpenMausBot` (`https://github.com/milind-soni/OpenMausBot`), Copyright 2026 Milind Soni and OpenMausBot contributors, licensed under the **Apache License, Version 2.0**.
