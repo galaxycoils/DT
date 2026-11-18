@@ -582,7 +582,7 @@ impl DaemonControlServer {
             let mut is_first = true;
             loop {
                 let server = gm_core::ipc::windows_pipe_security::create_sid_restricted_named_pipe(
-                    path, is_first, &owner_sid,
+                    &path, is_first, &owner_sid,
                 )?;
                 is_first = false;
 
