@@ -1,14 +1,16 @@
-# Cross-platform DT v1.0.0 release readiness
+# Cross-platform DT v1.0.1 release readiness
 
-Status: **code and tooling prepared on `codex/dt-stable-release`; full native certification remains blocked** until production signing identities, multi-OS native hardware (Intel Mac, Windows 11 25H2/26H2, Ubuntu 24.04 X11/Wayland, iOS/Android devices), live provider/connector accounts, and the ≥7-day proactive soak are executed.
+Status: **v1.0.1 code, installers, recovery (`REC-01`), budget (`BUD-01`), and hosted replay (`HOST-01`) fixes implemented on `codex/dt-stable-release`; full 8-target native certification remains blocked** until production signing identities, multi-OS native hardware (Intel Mac, Windows 11 25H2/26H2 x64/ARM64, Ubuntu 24.04 X11/Wayland x64/ARM64, iOS/Android devices), live provider/connector accounts, and the ≥7-day proactive soak are executed.
 
-Release targets and canonical assets:
-- `DT-1.0.0-macos-aarch64.dmg` (contains `Install DT.pkg`)
-- `DT-1.0.0-macos-x86_64.dmg` (contains `Install DT.pkg`)
-- `DT-1.0.0-windows-x86_64-setup.exe` (NSIS 3.13)
-- `dt_1.0.0_amd64.deb` (Ubuntu 24.04 X11 & Wayland)
+Release targets and canonical assets (`docs/release/release-inventory.json`):
+- `DT-1.0.1-macos-aarch64.dmg` (contains `Install DT.pkg`)
+- `DT-1.0.1-macos-x86_64.dmg` (contains `Install DT.pkg`)
+- `DT-1.0.1-windows-x86_64-setup.exe` (NSIS 3.13)
+- `DT-1.0.1-windows-aarch64-setup.exe` (NSIS 3.13)
+- `dt_1.0.1_amd64.deb` (Ubuntu 24.04 X11 & Wayland)
+- `dt_1.0.1_arm64.deb` (Ubuntu 24.04 ARM64 X11 & Wayland)
 
-See [coverage inventory](release/coverage-inventory.md) and [inference budget ledger](release/inference-budget-ledger.json).
+See [coverage inventory](release/coverage-inventory.md), [inference budget ledger](release/inference-budget-ledger.json), [v1.0.1 release notes](releases/v1.0.1.md), and [operations guide](OPERATIONS.md).
 
 ## Implemented in this change
 

@@ -389,9 +389,11 @@ async fn api_v1_auth_and_csrf_middleware(
     request.headers_mut().remove(INTERNAL_SESSION_HEADER);
     let path = request.uri().path().to_string();
     let rel_path = path.strip_prefix("/api/v1").unwrap_or(&path);
-    // Public/webhook/login endpoints handle their own verification.
+    // Public/health/webhook/login endpoints handle their own verification.
     if (rel_path == "/auth/session" && request.method() == axum::http::Method::POST)
         || rel_path == "/billing/webhooks/stripe"
+        || rel_path == "/health/live"
+        || rel_path == "/health/ready"
     {
         return next.run(request).await;
     }
@@ -4537,6 +4539,8 @@ async fn system_provider_oauth_route(
 
 fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
     Router::new()
+        .route("/health/live", get(health_live_v1_route))
+        .route("/health/ready", get(health_ready_v1_route))
         .route("/auth/enroll", post(auth_enroll_v1_route))
         .route(
             "/auth/session",
@@ -4814,6 +4818,79 @@ async fn doctor_status_v1_route(
     })))
 }
 
+async fn health_live_v1_route() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "live",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+async fn health_ready_v1_route(State(state): State<CompanionWebState>) -> impl IntoResponse {
+    let storage_dir = state.shared_config.read().storage_dir.clone();
+    if let Err(err) = std::fs::create_dir_all(&storage_dir) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": format!("Worker storage unavailable: {err}"),
+            })),
+        );
+    }
+    let probe = storage_dir.join(format!(".ready-probe-{}", uuid::Uuid::new_v4()));
+    if let Err(err) = std::fs::write(&probe, b"ok") {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": format!("Worker storage not writable: {err}"),
+            })),
+        );
+    }
+    let _ = std::fs::remove_file(&probe);
+
+    if let Err(err) = state.supervisor.queue().min_event_sequence() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": format!("Event store unavailable: {err}"),
+            })),
+        );
+    }
+
+    if let Some(ref plane) = state.hosted_plane
+        && let Err(err) = plane.ready_check()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": err.to_string(),
+            })),
+        );
+    }
+
+    if std::env::var("DT_HOSTED_REQUIRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        && state.hosted_plane.is_none()
+    {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "status": "not_ready",
+                "reason": "Hosted control plane is required but not configured",
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ready",
+            "version": env!("CARGO_PKG_VERSION"),
+        })),
+    )
+}
+
 async fn stream_workspace_events_v1(
     headers: HeaderMap,
     Query(cursor): Query<EventCursor>,
@@ -4826,13 +4903,14 @@ async fn stream_workspace_events_v1(
 > {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let clean = crate::hosted::validate_workspace_slug(&ws_id).map_err(map_gm_error)?;
-    if let Some(axum::Extension(sess)) = session_ext {
+    let session_user_id = if let Some(axum::Extension(sess)) = session_ext {
         if sess.ws_id != clean {
             return Err(ApiErr::msg(
                 StatusCode::FORBIDDEN,
                 format!("Cross-tenant SSE subscription denied for workspace '{clean}'"),
             ));
         }
+        Some(sess.user_id)
     } else {
         let expected_ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
         if clean != expected_ws && clean != "local" {
@@ -4841,23 +4919,143 @@ async fn stream_workspace_events_v1(
                 format!("Cross-tenant SSE subscription denied for workspace '{clean}'"),
             ));
         }
-    }
+        None
+    };
+
     let last_event_id = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(cursor.after);
-    let rx = state.supervisor.agui_sender().subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
-        Ok(evt) if evt.sequence > last_event_id => {
-            let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".into());
-            Some(Ok(Event::default()
-                .id(evt.sequence.to_string())
-                .event(evt.event_type)
-                .data(json)))
+
+    // Subscribe to live broadcasts and revocations BEFORE reading persisted cursor
+    // so zero events committed during replay->live transition can fall into a gap.
+    let mut live_rx = state.supervisor.agui_sender().subscribe();
+    let mut revocation_rx = state
+        .hosted_plane
+        .as_ref()
+        .map(|p| p.subscribe_revocations());
+    let min_seq = state
+        .supervisor
+        .queue()
+        .min_event_sequence()
+        .map_err(map_gm_error)?;
+    let backlog = state
+        .supervisor
+        .queue()
+        .events_after(last_event_id, 500)
+        .map_err(map_gm_error)?;
+    let plane_for_task = state.hosted_plane.clone();
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<Event, Infallible>>(128);
+    tokio::spawn(async move {
+        let ws_matches = |val: &serde_json::Value| -> bool {
+            match val
+                .get("payload")
+                .and_then(|p| p.get("ws_id"))
+                .and_then(|w| w.as_str())
+            {
+                Some(tag) => tag == clean,
+                None => true,
+            }
+        };
+
+        if last_event_id > 0
+            && let Some(min_available) = min_seq
+            && last_event_id.saturating_add(1) < min_available
+        {
+            let resync = Event::default()
+                .event("RESYNC_REQUIRED")
+                .data(serde_json::json!({ "min_sequence": min_available, "requested_after": last_event_id }).to_string());
+            if tx.send(Ok(resync)).await.is_err() {
+                return;
+            }
         }
-        _ => None,
+
+        let mut highest_replayed = last_event_id;
+        for (seq, mut val) in backlog {
+            if seq > highest_replayed {
+                highest_replayed = seq;
+            }
+            if !ws_matches(&val) {
+                continue;
+            }
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("sequence".into(), serde_json::json!(seq));
+            }
+            let event_name = val
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("MESSAGE")
+                .to_string();
+            let evt = Event::default()
+                .id(seq.to_string())
+                .event(event_name)
+                .data(serde_json::to_string(&val).unwrap_or_else(|_| "{}".into()));
+            if tx.send(Ok(evt)).await.is_err() {
+                return;
+            }
+        }
+
+        loop {
+            if let (Some(plane), Some(uid)) = (&plane_for_task, &session_user_id)
+                && plane.authorize_membership(&clean, uid).is_err()
+            {
+                break;
+            }
+            tokio::select! {
+                rev = async {
+                    match revocation_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Ok((rev_ws, rev_uid)) = rev
+                        && rev_ws == clean
+                        && session_user_id.as_deref() == Some(rev_uid.as_str())
+                    {
+                        break;
+                    }
+                }
+                item = live_rx.recv() => {
+                    match item {
+                        Ok(evt) => {
+                            if evt.sequence > 0 && evt.sequence <= highest_replayed {
+                                continue;
+                            }
+                            if evt.sequence > highest_replayed {
+                                highest_replayed = evt.sequence;
+                            }
+                            if let Some(tag) = evt.payload.get("ws_id").and_then(|w| w.as_str())
+                                && tag != clean
+                            {
+                                continue;
+                            }
+                            let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".into());
+                            let sse_evt = Event::default()
+                                .id(evt.sequence.to_string())
+                                .event(evt.event_type)
+                                .data(json);
+                            if tx.send(Ok(sse_evt)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let sse_evt = Event::default()
+                                .event("RESYNC_REQUIRED")
+                                .data("{}");
+                            if tx.send(Ok(sse_evt)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
     });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
     Ok(Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
     ))
@@ -6101,6 +6299,199 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after_revoke.status(), 401);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn host01_durable_replay_bridge_and_revocation_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        let (tx, _rx) = broadcast::channel(64);
+        let sup =
+            OpenBotSupervisor::open(cfg.clone(), Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let bridge = BridgeRouter::new(sup.clone(), cfg.openbot.bridges.clone());
+        let plane = Arc::new(
+            crate::hosted::HostedControlPlane::open(
+                dir.path().join("hosted.sqlite"),
+                dir.path().join("workers"),
+                b"0123456789abcdef0123456789abcdef",
+            )
+            .unwrap(),
+        );
+        plane
+            .provision_workspace("ws_a", "t_a", "Workspace A", "tok-a")
+            .unwrap();
+        plane
+            .provision_workspace("ws_b", "t_b", "Workspace B", "tok-b")
+            .unwrap();
+
+        let srv = CompanionWebServer::new(sup.clone(), bridge, Some("op-secret".into()), None)
+            .with_hosted_plane(plane.clone());
+        let app = build_companion_router(srv.state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // Health live and ready probes succeed with 200 without invoking a model.
+        assert_eq!(
+            client
+                .get(format!("{base}/api/v1/health/live"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/api/v1/health/ready"))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+
+        let enroll_and_login = |ws_id: String, user_id: String| {
+            let client = client.clone();
+            let base = base.clone();
+            async move {
+                let enroll: serde_json::Value = client
+                    .post(format!("{base}/api/v1/auth/enroll"))
+                    .bearer_auth("op-secret")
+                    .json(
+                        &serde_json::json!({ "ws_id": ws_id, "user_id": user_id, "role": "owner" }),
+                    )
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                let resp = client
+                    .post(format!("{base}/api/v1/auth/session"))
+                    .json(&serde_json::json!({ "enrollment_token": enroll["enrollment_token"] }))
+                    .send()
+                    .await
+                    .unwrap();
+                resp.headers()[header::SET_COOKIE]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_string()
+            }
+        };
+
+        let cookie_a = enroll_and_login("ws_a".into(), "alice".into()).await;
+        let cookie_b = enroll_and_login("ws_b".into(), "bob".into()).await;
+
+        // Commit 40 baseline events + 3 while A is disconnected (41..43).
+        for idx in 1..=40_u64 {
+            sup.emit_agui(
+                "BOT_EVENT",
+                format!("run-{idx}"),
+                "bot-1",
+                serde_json::json!({ "ws_id": "ws_a", "n": idx }),
+            );
+        }
+        for idx in 41..=43_u64 {
+            sup.emit_agui(
+                "BOT_EVENT",
+                format!("run-{idx}"),
+                "bot-1",
+                serde_json::json!({ "ws_id": "ws_a", "n": idx }),
+            );
+        }
+
+        // Reconnect A at cursor 40 while event 44 arrives live.
+        let mut resp_a = client
+            .get(format!("{base}/api/v1/workspaces/ws_a/events?after=40"))
+            .header(header::COOKIE, &cookie_a)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_a.status(), 200);
+
+        let mut resp_b = client
+            .get(format!("{base}/api/v1/workspaces/ws_b/events?after=0"))
+            .header(header::COOKIE, &cookie_b)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp_b.status(), 200);
+
+        sup.emit_agui(
+            "BOT_EVENT",
+            "run-44",
+            "bot-1",
+            serde_json::json!({ "ws_id": "ws_a", "n": 44 }),
+        );
+
+        let mut seen_a = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
+        while seen_a.len() < 4 && tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(Some(bytes))) =
+                tokio::time::timeout(Duration::from_millis(500), resp_a.chunk()).await
+            {
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    if let Some(id_str) = line.strip_prefix("id:")
+                        && let Ok(seq) = id_str.trim().parse::<u64>()
+                    {
+                        seen_a.push(seq);
+                    }
+                }
+            }
+        }
+        assert_eq!(seen_a, vec![41, 42, 43, 44]);
+
+        // Revoke A while open; A stream must terminate while B continues receiving ws_b events.
+        let rev = client
+            .post(format!("{base}/api/v1/auth/revoke"))
+            .bearer_auth("op-secret")
+            .json(&serde_json::json!({ "ws_id": "ws_a", "user_id": "alice" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(rev.status(), 200);
+
+        let a_closed = tokio::time::timeout(Duration::from_secs(2), async {
+            while let Ok(Some(_)) = resp_a.chunk().await {}
+        })
+        .await
+        .is_ok();
+        assert!(a_closed, "Revoked workspace SSE stream must close promptly");
+
+        sup.emit_agui(
+            "BOT_EVENT",
+            "run-b1",
+            "bot-1",
+            serde_json::json!({ "ws_id": "ws_b", "n": 1 }),
+        );
+        let mut saw_b = false;
+        let b_deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !saw_b && tokio::time::Instant::now() < b_deadline {
+            if let Ok(Ok(Some(chunk))) =
+                tokio::time::timeout(Duration::from_millis(400), resp_b.chunk()).await
+                && String::from_utf8_lossy(&chunk).contains("run-b1")
+            {
+                saw_b = true;
+            }
+        }
+        assert!(
+            saw_b,
+            "Workspace B must continue unaffected after A revocation"
+        );
 
         handle.abort();
     }

@@ -21,6 +21,72 @@ pub struct PolicyDecision {
     pub citation: String,
 }
 
+/// Exact-action approval grant bound to action digest, arguments, workspace, destination, principal, job, and expiry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ActionApprovalGrant {
+    pub grant_id: String,
+    pub action_name: String,
+    pub action_digest: String,
+    pub workspace_id: String,
+    pub destination: String,
+    pub principal: String,
+    pub job_id: String,
+    pub irreversible_summary: String,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ActionExecutionContext<'a> {
+    pub action_name: &'a str,
+    pub canonical_payload: &'a str,
+    pub workspace_id: &'a str,
+    pub destination: &'a str,
+    pub principal: &'a str,
+    pub job_id: &'a str,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+impl ActionApprovalGrant {
+    pub fn compute_action_digest(action_name: &str, canonical_payload: &str) -> String {
+        let material = format!("{action_name}\n{canonical_payload}");
+        gm_core::hash::compute_sha256(material.as_bytes())
+    }
+
+    /// Re-verify grant immediately before execution; changed arguments/recipients/patches/tenants/expiry fail closed.
+    pub fn verify_before_execution(
+        &self,
+        ctx: &ActionExecutionContext<'_>,
+    ) -> std::result::Result<(), String> {
+        if ctx.now >= self.expires_at {
+            return Err("Approval grant has expired".into());
+        }
+        if self.action_name != ctx.action_name {
+            return Err("Approval grant action mismatch".into());
+        }
+        let actual_digest = Self::compute_action_digest(ctx.action_name, ctx.canonical_payload);
+        if self.action_digest != actual_digest {
+            return Err(
+                "Approval grant payload/patch digest mismatch; fresh approval required".into(),
+            );
+        }
+        if self.workspace_id != ctx.workspace_id {
+            return Err("Approval grant workspace mismatch".into());
+        }
+        if self.destination != ctx.destination {
+            return Err(
+                "Approval grant recipient/destination changed; fresh approval required".into(),
+            );
+        }
+        if self.principal != ctx.principal {
+            return Err("Approval grant principal mismatch".into());
+        }
+        if self.job_id != ctx.job_id {
+            return Err("Approval grant job mismatch".into());
+        }
+        Ok(())
+    }
+}
+
 /// Central pre-execution security gateway (OpenBot Gateway Security Pattern).
 /// Every GUI action, workspace file access, shell command, and secret lease is evaluated
 /// before execution and stamped with an explicit governance rule citation.
@@ -567,5 +633,68 @@ mod tests {
         let dec_dangling = gw.evaluate_scoped_path(&dangling, true, false);
         assert_eq!(dec_dangling.outcome, PolicyOutcome::Refused);
         assert_eq!(dec_dangling.rule_id, "RULE-PATH-002");
+    }
+
+    #[test]
+    fn approval_grant_binds_exact_action_recipient_patch_tenant_and_expiry() {
+        let now = chrono::Utc::now();
+        let payload = "{\"patch_sha256\":\"abc123\",\"body\":\"hello\"}";
+        let grant = ActionApprovalGrant {
+            grant_id: "g-1".into(),
+            action_name: "send_email".into(),
+            action_digest: ActionApprovalGrant::compute_action_digest("send_email", payload),
+            workspace_id: "ws-alpha".into(),
+            destination: "alice@example.com".into(),
+            principal: "user-1".into(),
+            job_id: "job-1".into(),
+            irreversible_summary: "Send email to alice@example.com".into(),
+            expires_at: now + chrono::Duration::minutes(5),
+        };
+        let base = ActionExecutionContext {
+            action_name: "send_email",
+            canonical_payload: payload,
+            workspace_id: "ws-alpha",
+            destination: "alice@example.com",
+            principal: "user-1",
+            job_id: "job-1",
+            now,
+        };
+        assert!(grant.verify_before_execution(&base).is_ok());
+        // Changed recipient fails
+        assert!(
+            grant
+                .verify_before_execution(&ActionExecutionContext {
+                    destination: "mallory@example.com",
+                    ..base
+                })
+                .is_err()
+        );
+        // Modified patch/payload fails
+        assert!(
+            grant
+                .verify_before_execution(&ActionExecutionContext {
+                    canonical_payload: "{\"patch_sha256\":\"evil\",\"body\":\"hello\"}",
+                    ..base
+                })
+                .is_err()
+        );
+        // Changed workspace/tenant fails
+        assert!(
+            grant
+                .verify_before_execution(&ActionExecutionContext {
+                    workspace_id: "ws-beta",
+                    ..base
+                })
+                .is_err()
+        );
+        // Expired grant fails
+        assert!(
+            grant
+                .verify_before_execution(&ActionExecutionContext {
+                    now: now + chrono::Duration::minutes(10),
+                    ..base
+                })
+                .is_err()
+        );
     }
 }

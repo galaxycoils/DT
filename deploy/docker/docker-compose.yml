@@ -7,7 +7,6 @@ x-dt-build: &dt-build
 services:
   postgres:
     image: postgres:16.6-alpine@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
-    profiles: [postgres-test]
     restart: unless-stopped
     environment:
       POSTGRES_DB: dt_hosted
@@ -29,10 +28,19 @@ services:
       target: dt-server
     # Share only the proxy's network namespace so DT can keep its loopback bind.
     network_mode: service:tls-proxy
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     environment:
       RUST_LOG: info
       GROK_MUSE_COMPANION_TOKEN: ${DT_COMPANION_TOKEN:-}
+      DT_HOSTED_ENABLED: "1"
+      DT_HOSTED_REQUIRED: "1"
+      DT_HOSTED_MASTER_KEY_FILE: /run/secrets/dt_hosted_master_key
+      DT_DATABASE_URL: ${DT_DATABASE_URL:-}
+    secrets:
+      - dt_hosted_master_key
     volumes:
       - dt_workers_data:/var/lib/dt
     logging:
@@ -56,6 +64,8 @@ services:
 secrets:
   pg_password:
     file: ${DT_POSTGRES_PASSWORD_FILE:-./postgres-password}
+  dt_hosted_master_key:
+    file: ${DT_HOSTED_MASTER_KEY_FILE:-./hosted-master-key}
 
 volumes:
   dt_pg_data:

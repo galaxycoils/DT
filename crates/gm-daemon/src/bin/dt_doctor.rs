@@ -13,6 +13,8 @@ use std::path::PathBuf;
 struct DoctorCli {
     #[arg(short, long)]
     config: Option<PathBuf>,
+    #[arg(long)]
+    json: bool,
     #[command(subcommand)]
     action: Option<DoctorSubcommand>,
 }
@@ -20,5 +22,5 @@ struct DoctorCli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = DoctorCli::parse();
-    run_doctor_cli(cli.action, false, cli.config).await
+    run_doctor_cli(cli.action, cli.json, cli.config).await
 }

@@ -30,5 +30,5 @@ COPY --from=rust-builder /src/DT/target/release/dt-doctor /usr/local/bin/dt-doct
 ENV XDG_DATA_HOME=/var/lib/dt
 USER dt
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-    CMD test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:7433/api/v1/auth/session)" = 401
+    CMD curl -fsS http://127.0.0.1:7433/api/v1/health/ready >/dev/null || exit 1
 ENTRYPOINT ["/usr/local/bin/gm-daemon", "serve", "--bind", "127.0.0.1:7433"]

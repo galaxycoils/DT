@@ -158,8 +158,11 @@ pub fn release_asset_name(version: &str, os: &str, architecture: &str) -> Result
     }
     match (os, architecture) {
         ("macos", "aarch64" | "x86_64") => Ok(format!("DT-{version}-macos-{architecture}.dmg")),
-        ("windows", "x86_64") => Ok(format!("DT-{version}-windows-x86_64-setup.exe")),
+        ("windows", "x86_64" | "aarch64") => {
+            Ok(format!("DT-{version}-windows-{architecture}-setup.exe"))
+        }
         ("linux", "x86_64") => Ok(format!("dt_{version}_amd64.deb")),
+        ("linux", "aarch64") => Ok(format!("dt_{version}_arm64.deb")),
         _ => Err(GmError::Config(
             "Unsupported release OS/architecture".into(),
         )),
@@ -228,12 +231,24 @@ pub fn parse_github_release_json(
         manifest_download_url: release
             .assets
             .iter()
-            .find(|a| a.name == "dt-release.json" || a.name == "grok-muse-release.json")
+            .find(|a| a.name == "dt-release-v2.json")
+            .or_else(|| {
+                release
+                    .assets
+                    .iter()
+                    .find(|a| a.name == "dt-release.json" || a.name == "grok-muse-release.json")
+            })
             .map(|a| a.browser_download_url.clone()),
         signature_download_url: release
             .assets
             .iter()
-            .find(|a| a.name == "dt-release.sig" || a.name == "grok-muse-release.sig")
+            .find(|a| a.name == "dt-release-v2.sig")
+            .or_else(|| {
+                release
+                    .assets
+                    .iter()
+                    .find(|a| a.name == "dt-release.sig" || a.name == "grok-muse-release.sig")
+            })
             .map(|a| a.browser_download_url.clone()),
         current_version: current_version.to_string(),
         latest_version,
@@ -276,14 +291,26 @@ async fn trusted_update_metadata(
     }
     let key = trusted_release_key()?;
     let base = format!("https://raw.githubusercontent.com/{repo}/{DEFAULT_METADATA_BRANCH}");
-    let raw = bounded_release_fetch(
-        client,
-        &format!("{base}/dt-update-metadata.json"),
-        128 * 1024,
-    )
-    .await?;
-    let signature =
-        bounded_release_fetch(client, &format!("{base}/dt-update-metadata.sig"), 4096).await?;
+    let (raw, signature) = match (
+        bounded_release_fetch(
+            client,
+            &format!("{base}/dt-update-metadata-v2.json"),
+            128 * 1024,
+        )
+        .await,
+        bounded_release_fetch(client, &format!("{base}/dt-update-metadata-v2.sig"), 4096).await,
+    ) {
+        (Ok(raw), Ok(sig)) => (raw, sig),
+        _ => (
+            bounded_release_fetch(
+                client,
+                &format!("{base}/dt-update-metadata.json"),
+                128 * 1024,
+            )
+            .await?,
+            bounded_release_fetch(client, &format!("{base}/dt-update-metadata.sig"), 4096).await?,
+        ),
+    };
     let metadata = verify_renewable_metadata_with_keys(&raw, &signature, &[&key], repo, 1)?;
     let storage = gm_core::config::default_storage_dir().join("update-trust");
     gm_core::storage::ensure_private_dir(&storage)?;
@@ -1282,8 +1309,17 @@ mod target_selection_tests {
         let result = parse_github_release_json(&json.to_string(), "0.3.0").unwrap();
         assert!(result.dmg_asset_name.is_none());
         assert!(result.dmg_download_url.is_none());
+        assert_eq!(
+            release_asset_name("1.0.1", "windows", "aarch64").unwrap(),
+            "DT-1.0.1-windows-aarch64-setup.exe"
+        );
+        assert_eq!(
+            release_asset_name("1.0.1", "linux", "aarch64").unwrap(),
+            "dt_1.0.1_arm64.deb"
+        );
         assert!(release_asset_name("../bad", "linux", "x86_64").is_err());
-        assert!(release_asset_name("1.0.0", "windows", "aarch64").is_err());
+        assert!(release_asset_name("1.0.1", "linux", "riscv64").is_err());
+        assert!(release_asset_name("1.0.1", "freebsd", "x86_64").is_err());
     }
 }
 

@@ -491,6 +491,15 @@ impl DurableTaskQueue {
         Ok(conn.last_insert_rowid() as u64)
     }
 
+    pub fn min_event_sequence(&self) -> Result<Option<u64>> {
+        self.conn
+            .lock()
+            .query_row("SELECT MIN(sequence) FROM runtime_events", [], |row| {
+                row.get::<_, Option<u64>>(0)
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))
+    }
+
     pub fn events_after(&self, cursor: u64, limit: usize) -> Result<Vec<(u64, serde_json::Value)>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT sequence,event_json FROM runtime_events WHERE sequence > ?1 ORDER BY sequence LIMIT ?2")

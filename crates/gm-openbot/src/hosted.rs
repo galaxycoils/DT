@@ -89,6 +89,44 @@ CREATE TABLE IF NOT EXISTS hosted_sessions (
 );
 "#;
 
+pub const POSTGRES_MIGRATION_V3: &str = r#"
+ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_memberships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE encrypted_secrets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspace_backups ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hosted_enrollments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hosted_sessions ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'dt_ws_isolation_workspaces') THEN
+        CREATE POLICY dt_ws_isolation_workspaces ON workspaces
+            USING (ws_id = NULLIF(current_setting('app.current_ws_id', true), ''));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'dt_ws_isolation_memberships') THEN
+        CREATE POLICY dt_ws_isolation_memberships ON workspace_memberships
+            USING (ws_id = NULLIF(current_setting('app.current_ws_id', true), ''));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'dt_ws_isolation_secrets') THEN
+        CREATE POLICY dt_ws_isolation_secrets ON encrypted_secrets
+            USING (ws_id = NULLIF(current_setting('app.current_ws_id', true), ''));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'dt_ws_isolation_backups') THEN
+        CREATE POLICY dt_ws_isolation_backups ON workspace_backups
+            USING (ws_id = NULLIF(current_setting('app.current_ws_id', true), ''));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'dt_ws_isolation_enrollments') THEN
+        CREATE POLICY dt_ws_isolation_enrollments ON hosted_enrollments
+            USING (ws_id = NULLIF(current_setting('app.current_ws_id', true), ''));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE policyname = 'dt_ws_isolation_sessions') THEN
+        CREATE POLICY dt_ws_isolation_sessions ON hosted_sessions
+            USING (ws_id = NULLIF(current_setting('app.current_ws_id', true), ''));
+    END IF;
+END
+$$;
+"#;
+
 /// Combined PostgreSQL schema exported for reference and deployment bootstrap.
 pub const POSTGRES_CONTROL_PLANE_SCHEMA: &str = const_str_concat_placeholder();
 
@@ -316,21 +354,59 @@ impl PostgresHostedStore {
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
-        for (version, sql) in [
-            (1_i32, POSTGRES_MIGRATION_V1),
-            (2_i32, POSTGRES_MIGRATION_V2),
-        ] {
-            sqlx::raw_sql(sql).execute(&self.pool).await.map_err(|e| {
-                GmError::Platform(format!("PostgreSQL migration v{version} failed: {e}"))
-            })?;
-            sqlx::query(
-                "INSERT INTO _dt_hosted_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
-            )
-            .bind(version)
-            .execute(&self.pool)
+        let mut conn = self
+            .pool
+            .acquire()
             .await
-            .map_err(|e| GmError::Platform(format!("PostgreSQL migration record failed: {e}")))?;
+            .map_err(|e| GmError::Platform(format!("PostgreSQL acquire failed: {e}")))?;
+        sqlx::query("SELECT pg_advisory_lock(492381920144)")
+            .execute(&mut *conn)
+            .await
+            .map_err(|e| GmError::Platform(format!("PostgreSQL migration lock failed: {e}")))?;
+        let res = async {
+            for (version, sql) in [
+                (1_i32, POSTGRES_MIGRATION_V1),
+                (2_i32, POSTGRES_MIGRATION_V2),
+                (3_i32, POSTGRES_MIGRATION_V3),
+            ] {
+                sqlx::raw_sql(sql).execute(&mut *conn).await.map_err(|e| {
+                    GmError::Platform(format!("PostgreSQL migration v{version} failed: {e}"))
+                })?;
+                sqlx::query(
+                    "INSERT INTO _dt_hosted_migrations (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
+                )
+                .bind(version)
+                .execute(&mut *conn)
+                .await
+                .map_err(|e| {
+                    GmError::Platform(format!("PostgreSQL migration record failed: {e}"))
+                })?;
+            }
+            Ok::<(), GmError>(())
         }
+        .await;
+        let _ = sqlx::query("SELECT pg_advisory_unlock(492381920144)")
+            .execute(&mut *conn)
+            .await;
+        res
+    }
+
+    pub async fn ready_check(&self) -> Result<()> {
+        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _dt_hosted_migrations")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| GmError::Platform(format!("PostgreSQL readiness check failed: {e}")))?;
+        if applied < 3 {
+            return Err(GmError::Platform(
+                "PostgreSQL hosted migrations are incomplete".into(),
+            ));
+        }
+        std::fs::create_dir_all(&self.workers_root)?;
+        let probe = self
+            .workers_root
+            .join(format!(".ready-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&probe, b"ok")?;
+        let _ = std::fs::remove_file(&probe);
         Ok(())
     }
 
@@ -464,6 +540,7 @@ pub struct HostedControlPlane {
     conn: Arc<Mutex<Connection>>,
     workers_root: PathBuf,
     master_key: [u8; 32],
+    revocation_tx: tokio::sync::broadcast::Sender<(String, String)>,
 }
 
 impl HostedControlPlane {
@@ -540,11 +617,35 @@ impl HostedControlPlane {
         )
         .map_err(|e| GmError::Platform(format!("Hosted schema error: {e}")))?;
         let key: [u8; 32] = Sha256::digest(master_key).into();
+        let (revocation_tx, _) = tokio::sync::broadcast::channel(64);
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             workers_root,
             master_key: key,
+            revocation_tx,
         })
+    }
+
+    pub fn subscribe_revocations(&self) -> tokio::sync::broadcast::Receiver<(String, String)> {
+        self.revocation_tx.subscribe()
+    }
+
+    pub fn ready_check(&self) -> Result<()> {
+        let count: i64 = self
+            .conn
+            .lock()
+            .query_row("SELECT COUNT(*) FROM hosted_workspaces_v1", [], |r| {
+                r.get(0)
+            })
+            .map_err(|e| GmError::Platform(format!("Hosted control plane DB not ready: {e}")))?;
+        let _ = count;
+        std::fs::create_dir_all(&self.workers_root)?;
+        let probe = self
+            .workers_root
+            .join(format!(".ready-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&probe, b"ok")?;
+        let _ = std::fs::remove_file(&probe);
+        Ok(())
     }
 
     pub fn postgres_schema_sql(&self) -> &'static str {
@@ -626,6 +727,32 @@ impl HostedControlPlane {
         })
     }
 
+    pub fn authorize_membership(&self, ws_id: &str, user_id: &str) -> Result<HostedMembership> {
+        let clean_ws = validate_workspace_slug(ws_id)?;
+        let conn = self.conn.lock();
+        let row: Option<(String, String, String, String)> = conn
+            .query_row(
+                "SELECT ws_id, user_id, tenant_id, role
+                 FROM hosted_memberships_v1
+                 WHERE ws_id = ?1 AND user_id = ?2 AND revoked_at IS NULL",
+                params![clean_ws, user_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let Some((ws_id, user_id, tenant_id, role)) = row else {
+            return Err(GmError::SafetyViolation(format!(
+                "Workspace membership denied for user '{user_id}' on '{clean_ws}'"
+            )));
+        };
+        Ok(HostedMembership {
+            ws_id,
+            user_id,
+            tenant_id,
+            role,
+        })
+    }
+
     pub fn revoke_membership(&self, ws_id: &str, user_id: &str) -> Result<()> {
         let clean_ws = validate_workspace_slug(ws_id)?;
         let now = Utc::now().to_rfc3339();
@@ -640,6 +767,7 @@ impl HostedControlPlane {
             params![now, clean_ws, user_id],
         )
         .map_err(|e| GmError::Platform(e.to_string()))?;
+        let _ = self.revocation_tx.send((clean_ws, user_id.to_string()));
         Ok(())
     }
 

@@ -35,8 +35,14 @@ pub struct CatalogComponent {
     pub id: String,
     pub kind: ComponentKind,
     pub version: String,
+    #[serde(default)]
+    pub revision: String,
     pub os: String,
     pub architecture: String,
+    #[serde(default)]
+    pub worker_compatibility: Vec<String>,
+    #[serde(default)]
+    pub includes: Vec<String>,
     pub total_size_bytes: u64,
     pub sha256: String,
     pub license: String,
@@ -256,9 +262,12 @@ mod tests {
         let component = CatalogComponent {
             id: "smolvlm2".into(),
             kind: ComponentKind::VlmModel,
-            version: "1.0.0".into(),
+            version: "1.0.1".into(),
+            revision: "rev-1".into(),
             os: "any".into(),
             architecture: "any".into(),
+            worker_compatibility: vec!["vlm_worker>=1.0.1".into()],
+            includes: vec!["weights".into(), "mmproj".into(), "tokenizer".into()],
             total_size_bytes: combined.len() as u64,
             sha256: sha256_hex(&combined),
             license: "Apache-2.0".into(),

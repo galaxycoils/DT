@@ -2,6 +2,13 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
+## [v1.0.1] — Release Remediation, 6-Target Inventory, Full Recovery & Replay (2026-11-18)
+
+- **6-Target / 8-Session Release Scope & Updater Compatibility (`release-inventory.json`, `updater.rs`, `tools/`)**: Added Windows ARM64 (`DT-1.0.1-windows-aarch64-setup.exe`) and Ubuntu ARM64 (`dt_1.0.1_arm64.deb`), unified release inputs, preserved v1-compatible `dt-release.json` / `dt-update-metadata.json` for historical v1.0.0 updaters, and added `dt-release-v2.json` / `dt-update-metadata-v2.json` for the full v1.0.1 inventory.
+- **Release Signing, Packaging & Benchmarks (`release.yml`, `package-release.py`, `xtask`)**: Staged CI signing artifacts in `runner.temp`, added PE/ELF/Mach-O architecture validation in `package-release.py`, added `NSMicrophoneUsageDescription` and `audio-input` entitlement on macOS, added `!uninstfinalize` uninstaller signing on Windows, verified decoded JPEG dimensions in `xtask bench-hotpath`, added installed hash-verified binary checks to `xtask bench-rss`, and enforced per-metric `raw_samples` in `verify-release-evidence.py`.
+- **Doctor Recovery (`REC-01`), Microdollar Budgets (`BUD-01`) & Approval Binding**: Recursive nested-attachment snapshots with `PRAGMA quick_check(1)`, journaled rollback resume in `dt doctor` / `dt-doctor`, monotonic safety preservation (`monotonic-safety.json`), integer microdollar atomic reservations, and exact `ActionApprovalGrant` binding.
+- **Hosted Replay & Readiness (`HOST-01`)**: Gap-free SSE cursor replay + live broadcast bridging with immediate stream termination on membership revocation, PostgreSQL advisory migration locking + RLS policies, `/api/v1/health/live` and `/api/v1/health/ready` probes, and allowlist + byte-verified support exports.
+
 ## [v1.0.0] — DT Stable Release Candidate & Certification Infrastructure (2026-11-17)
 
 - **Rename & Compatibility**: Branded user-facing surfaces to **DT**, exposed `dt` primary CLI and standalone `dt-doctor` recovery binary while preserving `gm` compatibility alias, crate names, credential namespaces, bundle IDs, OAuth identity, and legacy config inputs.

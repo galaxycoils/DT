@@ -1,7 +1,10 @@
 //! Unified DT Doctor engine serving installers, `dt doctor`, standalone `dt-doctor`,
 //! onboarding, Settings, and sanitized Web/Mobile status.
 
-use crate::migration::{MigrationState, StorageLease, inspect_migration, migrate_user_data};
+use crate::migration::{
+    MigrationState, RollbackPhase, StorageLease, execute_journaled_rollback, inspect_migration,
+    load_rollback_journal, migrate_user_data,
+};
 use crate::service;
 use chrono::Utc;
 use gm_core::config::GmConfig;
@@ -187,15 +190,34 @@ fn load_or_create_journal(storage_dir: &Path, run_id: Option<&str>) -> Result<Do
     if let Some(id) = run_id {
         validate_run_id(id)?;
         let path = journal_dir(storage_dir).join(format!("{id}.json"));
-        let raw = fs::read_to_string(&path).map_err(|e| {
-            GmError::Config(format!(
-                "Doctor run journal '{id}' not found ({}): {e}",
-                path.display()
-            ))
-        })?;
-        let journal: DoctorRunJournal = serde_json::from_str(&raw)
-            .map_err(|e| GmError::Config(format!("Corrupt Doctor run journal '{id}': {e}")))?;
-        return Ok(journal);
+        match fs::read_to_string(&path) {
+            Ok(raw) => {
+                let journal: DoctorRunJournal = serde_json::from_str(&raw).map_err(|e| {
+                    GmError::Config(format!("Corrupt Doctor run journal '{id}': {e}"))
+                })?;
+                return Ok(journal);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if load_rollback_journal(storage_dir, id)?.is_some() {
+                    return Ok(DoctorRunJournal {
+                        run_id: id.to_string(),
+                        attempts_by_check: BTreeMap::new(),
+                        completed: false,
+                        last_updated: Utc::now().to_rfc3339(),
+                    });
+                }
+                return Err(GmError::Config(format!(
+                    "Doctor run journal '{id}' not found ({}): {e}",
+                    path.display()
+                )));
+            }
+            Err(e) => {
+                return Err(GmError::Config(format!(
+                    "Doctor run journal '{id}' unreadable ({}): {e}",
+                    path.display()
+                )));
+            }
+        }
     }
     Ok(DoctorRunJournal {
         run_id: format!("doc-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
@@ -463,6 +485,37 @@ async fn run_doctor_inner(
 
     let mut apply_repairs = matches!(mode, DoctorMode::Repair | DoctorMode::Resume);
     let mut checks = Vec::new();
+    if mode == DoctorMode::Resume
+        && let Ok(Some(rb_journal)) = load_rollback_journal(storage_dir, &journal.run_id)
+        && rb_journal.phase != RollbackPhase::Completed
+    {
+        match execute_journaled_rollback(&rb_journal.snapshot_dir, storage_dir, &journal.run_id) {
+            Ok(outcome) => checks.push(DoctorCheckEntry {
+                id: "rollback_recovery".into(),
+                category: "storage".into(),
+                outcome: DoctorCheckOutcome::Repaired,
+                attempts: outcome.attempts,
+                summary: format!(
+                    "Resumed rollback snapshot {} ({} verified files); preserved newer copy at {}; external_work_paused={}",
+                    outcome.snapshot_id,
+                    outcome.verified_files,
+                    outcome.preserved_newer_dir.display(),
+                    outcome.external_work_paused
+                ),
+                next_action: None,
+                repair_action: Some(FixedRepairAction::VerifyAndMigrateStorage),
+            }),
+            Err(error) => checks.push(DoctorCheckEntry {
+                id: "rollback_recovery".into(),
+                category: "storage".into(),
+                outcome: DoctorCheckOutcome::Failed,
+                attempts: rb_journal.attempts.saturating_add(1),
+                summary: format!("Interrupted rollback recovery failed: {error}"),
+                next_action: Some("Inspect snapshots and storage lease before retrying.".into()),
+                repair_action: Some(FixedRepairAction::VerifyAndMigrateStorage),
+            }),
+        }
+    }
     if let Some((path, error)) = config_error {
         let attempts = journal
             .attempts_by_check

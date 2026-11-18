@@ -7,9 +7,11 @@ use gm_core::ipc::{
     DaemonRequest, DaemonResponse, IpcMessage, read_ipc_message, write_ipc_message,
 };
 use gm_goals::{ProactiveEngine, QuietGateConfig};
+#[cfg(any(test, debug_assertions))]
+use gm_llm::MockLlmBackend;
 use gm_llm::{
     BudgetManager, ChatMessage, HybridLlmClient, KeychainSecrets, LlmBackend, LlmRouter,
-    META_KEY_ACCOUNT, MockLlmBackend, ReqwestLlmBackend, TaskType, XAI_KEY_ACCOUNT,
+    META_KEY_ACCOUNT, ReqwestLlmBackend, TaskType, XAI_KEY_ACCOUNT,
 };
 use gm_memory::PersonalMemoryStore;
 use gm_platform::IpcPlatformClient;
@@ -129,7 +131,21 @@ pub fn build_llm_backend(secrets: &KeychainSecrets) -> Arc<dyn LlmBackend> {
     // Resolve credentials for the selected profile at request time, including OAuth-only setups.
     let local = gm_vlm_candle::ModelRegistry::default_registry()
         .find_installed_engine()
-        .map(|engine| gm_llm::LocalVlmLlmAdapter::new(Arc::new(engine)));
+        .map(|engine| gm_llm::LocalVlmLlmAdapter::new(Arc::new(engine)))
+        .or_else(|| {
+            let spec_path = std::env::var("DT_LOCAL_VLM_SPEC")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    gm_core::config::default_storage_dir()
+                        .join("components")
+                        .join("vlm_worker")
+                        .join("worker.json")
+                });
+            let raw = std::fs::read_to_string(spec_path).ok()?;
+            let spec: gm_llm::ManagedVlmWorkerSpec = serde_json::from_str(&raw).ok()?;
+            let managed = gm_llm::ManagedLocalVlmBackend::new(spec).ok()?;
+            Some(gm_llm::LocalVlmLlmAdapter::new(Arc::new(managed)))
+        });
     let legacy_local = local.is_some() && meta_key.is_none() && xai_key.is_none();
     Arc::new(ProviderLlmBackend {
         http: ReqwestLlmBackend::with_secrets(secrets),
@@ -694,6 +710,29 @@ pub enum DoctorSubcommand {
     /// Resume a journaled Doctor run after interruption, OS prompt, or reboot
     Resume {
         run_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List verified rollback snapshots
+    Snapshots {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a specific rollback snapshot and verify its SHA-256 checksums
+    InspectSnapshot {
+        snapshot_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a verified rollback snapshot while preserving newer data and safety decisions
+    Restore {
+        snapshot_id: String,
+        /// Optional deterministic run ID for journaled recovery
+        #[arg(long)]
+        run_id: Option<String>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -2678,11 +2717,88 @@ pub async fn run_doctor_cli(
     top_json: bool,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
+    match action {
+        Some(DoctorSubcommand::Snapshots { json }) => {
+            let config = GmConfig::load(config_path.as_deref()).unwrap_or_default();
+            let snapshots = list_rollback_snapshots(&config.storage_dir.join("snapshots"))?;
+            if top_json || json {
+                println!("{}", serde_json::to_string_pretty(&snapshots)?);
+            } else if snapshots.is_empty() {
+                println!("No rollback snapshots found.");
+            } else {
+                for snap in snapshots {
+                    println!(
+                        "{}  version={} schema={} files={} created={}",
+                        snap.snapshot_id,
+                        snap.package_version,
+                        snap.data_schema_version,
+                        snap.files.len(),
+                        snap.created_at
+                    );
+                }
+            }
+            return Ok(());
+        }
+        Some(DoctorSubcommand::InspectSnapshot { snapshot_id, json }) => {
+            let config = GmConfig::load(config_path.as_deref()).unwrap_or_default();
+            let snap_dir = config.storage_dir.join("snapshots").join(&snapshot_id);
+            let snap = inspect_rollback_snapshot(&snap_dir)?;
+            if top_json || json {
+                println!("{}", serde_json::to_string_pretty(&snap)?);
+            } else {
+                println!(
+                    "Snapshot {} verified ({} files, schema={}, package={})",
+                    snap.snapshot_id,
+                    snap.files.len(),
+                    snap.data_schema_version,
+                    snap.package_version
+                );
+            }
+            return Ok(());
+        }
+        Some(DoctorSubcommand::Restore {
+            snapshot_id,
+            run_id,
+            json,
+        }) => {
+            let config = GmConfig::load(config_path.as_deref()).unwrap_or_default();
+            let snap_dir = config.storage_dir.join("snapshots").join(&snapshot_id);
+            let effective_run_id = run_id.unwrap_or_else(|| {
+                format!("rb-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
+            });
+            let outcome =
+                execute_journaled_rollback(&snap_dir, &config.storage_dir, &effective_run_id)?;
+            let post_check =
+                run_doctor_from_config_path(config_path.as_deref(), DoctorMode::Check, None)
+                    .await?;
+            if top_json || json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "rollback": outcome,
+                        "doctor": post_check,
+                    }))?
+                );
+            } else {
+                println!(
+                    "Restored snapshot {} (run_id={}); preserved newer data at {}; external_work_paused={}",
+                    outcome.snapshot_id,
+                    outcome.run_id,
+                    outcome.preserved_newer_dir.display(),
+                    outcome.external_work_paused
+                );
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
     let (mode, run_id, sub_json) = match action {
         Some(DoctorSubcommand::Check { json }) => (DoctorMode::Check, None, json),
         Some(DoctorSubcommand::Repair { json }) => (DoctorMode::Repair, None, json),
         Some(DoctorSubcommand::Resume { run_id, json }) => (DoctorMode::Resume, Some(run_id), json),
         None => (DoctorMode::Check, None, false),
+        _ => unreachable!(),
     };
     let report =
         run_doctor_from_config_path(config_path.as_deref(), mode, run_id.as_deref()).await?;
@@ -2879,7 +2995,49 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
     let bridge = gm_openbot::BridgeRouter::new(sup.clone(), config.openbot.bridges.clone());
     let (token, slack_secret) = companion_web_credentials(&config)?;
     let shared_config = Arc::new(parking_lot::RwLock::new(config.clone()));
-    let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+    let workers_root = config.storage_dir.join("hosted-workers");
+    let master_key_bytes = std::env::var("DT_HOSTED_MASTER_KEY")
+        .ok()
+        .filter(|s| s.len() >= 16)
+        .or_else(|| {
+            std::env::var("DT_HOSTED_MASTER_KEY_FILE")
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| s.len() >= 16)
+        })
+        .unwrap_or_else(|| "dt-local-hosted-default-key".to_string());
+    let mut hosted_plane_opt = None;
+    if let Some(db_url) = std::env::var("DT_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        let pg = gm_openbot::PostgresHostedStore::connect(
+            &db_url,
+            &workers_root,
+            master_key_bytes.as_bytes(),
+        )
+        .await?;
+        pg.ready_check().await?;
+        let plane = Arc::new(gm_openbot::HostedControlPlane::open(
+            config.storage_dir.join("hosted-control.sqlite"),
+            &workers_root,
+            master_key_bytes.as_bytes(),
+        )?);
+        hosted_plane_opt = Some(plane);
+    } else if std::env::var("DT_HOSTED_ENABLED")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    {
+        let plane = Arc::new(gm_openbot::HostedControlPlane::open(
+            config.storage_dir.join("hosted-control.sqlite"),
+            &workers_root,
+            master_key_bytes.as_bytes(),
+        )?);
+        hosted_plane_opt = Some(plane);
+    }
+    let mut web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
         .with_sanitized_doctor(doctor_status_snapshot(&config).await)
         .with_updates(Arc::new(updater::CompanionUpdateService {
             download_dir: config.storage_dir.join("updates"),
@@ -2894,6 +3052,9 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
             Some(kill_switch),
             Some(platform as Arc<dyn gm_platform::Platform>),
         );
+    if let Some(plane) = hosted_plane_opt {
+        web = web.with_hosted_plane(plane);
+    }
     let (comp_addr, comp_handle) = match web.bind_and_serve(bind).await {
         Ok(server) => server,
         Err(error) => {

@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "product": "DT",
+  "version": "1.0.1",
+  "repo": "galaxycoils/DT",
+  "support_url": "https://github.com/galaxycoils/DT/issues",
+  "security_url": "https://github.com/galaxycoils/DT/security/advisories/new",
+  "historical_v1_targets": [
+    {
+      "os": "macos",
+      "architecture": "aarch64",
+      "asset_template": "DT-{version}-macos-aarch64.dmg"
+    },
+    {
+      "os": "macos",
+      "architecture": "x86_64",
+      "asset_template": "DT-{version}-macos-x86_64.dmg"
+    },
+    {
+      "os": "linux",
+      "architecture": "x86_64",
+      "asset_template": "dt_{version}_amd64.deb"
+    },
+    {
+      "os": "windows",
+      "architecture": "x86_64",
+      "asset_template": "DT-{version}-windows-x86_64-setup.exe"
+    }
+  ],
+  "targets": [
+    {
+      "os": "macos",
+      "architecture": "aarch64",
+      "asset_template": "DT-{version}-macos-aarch64.dmg",
+      "deb_arch": null,
+      "sessions": ["native"],
+      "budget_buckets": ["macos-aarch64"]
+    },
+    {
+      "os": "macos",
+      "architecture": "x86_64",
+      "asset_template": "DT-{version}-macos-x86_64.dmg",
+      "deb_arch": null,
+      "sessions": ["native"],
+      "budget_buckets": ["macos-x86_64"]
+    },
+    {
+      "os": "windows",
+      "architecture": "x86_64",
+      "asset_template": "DT-{version}-windows-x86_64-setup.exe",
+      "deb_arch": null,
+      "sessions": ["native"],
+      "budget_buckets": ["windows-x86_64"]
+    },
+    {
+      "os": "windows",
+      "architecture": "aarch64",
+      "asset_template": "DT-{version}-windows-aarch64-setup.exe",
+      "deb_arch": null,
+      "sessions": ["native"],
+      "budget_buckets": ["windows-aarch64"]
+    },
+    {
+      "os": "linux",
+      "architecture": "x86_64",
+      "asset_template": "dt_{version}_amd64.deb",
+      "deb_arch": "amd64",
+      "sessions": ["x11", "wayland"],
+      "budget_buckets": ["linux-x86_64-x11", "linux-x86_64-wayland"]
+    },
+    {
+      "os": "linux",
+      "architecture": "aarch64",
+      "asset_template": "dt_{version}_arm64.deb",
+      "deb_arch": "arm64",
+      "sessions": ["x11", "wayland"],
+      "budget_buckets": ["linux-aarch64-x11", "linux-aarch64-wayland"]
+    }
+  ],
+  "components": [
+    "qwen2-vl-2b",
+    "smolvlm",
+    "smolvlm2",
+    "vlm_worker",
+    "whisper-stt-base-en",
+    "speech_tts",
+    "vm_image",
+    "vm_firmware"
+  ],
+  "budget": {
+    "total_cap_usd": 100.0,
+    "per_desktop_target_usd": 9.375,
+    "shared_tests_usd": 25.0
+  }
+}

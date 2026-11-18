@@ -12,6 +12,9 @@
     <!-- Outbound API network communication for Meta / xAI LLM routing -->
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Audio input permission for consented voice / meeting capture -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
     <!-- EventKit permissions for proactive patrol -->
     <key>com.apple.security.personal-information.calendars</key>
     <true/>

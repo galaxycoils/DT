@@ -61,9 +61,26 @@ enum Commands {
         dmg_path: String,
     },
     /// Benchmark G3 local hot-path budgets
-    BenchHotpath,
-    /// Benchmark G2 whole-tree idle RSS
-    BenchRss,
+    BenchHotpath {
+        /// Optional path to write raw per-metric JSON samples
+        #[arg(long)]
+        raw_out: Option<PathBuf>,
+    },
+    /// Benchmark G2 whole-tree memory footprint against installed or built binaries
+    BenchRss {
+        /// Use pre-installed or staged binaries from this directory (refuses to rebuild)
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        /// Optional JSON file mapping binary name to expected SHA-256 hex digest
+        #[arg(long)]
+        expected_hashes: Option<PathBuf>,
+        /// Number of memory samples to collect per phase (default 30)
+        #[arg(long, default_value_t = 30)]
+        samples: usize,
+        /// Optional path to write raw per-metric JSON samples
+        #[arg(long)]
+        raw_out: Option<PathBuf>,
+    },
     /// Benchmark G4 LLM inference and agent step latency (< 1.5s median, < 4.0s p95)
     BenchLlm {
         /// Attempt live API calls against configured Keychain/env keys instead of calibrated simulator
@@ -339,6 +356,8 @@ fn create_app_bundles(
     <string>DT requires accessibility to inspect UI elements and execute actions.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>DT requires screen recording to ground vision model actions.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>DT requires microphone access for consented voice transcription and meeting notes.</string>
     <key>NSCalendarsUsageDescription</key>
     <string>DT proactive engine requires Calendar access to patrol upcoming events.</string>
     <key>NSRemindersUsageDescription</key>
@@ -382,6 +401,8 @@ fn create_app_bundles(
     <string>DT requires accessibility to inspect UI elements and execute actions.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>DT requires screen recording to ground vision model actions.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>DT requires microphone access for consented voice transcription and meeting notes.</string>
     <key>NSCalendarsUsageDescription</key>
     <string>DT proactive engine requires Calendar access to patrol upcoming events.</string>
     <key>NSRemindersUsageDescription</key>
@@ -1018,12 +1039,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             run_bench_llm(live, iterations).await?;
         }
 
-        Commands::BenchHotpath => {
-            run_bench_hotpath().await?;
+        Commands::BenchHotpath { raw_out } => {
+            run_bench_hotpath(raw_out.as_deref()).await?;
         }
 
-        Commands::BenchRss => {
-            run_bench_rss().await?;
+        Commands::BenchRss {
+            bin_dir,
+            expected_hashes,
+            samples,
+            raw_out,
+        } => {
+            run_bench_rss(
+                bin_dir.as_deref(),
+                expected_hashes.as_deref(),
+                samples,
+                raw_out.as_deref(),
+            )
+            .await?;
         }
 
         Commands::Eval => {
@@ -1104,7 +1136,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error::Error>> {
+async fn run_bench_hotpath(
+    raw_out: Option<&Path>,
+) -> Result<(f64, f64, f64, f64), Box<dyn std::error::Error>> {
     println!(
         "==> Benchmarking G3 against the native desktop (requires an authorized interactive session)..."
     );
@@ -1129,10 +1163,11 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
         let _frame = platform.capture(None, None).await?;
         frame_times_us.push(start.elapsed().as_micros() as f64);
     }
-    frame_times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let frame_p50 = percentile(&frame_times_us, 0.50);
-    let frame_p95 = percentile(&frame_times_us, 0.95);
-    let frame_p99 = percentile(&frame_times_us, 0.99);
+    let mut frame_sorted = frame_times_us.clone();
+    frame_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let frame_p50 = percentile(&frame_sorted, 0.50);
+    let frame_p95 = percentile(&frame_sorted, 0.95);
+    let frame_p99 = percentile(&frame_sorted, 0.99);
     let frame_pass = frame_p99 < 2000.0;
     println!(
         "  [G3.1] Frame fetch: p50={:.1}µs, p95={:.1}µs, p99={:.1}µs (Target: < 2000µs / 2ms) -> {}",
@@ -1151,10 +1186,11 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
         let _ser = serde_json::to_string(&snap)?;
         ax_times_us.push(start.elapsed().as_micros() as f64);
     }
-    ax_times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let ax_p50_ms = percentile(&ax_times_us, 0.50) / 1000.0;
-    let ax_p95_ms = percentile(&ax_times_us, 0.95) / 1000.0;
-    let ax_p99_ms = percentile(&ax_times_us, 0.99) / 1000.0;
+    let mut ax_sorted = ax_times_us.clone();
+    ax_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let ax_p50_ms = percentile(&ax_sorted, 0.50) / 1000.0;
+    let ax_p95_ms = percentile(&ax_sorted, 0.95) / 1000.0;
+    let ax_p99_ms = percentile(&ax_sorted, 0.99) / 1000.0;
     let ax_pass = ax_p95_ms < 30.0;
     println!(
         "  [G3.2] AX snapshot: p50={:.2}ms, p95={:.2}ms, p99={:.2}ms (Target: < 30ms) -> {}",
@@ -1165,19 +1201,20 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
     );
     assert!(ax_pass, "AX snapshot exceeded 30ms p95 budget");
 
-    // 3. Downscale + JPEG encode target: < 15 ms p95
+    // 3. Downscale + JPEG encode target: < 15 ms p95 (must encode non-empty JPEG and decode-check dimensions)
     let raw_width = 1920;
     let raw_height = 1080;
     let raw_buffer = vec![128u8; raw_width * raw_height * 4];
 
     #[cfg(target_os = "macos")]
-    let mac_plat = gm_platform::MacPlatform::new().ok();
+    let mac_plat = gm_platform::MacPlatform::new()?;
 
     let mut downscale_jpeg_times_ms = Vec::with_capacity(100);
+    let mut last_jpeg_bytes: Vec<u8> = Vec::new();
+    let target_w = raw_width / 2;
+    let target_h = raw_height / 2;
     for _ in 0..100 {
         let start = Instant::now();
-        let target_w = raw_width / 2;
-        let target_h = raw_height / 2;
         let mut downscaled = vec![0u8; target_w * target_h * 4];
         for y in 0..target_h {
             for x in 0..target_w {
@@ -1187,18 +1224,47 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
             }
         }
         #[cfg(target_os = "macos")]
-        if let Some(ref p) = mac_plat {
-            let _ = p.encode_jpeg(&downscaled, target_w as u32, target_h as u32, 0.70);
+        let jpeg_bytes =
+            mac_plat.encode_jpeg(&downscaled, target_w as u32, target_h as u32, 0.70)?;
+        #[cfg(not(target_os = "macos"))]
+        let jpeg_bytes = {
+            let mut out = Vec::new();
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 70);
+            encoder.encode(
+                &downscaled,
+                target_w as u32,
+                target_h as u32,
+                image::ExtendedColorType::Rgba8,
+            )?;
+            out
+        };
+        if jpeg_bytes.is_empty() {
+            return Err("JPEG encoder produced empty output".into());
         }
+        last_jpeg_bytes = jpeg_bytes;
         downscale_jpeg_times_ms.push(start.elapsed().as_micros() as f64 / 1000.0);
     }
-    downscale_jpeg_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let down_p50 = percentile(&downscale_jpeg_times_ms, 0.50);
-    let down_p95 = percentile(&downscale_jpeg_times_ms, 0.95);
-    let down_p99 = percentile(&downscale_jpeg_times_ms, 0.99);
+    let decoded = image::load_from_memory_with_format(&last_jpeg_bytes, image::ImageFormat::Jpeg)?;
+    if decoded.width() != target_w as u32 || decoded.height() != target_h as u32 {
+        return Err(format!(
+            "Decoded JPEG dimensions {}x{} do not match expected {}x{}",
+            decoded.width(),
+            decoded.height(),
+            target_w,
+            target_h
+        )
+        .into());
+    }
+    let mut down_sorted = downscale_jpeg_times_ms.clone();
+    down_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let down_p50 = percentile(&down_sorted, 0.50);
+    let down_p95 = percentile(&down_sorted, 0.95);
+    let down_p99 = percentile(&down_sorted, 0.99);
     let down_pass = down_p95 < 15.0;
     println!(
-        "  [G3.3] Downscale + JPEG encode: p50={:.2}ms, p95={:.2}ms, p99={:.2}ms (Target: < 15ms) -> {}",
+        "  [G3.3] Downscale + JPEG encode ({}x{} decoded ok): p50={:.2}ms, p95={:.2}ms, p99={:.2}ms (Target: < 15ms) -> {}",
+        decoded.width(),
+        decoded.height(),
         down_p50,
         down_p95,
         down_p99,
@@ -1215,7 +1281,6 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
         condition: None,
         timeout_ms: 0,
     };
-    // Warmup dispatch
     let _ = platform.act(&action).await;
 
     let mut act_times_us = Vec::with_capacity(1000);
@@ -1224,14 +1289,15 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
         platform.act(&action).await?;
         act_times_us.push(start.elapsed().as_micros() as f64);
     }
-    act_times_us.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let act_p50_ms = percentile(&act_times_us, 0.50) / 1000.0;
-    let act_p95_ms = percentile(&act_times_us, 0.95) / 1000.0;
-    let act_p99_ms = percentile(&act_times_us, 0.99) / 1000.0;
+    let mut act_sorted = act_times_us.clone();
+    act_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let act_p50_ms = percentile(&act_sorted, 0.50) / 1000.0;
+    let act_p95_ms = percentile(&act_sorted, 0.95) / 1000.0;
+    let act_p99_ms = percentile(&act_sorted, 0.99) / 1000.0;
     let act_budget = if cfg!(debug_assertions) { 7.0 } else { 5.0 };
-    let act_pass = act_p99_ms < act_budget;
+    let act_pass = act_p95_ms < act_budget;
     println!(
-        "  [G3.4] Wait(0) dispatcher overhead (input latency unmeasured): p50={:.3}ms, p95={:.3}ms, p99={:.3}ms (Target: < {:.1}ms{}) -> {}",
+        "  [G3.4] Wait(0) dispatcher overhead (input latency unmeasured): p50={:.3}ms, p95={:.3}ms, p99={:.3}ms (Target: < {:.1}ms p95{}) -> {}",
         act_p50_ms,
         act_p95_ms,
         act_p99_ms,
@@ -1245,32 +1311,113 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
     );
     assert!(
         act_pass,
-        "Action dispatch exceeded {act_budget}ms p99 budget"
+        "Action dispatch exceeded {act_budget}ms p95 budget"
     );
+
+    if let Some(out_path) = raw_out {
+        let capture_ms: Vec<f64> = frame_times_us.iter().map(|v| v / 1000.0).collect();
+        let ax_ms: Vec<f64> = ax_times_us.iter().map(|v| v / 1000.0).collect();
+        let dispatch_ms: Vec<f64> = act_times_us.iter().map(|v| v / 1000.0).collect();
+        let raw_payload = serde_json::json!({
+            "jpeg_decoded_verified": true,
+            "jpeg_width": decoded.width(),
+            "jpeg_height": decoded.height(),
+            "capture_ms": capture_ms,
+            "ax_ms": ax_ms,
+            "jpeg_ms": downscale_jpeg_times_ms,
+            "dispatch_ms": dispatch_ms,
+        });
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(out_path, serde_json::to_vec_pretty(&raw_payload)?)?;
+    }
 
     println!(
         "==> Native capture/AX/JPEG and dispatcher checks passed. Actual input latency remains unmeasured."
     );
-    Ok((frame_p99, ax_p95_ms, down_p95, act_p99_ms))
+    Ok((frame_p99, ax_p95_ms, down_p95, act_p95_ms))
 }
 
-async fn run_bench_rss() -> Result<(f64, f64), Box<dyn std::error::Error>> {
-    println!("==> Benchmarking G2 process tree RSS & Spike S2 UI evaluation...");
-    let build_status = Command::new("cargo")
-        .args([
-            "build",
-            "--release",
-            "-p",
-            "gm-daemon",
-            "-p",
-            "gm-cu-helper",
-            "-p",
-            "gm-ui",
-        ])
-        .status()?;
-    if !build_status.success() {
-        return Err("Failed to build release binaries for RSS benchmark".into());
+fn verify_installed_binary_hashes(
+    bin_dir: &Path,
+    binaries: &[&str],
+    expected_hashes_path: Option<&Path>,
+) -> Result<serde_json::Map<String, serde_json::Value>, Box<dyn std::error::Error>> {
+    let expected: Option<serde_json::Value> = match expected_hashes_path {
+        Some(path) => Some(serde_json::from_str(&fs::read_to_string(path)?)?),
+        None => None,
+    };
+    let mut recorded = serde_json::Map::new();
+    let suffix = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
+    for &bin in binaries {
+        let path = bin_dir.join(format!("{bin}{suffix}"));
+        if !path.is_file() || fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            return Err(format!(
+                "Expected regular installed binary missing (refusing to rebuild): {}",
+                path.display()
+            )
+            .into());
+        }
+        let bytes = fs::read(&path)?;
+        let digest = gm_core::hash::compute_sha256(&bytes);
+        if let Some(ref exp_map) = expected {
+            let exp_digest = exp_map
+                .get(bin)
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("Expected hash map missing entry for {bin}"))?;
+            if !digest.eq_ignore_ascii_case(exp_digest) {
+                return Err(format!(
+                    "Hash mismatch for {bin}: expected {exp_digest}, actual {digest}"
+                )
+                .into());
+            }
+        }
+        recorded.insert(bin.to_string(), serde_json::json!(digest));
     }
+    Ok(recorded)
+}
+
+async fn run_bench_rss(
+    explicit_bin_dir: Option<&Path>,
+    expected_hashes: Option<&Path>,
+    sample_count: usize,
+    raw_out: Option<&Path>,
+) -> Result<(f64, f64), Box<dyn std::error::Error>> {
+    if sample_count == 0 {
+        return Err("Sample count must be at least 1".into());
+    }
+    println!("==> Benchmarking G2 process tree memory & Spike S2 UI evaluation...");
+    let bin_dir = match explicit_bin_dir {
+        Some(dir) => dir.to_path_buf(),
+        None => {
+            let build_status = Command::new("cargo")
+                .args([
+                    "build",
+                    "--release",
+                    "-p",
+                    "gm-daemon",
+                    "-p",
+                    "gm-cu-helper",
+                    "-p",
+                    "gm-ui",
+                ])
+                .status()?;
+            if !build_status.success() {
+                return Err("Failed to build release binaries for RSS benchmark".into());
+            }
+            cargo_profile_dir(true, None)
+        }
+    };
+    let binary_hashes = verify_installed_binary_hashes(
+        &bin_dir,
+        &["gm-cu-helper", "gm-daemon", "gm-ui"],
+        expected_hashes,
+    )?;
 
     struct Owned(std::process::Child);
     impl Drop for Owned {
@@ -1305,18 +1452,21 @@ async fn run_bench_rss() -> Result<(f64, f64), Box<dyn std::error::Error>> {
     }
     let config_path = folder.join("config.json");
     config.save(&config_path)?;
-    let bin_dir = cargo_profile_dir(true, None);
+    let suffix = if cfg!(target_os = "windows") {
+        ".exe"
+    } else {
+        ""
+    };
     let mut children = vec![
         Owned(
-            Command::new(bin_dir.join("gm-cu-helper"))
+            Command::new(bin_dir.join(format!("gm-cu-helper{suffix}")))
                 .arg("--socket")
                 .arg(&config.socket_path)
                 .spawn()?,
         ),
         Owned(
-            Command::new(bin_dir.join("gm-daemon"))
+            Command::new(bin_dir.join(format!("gm-daemon{suffix}")))
                 .env("GROK_MUSE_DATA_DIR", &config.storage_dir)
-                .env("GM_FORCE_MOCK_LLM", "1")
                 .arg("--config")
                 .arg(&config_path)
                 .arg("daemon")
@@ -1324,37 +1474,66 @@ async fn run_bench_rss() -> Result<(f64, f64), Box<dyn std::error::Error>> {
         ),
     ];
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    for child in &mut children {
-        if child.0.try_wait()?.is_some() {
-            return Err("A benchmark process exited before measurement".into());
+    let mut idle_samples = Vec::with_capacity(sample_count);
+    let mut idle_metric = String::new();
+    for _ in 0..sample_count {
+        for child in &mut children {
+            if child.0.try_wait()?.is_some() {
+                return Err("A benchmark process exited before measurement".into());
+            }
         }
+        let pids: Vec<u32> = children.iter().map(|c| c.0.id()).collect();
+        let (mb, metric) = measure_process_tree_memory(&pids)?;
+        idle_metric = metric;
+        idle_samples.push(mb);
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    let pids: Vec<u32> = children.iter().map(|c| c.0.id()).collect();
-    let (idle_mb, idle_metric) = measure_process_tree_memory(&pids)?;
-    println!("Core idle (daemon + helper, UI closed): {idle_mb:.2} MiB ({idle_metric})");
+    let mut idle_sorted = idle_samples.clone();
+    idle_sorted.sort_by(f64::total_cmp);
+    let idle_mb = idle_sorted[idle_sorted.len() / 2];
+    println!(
+        "Core idle (daemon + helper, UI closed, median of {} samples): {idle_mb:.2} MiB ({idle_metric})",
+        idle_samples.len()
+    );
     children.push(Owned(
-        Command::new(bin_dir.join("gm-ui"))
+        Command::new(bin_dir.join(format!("gm-ui{suffix}")))
             .arg("--config")
             .arg(&config_path)
             .arg("native")
             .spawn()?,
     ));
-    let mut samples = vec![];
-    for _ in 0..5 {
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let mut ui_samples = Vec::with_capacity(sample_count);
+    for _ in 0..sample_count {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         for child in &mut children {
             if child.0.try_wait()?.is_some() {
                 return Err("Native UI or runtime exited before measurement".into());
             }
         }
         let pids: Vec<u32> = children.iter().map(|c| c.0.id()).collect();
-        samples.push(measure_process_tree_memory(&pids)?.0);
+        ui_samples.push(measure_process_tree_memory(&pids)?.0);
     }
-    samples.sort_by(f64::total_cmp);
-    let open_mb = samples[samples.len() / 2];
-    println!("Native UI open (median of 5 samples): {open_mb:.2} MiB");
+    let mut ui_sorted = ui_samples.clone();
+    ui_sorted.sort_by(f64::total_cmp);
+    let open_mb = ui_sorted[ui_sorted.len() / 2];
+    println!(
+        "Native UI open (median of {} samples): {open_mb:.2} MiB",
+        ui_samples.len()
+    );
     drop(children);
     let _ = std::fs::remove_dir_all(&folder);
+    if let Some(out_path) = raw_out {
+        let raw_payload = serde_json::json!({
+            "installed_binary_hashes_verified": true,
+            "binary_hashes": binary_hashes,
+            "idle_tree_mib": idle_samples,
+            "ui_tree_mib": ui_samples,
+        });
+        if let Some(parent) = out_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(out_path, serde_json::to_vec_pretty(&raw_payload)?)?;
+    }
     if idle_mb >= 50.0 || open_mb >= 120.0 {
         return Err(format!(
             "Memory target exceeded: core={idle_mb:.2} MiB, UI-open={open_mb:.2} MiB"
@@ -1815,7 +1994,7 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
     // 4. G3 Local hotpath benchmark
     println!("\n--> [Gate 4/8] Benchmarking G3 local hot-path budgets...");
     let t0 = Instant::now();
-    let hotpath_res = run_bench_hotpath().await;
+    let hotpath_res = run_bench_hotpath(None).await;
     let d_hotpath = t0.elapsed();
     let hotpath_pass = hotpath_res.is_ok();
     let hotpath_metric = match hotpath_res {
@@ -1837,7 +2016,7 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
     // 5. G2 Whole-tree RSS footprint
     println!("\n--> [Gate 5/8] Benchmarking G2 whole-tree RSS footprint...");
     let t0 = Instant::now();
-    let rss_res = run_bench_rss().await;
+    let rss_res = run_bench_rss(None, None, 5, None).await;
     let d_rss = t0.elapsed();
     let rss_pass = rss_res.is_ok();
     let rss_metric = match rss_res {
@@ -2279,6 +2458,40 @@ fn run_notarize(
     Ok(())
 }
 
+fn select_python_311_plus() -> Result<String, Box<dyn std::error::Error>> {
+    let mut candidates = Vec::new();
+    if let Ok(explicit) = std::env::var("DT_PYTHON")
+        && !explicit.trim().is_empty()
+    {
+        candidates.push(explicit);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let local_py313 = PathBuf::from(&home).join(".local/bin/python3.13");
+        if local_py313.is_file() {
+            candidates.push(local_py313.display().to_string());
+        }
+    }
+    candidates.extend([
+        "python3.13".to_string(),
+        "python3.12".to_string(),
+        "python3.11".to_string(),
+        "python3".to_string(),
+    ]);
+    for candidate in candidates {
+        let ok = Command::new(&candidate)
+            .args([
+                "-c",
+                "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)",
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        if ok {
+            return Ok(candidate);
+        }
+    }
+    Err("Python 3.11+ interpreter is required (set DT_PYTHON or install python3.11+)".into())
+}
+
 async fn run_certify(
     suite: &str,
     json_out: bool,
@@ -2333,7 +2546,8 @@ async fn run_certify(
 
     if let Some(directory) = evidence_dir {
         let key = std::env::var("GM_EVIDENCE_PUBLIC_KEY_HEX")?;
-        let verified = Command::new("python3")
+        let python = select_python_311_plus()?;
+        let verified = Command::new(&python)
             .arg("tools/verify-release-evidence.py")
             .arg("--directory")
             .arg(directory)

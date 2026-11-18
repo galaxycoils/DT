@@ -108,12 +108,29 @@ export function App({ client }: { client: DtV1Client }) {
 
   useEffect(() => {
     if (!sessionChecked || !sessionUser) return;
-    const invalidated = () => setRefreshVersion((version) => version + 1);
+    const seenSequences = new Set<string>();
+    const invalidated = (ev?: Event) => {
+      const msg = ev as MessageEvent | undefined;
+      if (msg?.lastEventId) {
+        if (seenSequences.has(msg.lastEventId)) return;
+        seenSequences.add(msg.lastEventId);
+      }
+      setRefreshVersion((version) => version + 1);
+    };
     const events = new EventSource(client.eventsUrl(), { withCredentials: true });
-    for (const name of ["DIRECT_MESSAGE_ADDED", "STATE_INVALIDATED", "TASK_UPDATED", "ROUTINE_UPDATED", "ROUTINE_QUEUED"]) {
+    for (const name of [
+      "DIRECT_MESSAGE_ADDED",
+      "STATE_INVALIDATED",
+      "TASK_UPDATED",
+      "ROUTINE_UPDATED",
+      "ROUTINE_QUEUED",
+      "BOT_UPDATED",
+      "CHANNEL_UPDATED",
+      "RESYNC_REQUIRED",
+    ]) {
       events.addEventListener(name, invalidated);
     }
-    events.addEventListener("open", invalidated);
+    events.addEventListener("open", () => invalidated());
     return () => events.close();
   }, [client, sessionChecked, sessionUser, workspaceId]);
 

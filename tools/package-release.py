@@ -8,16 +8,19 @@ import pathlib
 import platform
 import plistlib
 import shutil
+import struct
 import subprocess
-import tarfile
+import sys
 import tempfile
+import tomllib
 
-try:
-    import tomllib
-except ImportError:  # Python < 3.11
-    tomllib = None
-
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+INVENTORY_PATH = ROOT / 'docs/release/release-inventory.json'
 BINARIES = ('dt', 'gm', 'dt-doctor', 'gm-daemon', 'gm-cu-helper', 'gm-ui')
+
+
+def load_inventory():
+    return json.loads(INVENTORY_PATH.read_text())
 
 
 def run(*args):
@@ -26,26 +29,69 @@ def run(*args):
 
 def native_target():
     os_name = dict(Darwin='macos', Linux='linux', Windows='windows')[platform.system()]
-    arch = dict(arm64='aarch64', aarch64='aarch64', AMD64='x86_64', x86_64='x86_64')[platform.machine()]
+    arch = dict(arm64='aarch64', aarch64='aarch64', AMD64='x86_64', x86_64='x86_64', ARM64='aarch64')[platform.machine()]
     return os_name, arch
 
 
 def archive_name(version, os_name, arch):
-    if (os_name, arch) not in {('macos', 'aarch64'), ('macos', 'x86_64'), ('linux', 'x86_64'), ('windows', 'x86_64')}:
-        raise ValueError('Unsupported release target')
     if not version or any(c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-+' for c in version):
         raise ValueError('Invalid version')
-    if os_name == 'macos':
-        return f'DT-{version}-macos-{arch}.dmg'
+    inventory = load_inventory()
+    for target in inventory['targets']:
+        if target['os'] == os_name and target['architecture'] == arch:
+            return target['asset_template'].format(version=version)
+    raise ValueError('Unsupported release target')
+
+
+def verify_binary_architecture(path: pathlib.Path, os_name: str, arch: str):
+    """Fail closed if an executable's machine header does not match the target OS/architecture."""
+    header = path.read_bytes()[:4096]
     if os_name == 'windows':
-        return f'DT-{version}-windows-x86_64-setup.exe'
-    return f'dt_{version}_amd64.deb'
+        if len(header) < 64 or header[:2] != b'MZ':
+            raise ValueError(f'Not a valid Windows PE executable: {path}')
+        pe_offset = struct.unpack_from('<I', header, 0x3C)[0]
+        if pe_offset + 6 > len(header):
+            header = path.read_bytes()[:pe_offset + 6]
+        if header[pe_offset:pe_offset + 4] != b'PE\x00\x00':
+            raise ValueError(f'Missing PE header in {path}')
+        machine = struct.unpack_from('<H', header, pe_offset + 4)[0]
+        expected = {'x86_64': 0x8664, 'aarch64': 0xAA64}[arch]
+        if machine != expected:
+            raise ValueError(f'Wrong PE architecture for {path}: expected 0x{expected:04x} ({arch}), got 0x{machine:04x}')
+    elif os_name == 'linux':
+        if len(header) < 20 or header[:4] != b'\x7fELF':
+            raise ValueError(f'Not a valid Linux ELF executable: {path}')
+        e_machine = struct.unpack_from('<H', header, 18)[0]
+        expected = {'x86_64': 62, 'aarch64': 183}[arch]
+        if e_machine != expected:
+            raise ValueError(f'Wrong ELF architecture for {path}: expected {expected} ({arch}), got {e_machine}')
+    elif os_name == 'macos':
+        if len(header) < 8:
+            raise ValueError(f'Truncated Mach-O executable: {path}')
+        magic = struct.unpack_from('<I', header, 0)[0]
+        cputype = struct.unpack_from('<I', header, 4)[0]
+        if magic in (0xCAFEBABE, 0xBEBAFECA):
+            # Fat binary: check via lipo if available on macOS
+            if shutil.which('lipo'):
+                archs = subprocess.check_output(['lipo', '-archs', str(path)], text=True).split()
+                expected = {'aarch64': 'arm64', 'x86_64': 'x86_64'}[arch]
+                if expected not in archs:
+                    raise ValueError(f'Wrong Mach-O fat architecture for {path}: expected {expected}, got {archs}')
+                return
+        elif magic in (0xFEEDFACF, 0xCFFAEDFE):
+            if magic == 0xCFFAEDFE:
+                cputype = struct.unpack_from('>I', header, 4)[0]
+            expected = {'x86_64': 0x01000007, 'aarch64': 0x0100000C}[arch]
+            if cputype != expected:
+                raise ValueError(f'Wrong Mach-O architecture for {path}: expected 0x{expected:08x} ({arch}), got 0x{cputype:08x}')
+        else:
+            raise ValueError(f'Not a valid Mach-O executable: {path}')
 
 
 def write_sbom(output_dir: pathlib.Path, name: str, version: str, commit: str, os_name: str, arch: str):
     cargo_lock = pathlib.Path('Cargo.lock')
     packages = []
-    if cargo_lock.is_file() and tomllib is not None:
+    if cargo_lock.is_file():
         data = tomllib.loads(cargo_lock.read_text())
         for pkg in data.get('package', []):
             packages.append(dict(name=pkg.get('name'), version=pkg.get('version'), source=pkg.get('source', 'workspace')))
@@ -67,12 +113,15 @@ def main():
     parser.add_argument('--version', required=True)
     parser.add_argument('--bin-dir', type=pathlib.Path, default=pathlib.Path('target/release'))
     parser.add_argument('--output-dir', type=pathlib.Path, required=True)
+    parser.add_argument('--target-arch', default=None, help='Override target architecture (x86_64 or aarch64)')
     parser.add_argument('--apple-identity', default=os.environ.get('GM_APPLE_SIGNING_IDENTITY'))
     parser.add_argument('--apple-installer-identity', default=os.environ.get('DT_APPLE_INSTALLER_IDENTITY') or os.environ.get('GM_APPLE_INSTALLER_IDENTITY'))
     parser.add_argument('--notary-profile', default=os.environ.get('GM_APPLE_NOTARY_PROFILE'))
     parser.add_argument('--windows-thumbprint', default=os.environ.get('GM_WINDOWS_CERT_THUMBPRINT'))
     args = parser.parse_args()
     os_name, arch = native_target()
+    if args.target_arch:
+        arch = args.target_arch
     name = archive_name(args.version, os_name, arch)
     commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all']).strip():
@@ -81,6 +130,8 @@ def main():
     inputs = [args.bin_dir / (binary + suffix) for binary in BINARIES]
     if any(not path.is_file() or path.is_symlink() for path in inputs):
         parser.error('All required regular native binaries (dt, gm, dt-doctor, gm-daemon, gm-cu-helper, gm-ui) must exist before packaging')
+    for path in inputs:
+        verify_binary_architecture(path, os_name, arch)
     if os_name == 'macos' and (not args.apple_identity or args.apple_identity == '-' or not args.apple_installer_identity or not args.notary_profile):
         parser.error('Developer ID Application identity, Developer ID Installer identity, and notarization profile are required')
     if os_name == 'windows' and not args.windows_thumbprint:
@@ -122,6 +173,7 @@ def main():
                             CFBundleVersion=args.version, CFBundleShortVersionString=args.version, CFBundlePackageType='APPL',
                             NSAccessibilityUsageDescription='Inspect and control explicitly authorized desktop targets.',
                             NSScreenCaptureUsageDescription='Observe explicitly authorized desktop tasks.',
+                            NSMicrophoneUsageDescription='Capture consented microphone audio for voice transcription and meeting notes.',
                             NSCalendarsUsageDescription='Read calendar events for opted-in routines.',
                             NSRemindersUsageDescription='Read reminders for opted-in routines.')
                 if app_name == 'DTCUHelper':
@@ -153,18 +205,21 @@ def main():
                 run('signtool.exe', 'sign', '/sha1', args.windows_thumbprint, '/fd', 'SHA256', '/tr', 'http://timestamp.digicert.com', '/td', 'SHA256', target)
                 run('signtool.exe', 'verify', '/pa', '/all', target)
             makensis = shutil.which('makensis.exe') or shutil.which('makensis') or r'C:\Program Files (x86)\NSIS\makensis.exe'
-            run(makensis, f'/DVERSION={args.version}', f'/DBIN_DIR={destination}', f'/DSRC_ROOT={pathlib.Path(".").resolve()}', f'/DOUT_FILE={output.resolve()}', 'tools/installers/windows/dt-installer.nsi')
+            uninst_sign_cmd = f'signtool.exe sign /sha1 {args.windows_thumbprint} /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 %1'
+            run(makensis, f'/DVERSION={args.version}', f'/DBIN_DIR={destination}', f'/DSRC_ROOT={pathlib.Path(".").resolve()}', f'/DOUT_FILE={output.resolve()}', f'/DUNINST_SIGN_CMD={uninst_sign_cmd}', 'tools/installers/windows/dt-installer.nsi')
             run('signtool.exe', 'sign', '/sha1', args.windows_thumbprint, '/fd', 'SHA256', '/tr', 'http://timestamp.digicert.com', '/td', 'SHA256', output)
             run('signtool.exe', 'verify', '/pa', '/all', output)
         else:
-            dependencies = []
-            for binary in BINARIES:
-                result = subprocess.run(['ldd', str(destination / binary)], capture_output=True, text=True, check=True)
-                if 'not found' in result.stdout:
-                    raise RuntimeError('Unresolved native dependencies')
-                dependencies.append(binary + '\n' + result.stdout)
-            (root / 'runtime-dependencies.txt').write_text('\n'.join(dependencies))
-            run('bash', 'tools/installers/linux/build-deb.sh', args.version, str(destination), str(output))
+            deb_arch = 'arm64' if arch == 'aarch64' else 'amd64'
+            if arch == native_target()[1]:
+                dependencies = []
+                for binary in BINARIES:
+                    result = subprocess.run(['ldd', str(destination / binary)], capture_output=True, text=True, check=True)
+                    if 'not found' in result.stdout:
+                        raise RuntimeError('Unresolved native dependencies')
+                    dependencies.append(binary + '\n' + result.stdout)
+                (root / 'runtime-dependencies.txt').write_text('\n'.join(dependencies))
+            run('bash', 'tools/installers/linux/build-deb.sh', args.version, str(destination), str(output), deb_arch)
             run('dpkg-deb', '-I', str(output))
 
     with output.open('rb') as stream:

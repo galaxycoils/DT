@@ -10,6 +10,9 @@ Name "DT ${VERSION}"
 OutFile "${OUT_FILE}"
 InstallDir "$PROGRAMFILES64\DT"
 RequestExecutionLevel admin
+!ifdef UNINST_SIGN_CMD
+  !uninstfinalize '${UNINST_SIGN_CMD}'
+!endif
 
 !define MUI_ABORTWARNING
 !insertmacro MUI_PAGE_WELCOME

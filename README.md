@@ -1,9 +1,9 @@
-# DT Hybrid Agent (`v1.0.0` — Release Candidate Preparation)
+# DT Hybrid Agent (`v1.0.1` — Release Remediation & Cross-OS Packaging)
 
-> **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native desktop (macOS, Windows, Ubuntu), React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
+> **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native desktop (macOS, Windows x64/ARM64, Ubuntu x64/ARM64), React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
 > Built in Rust with native desktop rendering, macOS ScreenCaptureKit/Accessibility, Windows UIA/WGC, Linux X11/AT-SPI & Wayland Portal/PipeWire, local `llama.cpp` MTMD / DirectML VLM & managed Whisper/TTS runtimes, and multi-provider hybrid LLM routing (`ChatGPT OAuth`, `OpenAI API`, `Kilo Gateway`, `OpenRouter`, `Nous Portal`, `Meta Muse`, `xAI Grok`, `Custom Responses/ChatCompletions`, and `Local VLM`).
 
-Target repository: `galaxycoils/DT` (preserving compatibility with `gm` CLI alias, crate names, Keychain namespaces, bundle IDs, OAuth client registration, and legacy `GrokMuse`/`grok-muse` user data via `dt doctor` migration). Full v1.0.0 certification remains gated on platform signing identities, multi-OS native hardware execution, live provider/connector accounts, and the 7-day proactive soak as recorded in [coverage inventory](docs/release/coverage-inventory.md) and [release readiness](docs/release-readiness.md).
+Target repository: `galaxycoils/DT` (preserving compatibility with `gm` CLI alias, crate names, Keychain namespaces, bundle IDs, OAuth client registration, and legacy `GrokMuse`/`grok-muse` user data via `dt doctor` migration). Full 8-target native certification remains gated on platform signing identities, multi-OS native hardware execution, live provider/connector accounts, and the 7-day proactive soak as recorded in [coverage inventory](docs/release/coverage-inventory.md), [release readiness](docs/release-readiness.md), and [operations guide](docs/OPERATIONS.md).
 
 ---
 

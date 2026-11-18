@@ -7,6 +7,21 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
+pub const MICROS_PER_USD: f64 = 1_000_000.0;
+
+pub fn usd_to_micros(usd: f64) -> Result<u64> {
+    if !usd.is_finite() || usd < 0.0 || usd > 1_000_000.0 {
+        return Err(GmError::BudgetExceeded(
+            "Invalid USD amount for microdollar conversion".into(),
+        ));
+    }
+    Ok((usd * MICROS_PER_USD).round() as u64)
+}
+
+pub fn micros_to_usd(micros: u64) -> f64 {
+    (micros as f64) / MICROS_PER_USD
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct UsageBucket {
     pub key: String,
@@ -176,6 +191,7 @@ impl BudgetManager {
                 "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS usage_v1 (
                 id TEXT PRIMARY KEY, day TEXT NOT NULL, amount REAL NOT NULL CHECK(amount >= 0),
+                amount_micros INTEGER NOT NULL DEFAULT 0 CHECK(amount_micros >= 0),
                 settled INTEGER NOT NULL DEFAULT 0,
                 bot_id TEXT NOT NULL DEFAULT 'muse',
                 source TEXT NOT NULL DEFAULT 'chat');
@@ -186,6 +202,7 @@ impl BudgetManager {
         // Idempotently migrate older usage_v1 schemas before creating attributed index.
         let mut has_bot_id = false;
         let mut has_source = false;
+        let mut has_amount_micros = false;
         {
             let mut stmt = connection
                 .prepare("PRAGMA table_info(usage_v1)")
@@ -197,6 +214,8 @@ impl BudgetManager {
                     has_bot_id = true;
                 } else if col == "source" {
                     has_source = true;
+                } else if col == "amount_micros" {
+                    has_amount_micros = true;
                 }
             }
         }
@@ -216,6 +235,20 @@ impl BudgetManager {
                 )
                 .map_err(db_error)?;
         }
+        if !has_amount_micros {
+            connection
+                .execute(
+                    "ALTER TABLE usage_v1 ADD COLUMN amount_micros INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )
+                .map_err(db_error)?;
+        }
+        connection
+            .execute(
+                "UPDATE usage_v1 SET amount_micros = CAST(ROUND(amount * 1000000.0) AS INTEGER) WHERE amount_micros = 0 AND amount > 0",
+                [],
+            )
+            .map_err(db_error)?;
         connection
             .execute(
                 "CREATE INDEX IF NOT EXISTS usage_v1_bot_day ON usage_v1(day, bot_id)",
@@ -232,26 +265,32 @@ impl BudgetManager {
     }
 
     fn persisted_total(&self) -> Result<f64> {
+        Ok(micros_to_usd(self.persisted_total_micros()?))
+    }
+
+    pub fn persisted_total_micros(&self) -> Result<u64> {
         let Some(store) = &self.store else {
-            return Ok(0.0);
+            return Ok(0);
         };
-        store
+        let raw: i64 = store
             .lock()
             .query_row(
-                "SELECT coalesce(sum(amount),0) FROM usage_v1 WHERE day=?1",
+                "SELECT coalesce(sum(amount_micros),0) FROM usage_v1 WHERE day=?1",
                 [chrono::Utc::now().date_naive().to_string()],
                 |row| row.get(0),
             )
-            .map_err(db_error)
+            .map_err(db_error)?;
+        Ok(raw.max(0) as u64)
     }
 
     fn persist_settlement(&self, id: &str, actual: f64) -> Result<()> {
+        let actual_micros = usd_to_micros(actual)?;
         if let Some(store) = &self.store {
             let changed = store
                 .lock()
                 .execute(
-                    "UPDATE usage_v1 SET amount=?1, settled=1 WHERE id=?2 AND settled=0",
-                    params![actual, id],
+                    "UPDATE usage_v1 SET amount=?1, amount_micros=?2, settled=1 WHERE id=?3 AND settled=0",
+                    params![actual, actual_micros as i64, id],
                 )
                 .map_err(db_error)?;
             if changed != 1 {
@@ -304,27 +343,29 @@ impl BudgetManager {
                 "Request would exceed the available daily or task budget".into(),
             ));
         }
+        let amount_micros = usd_to_micros(amount)?;
+        let cap_micros = usd_to_micros(self.config.daily_spend_cap_usd)?;
         let id = uuid::Uuid::new_v4().to_string();
         if let Some(store) = &self.store {
             let mut connection = store.lock();
             let tx = connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(db_error)?;
-            let total: f64 = tx
+            let total_micros: i64 = tx
                 .query_row(
-                    "SELECT coalesce(sum(amount),0) FROM usage_v1 WHERE day=?1",
+                    "SELECT coalesce(sum(amount_micros),0) FROM usage_v1 WHERE day=?1",
                     [day.to_string()],
                     |row| row.get(0),
                 )
                 .map_err(db_error)?;
-            if total + amount > self.config.daily_spend_cap_usd {
+            if (total_micros.max(0) as u64).saturating_add(amount_micros) > cap_micros {
                 return Err(GmError::BudgetExceeded(
                     "Persistent daily budget is exhausted".into(),
                 ));
             }
             tx.execute(
-                "INSERT INTO usage_v1(id,day,amount,bot_id,source) VALUES (?1,?2,?3,?4,?5)",
-                params![id, day.to_string(), amount, bot_clean, source_clean],
+                "INSERT INTO usage_v1(id,day,amount,amount_micros,bot_id,source) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![id, day.to_string(), amount, amount_micros as i64, bot_clean, source_clean],
             )
             .map_err(db_error)?;
             tx.commit().map_err(db_error)?;
@@ -699,6 +740,54 @@ mod persistence_tests {
         drop(mgr);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn bud01_concurrent_admission_microdollars_crash_and_reconciliation() {
+        let dir = std::env::temp_dir().join(format!("gm-bud01-{}", uuid::Uuid::new_v4()));
+        let cfg = BudgetConfig {
+            daily_spend_cap_usd: 1.00,
+            per_job_spend_cap_usd: 1.00,
+            max_daily_notifications: 3,
+        };
+        let p1 = BudgetManager::open(cfg.clone(), &dir).unwrap();
+        let p2 = BudgetManager::open(cfg.clone(), &dir).unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let b1 = barrier.clone();
+        let b2 = barrier.clone();
+        let h1 = std::thread::spawn(move || {
+            b1.wait();
+            p1.reserve(0.70).map(|r| {
+                // Simulate caller killed after provider accepts: leak reservation without drop/release.
+                std::mem::forget(r);
+                true
+            })
+        });
+        let h2 = std::thread::spawn(move || {
+            b2.wait();
+            p2.reserve(0.70).map(|r| {
+                std::mem::forget(r);
+                true
+            })
+        });
+        let r1 = h1.join().unwrap();
+        let r2 = h2.join().unwrap();
+        assert_eq!(
+            usize::from(r1.is_ok()) + usize::from(r2.is_ok()),
+            1,
+            "Exactly one $0.70 request may succeed against $1.00"
+        );
+
+        // Restart and retry $0.70 -> must fail because $0.70 remains accounted in microdollars.
+        let restarted = BudgetManager::open(cfg, &dir).unwrap();
+        assert_eq!(restarted.persisted_total_micros().unwrap(), 700_000);
+        assert!(restarted.reserve(0.70).is_err());
+        // Remaining $0.30 still allows a $0.25 request and reconciles receipt to $0.18.
+        let r3 = restarted.reserve(0.25).unwrap();
+        r3.settle(0.18).unwrap();
+        assert_eq!(restarted.persisted_total_micros().unwrap(), 880_000);
+        drop(restarted);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Release-wide US$100 inference budget ledger (PLAN §1.5).
@@ -766,13 +855,16 @@ impl Default for ReleaseBudgetLedger {
             "macos-aarch64",
             "macos-x86_64",
             "windows-x86_64",
+            "windows-aarch64",
             "linux-x86_64-x11",
             "linux-x86_64-wayland",
+            "linux-aarch64-x11",
+            "linux-aarch64-wayland",
         ] {
             allocations.insert(
                 target.to_string(),
                 ReleaseAllocation {
-                    allocated_usd: 15.0,
+                    allocated_usd: 9.375,
                     reserved_usd: 0.0,
                     spent_usd: 0.0,
                     uncertain_reserved_usd: 0.0,
@@ -790,14 +882,14 @@ impl Default for ReleaseBudgetLedger {
         );
         Self {
             schema: 1,
-            release_version: "1.0.0".to_string(),
+            release_version: "1.0.1".to_string(),
             total_cap_usd: 100.0,
             currency: "USD".to_string(),
             allocations,
             transfers: Vec::new(),
             entries: Vec::new(),
             notes:
-                "US$100 release-wide inference cap: US$15 per desktop target + US$25 shared tests."
+                "US$100 release-wide inference cap: US$9.375 per desktop target (8 targets) + US$25 shared tests."
                     .to_string(),
         }
     }
@@ -990,6 +1082,7 @@ mod release_ledger_tests {
     fn release_ledger_enforces_cap_unknown_bounds_uncertain_retention_and_transfers() {
         let mut ledger = ReleaseBudgetLedger::default();
         assert_eq!(ledger.total_cap_usd, 100.0);
+        assert!((ledger.allocations["macos-aarch64"].allocated_usd - 9.375).abs() < 1e-9);
         // Unknown upper cost is blocked.
         assert!(
             ledger
@@ -998,20 +1091,20 @@ mod release_ledger_tests {
         );
         // Bounded reserve succeeds and reduces remaining balance.
         let r1 = ledger
-            .reserve_bounded("macos-aarch64", "cli-claude", Some(10.0))
+            .reserve_bounded("macos-aarch64", "cli-claude", Some(6.0))
             .unwrap();
         assert!(
             ledger
-                .reserve_bounded("macos-aarch64", "cli-grok", Some(6.0))
+                .reserve_bounded("macos-aarch64", "cli-grok", Some(4.0))
                 .is_err()
         );
         // Uncertain charge remains reserved when provider usage is unavailable.
         ledger.reconcile(&r1, None).unwrap();
         assert_eq!(
             ledger.allocations["macos-aarch64"].uncertain_reserved_usd,
-            10.0
+            6.0
         );
-        assert_eq!(ledger.allocations["macos-aarch64"].remaining_usd(), 5.0);
+        assert!((ledger.allocations["macos-aarch64"].remaining_usd() - 3.375).abs() < 1e-9);
 
         // Record transfer from shared-tests to macos-aarch64.
         ledger
@@ -1027,6 +1120,6 @@ mod release_ledger_tests {
             .unwrap();
         ledger.reconcile(&r2, Some(2.5)).unwrap();
         assert!((ledger.allocations["macos-aarch64"].spent_usd - 2.5).abs() < 1e-9);
-        assert!((ledger.allocations["macos-aarch64"].remaining_usd() - 7.5).abs() < 1e-9);
+        assert!((ledger.allocations["macos-aarch64"].remaining_usd() - 5.875).abs() < 1e-9);
     }
 }

@@ -43,7 +43,7 @@ impl HealthReport {
 pub fn run_health_diagnostics(config: &GmConfig) -> HealthReport {
     let mut checks = Vec::new();
 
-    // 1. Storage directory integrity
+    // 1. Storage directory integrity (omit identifying absolute paths in exported reports)
     let storage_dir = &config.storage_dir;
     if storage_dir.exists() {
         let probe_file = storage_dir.join(format!(".diag-probe-{}", uuid::Uuid::new_v4()));
@@ -54,7 +54,7 @@ pub fn run_health_diagnostics(config: &GmConfig) -> HealthReport {
                     name: "Storage Directory".into(),
                     category: "Filesystem".into(),
                     status: DiagnosticStatus::Ok,
-                    message: format!("Storage directory at {:?} is writable", storage_dir),
+                    message: "Configured storage directory is writable".into(),
                     remediation: None,
                 });
             }
@@ -63,10 +63,7 @@ pub fn run_health_diagnostics(config: &GmConfig) -> HealthReport {
                     name: "Storage Directory".into(),
                     category: "Filesystem".into(),
                     status: DiagnosticStatus::Error,
-                    message: format!(
-                        "Storage directory at {:?} is not writable: {e}",
-                        storage_dir
-                    ),
+                    message: format!("Configured storage directory is not writable: {e}"),
                     remediation: Some("Check filesystem permissions for the storage path".into()),
                 });
             }
@@ -76,10 +73,8 @@ pub fn run_health_diagnostics(config: &GmConfig) -> HealthReport {
             name: "Storage Directory".into(),
             category: "Filesystem".into(),
             status: DiagnosticStatus::Warning,
-            message: format!(
-                "Storage directory at {:?} does not exist yet (will be created on startup)",
-                storage_dir
-            ),
+            message: "Configured storage directory does not exist yet (will be created on startup)"
+                .into(),
             remediation: None,
         });
     }
@@ -192,12 +187,9 @@ pub fn run_health_diagnostics(config: &GmConfig) -> HealthReport {
             DiagnosticStatus::Warning
         },
         message: if socket_exists {
-            format!("Helper socket present at {:?}", socket_path)
+            "Helper IPC endpoint is present".into()
         } else {
-            format!(
-                "Helper socket not currently active at {:?} (daemon auto-spawns it on demand)",
-                socket_path
-            )
+            "Helper IPC endpoint is not currently active (daemon auto-spawns it on demand)".into()
         },
         remediation: None,
     });
@@ -237,15 +229,96 @@ pub struct SupportExportBundle {
     pub sha256_fingerprint: String,
 }
 
-/// Create an explicitly approved, redacted diagnostic support export scrubbing all secrets.
-pub fn export_support_bundle(config: &GmConfig, output_path: &Path) -> Result<SupportExportBundle> {
-    let health = run_health_diagnostics(config);
+fn allowlisted_config_summary(config: &GmConfig) -> serde_json::Value {
+    let profiles: Vec<serde_json::Value> = config
+        .providers
+        .profiles
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "preset": p.preset,
+                "protocol": p.protocol,
+                "auth_mode": p.auth_mode,
+                "selected_model": p.selected_model,
+                "allow_screenshot_egress": p.allow_screenshot_egress,
+                "connection_state": p.connection_state,
+                "verification_status": p.health.verification_status,
+                "catalog_status": p.health.catalog_status,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "providers": {
+            "workspace_default_profile_id": config.providers.workspace_default_profile_id,
+            "account_default_profile_id": config.providers.account_default_profile_id,
+            "allow_screenshot_egress_meta": config.providers.allow_screenshot_egress_meta,
+            "allow_screenshot_egress_xai": config.providers.allow_screenshot_egress_xai,
+            "profiles": profiles,
+        },
+        "safety": {
+            "allow_host_desktop": config.safety.allow_host_desktop,
+            "allow_secret_injection": config.safety.allow_secret_injection,
+            "redact_secure_fields": config.safety.redact_secure_fields,
+            "blocklisted_apps_count": config.safety.blocklisted_apps.len(),
+            "user_active_pause_seconds": config.safety.user_active_pause_seconds,
+        },
+        "budget": {
+            "daily_spend_cap_usd": config.budget.daily_spend_cap_usd,
+            "per_job_spend_cap_usd": config.budget.per_job_spend_cap_usd,
+        },
+        "muse": {
+            "context_tokens": config.muse.context_tokens,
+            "heartbeat_interval_secs": config.muse.heartbeat_interval_secs,
+            "enable_desktop_patrol": config.muse.enable_desktop_patrol,
+        },
+        "ui": {
+            "theme": config.ui.theme,
+            "accent_mode": config.ui.accent_mode,
+            "computer_execution_mode": config.ui.computer_execution_mode,
+        },
+        "openbot": {
+            "companion_enabled": config.openbot.companion_enabled,
+            "max_handoff_depth": config.openbot.max_handoff_depth,
+        },
+    })
+}
 
-    // Initialize secret scrubber
+fn find_unredacted_reason(bytes: &[u8], forbidden_literals: &[(String, String)]) -> Option<String> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Some("non-utf8".into());
+    };
+    for (label, secret) in forbidden_literals {
+        if !secret.is_empty() && text.contains(secret) {
+            return Some(format!("literal:{label}"));
+        }
+    }
+    for prefix in ["sk-proj-", "sk-ant-", "ghp_", "gho_", "Bearer "] {
+        if text.contains(prefix) {
+            return Some(format!("prefix:{prefix}"));
+        }
+    }
+    for (idx, _) in text.match_indices("xai-") {
+        let rest = &text[idx..];
+        let token: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+            .collect();
+        if token != "xai-default" && token.len() >= 16 {
+            return Some("prefix:xai-".into());
+        }
+    }
+    None
+}
+
+/// Build an allowlisted, redacted support bundle preview in memory and verify the final serialized bytes.
+pub fn preview_support_bundle(config: &GmConfig) -> Result<SupportExportBundle> {
+    let mut health = run_health_diagnostics(config);
+
     let scrubber = SecretScrubber::new();
-    let mut secret_count = 0;
+    let mut secret_count = 0usize;
+    let mut forbidden_literals: Vec<(String, String)> = Vec::new();
 
-    // Register known environment secrets
     for (k, v) in std::env::vars() {
         let upper = k.to_uppercase();
         let is_sensitive_key = upper.ends_with("_KEY")
@@ -256,24 +329,41 @@ pub fn export_support_bundle(config: &GmConfig, output_path: &Path) -> Result<Su
             || upper.contains("API_KEY")
             || upper.contains("AUTH_TOKEN");
         if is_sensitive_key && !v.trim().is_empty() && v.len() >= 12 {
-            scrubber.register(format!("ENV_{upper}"), &v);
+            let label = format!("ENV_{upper}");
+            scrubber.register(&label, &v);
+            forbidden_literals.push((label, v));
             secret_count += 1;
         }
     }
 
-    // Sanitize config to JSON and scrub with SecretScrubber
-    let raw_config = serde_json::to_value(config)?;
-    let mut sanitized_config = scrubber.scrub_json(&raw_config);
-
-    // Hard-mask sensitive fields in config JSON object
-    if let serde_json::Value::Object(ref mut map) = sanitized_config
-        && let Some(serde_json::Value::Object(prov)) = map.get_mut("providers")
+    for path in [
+        &config.storage_dir,
+        &config.socket_path,
+        &config.daemon_socket_path,
+        &config.openbot.bots_dir,
+    ] {
+        let s = path.display().to_string();
+        if s.len() >= 6 && (s.contains('/') || s.contains('\\')) {
+            scrubber.register("PATH_LOCAL", &s);
+            forbidden_literals.push(("PATH_LOCAL".into(), s));
+        }
+    }
+    if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
+        && home.len() >= 4
     {
-        prov.insert("meta_api_key".into(), serde_json::json!("[REDACTED]"));
-        prov.insert("xai_api_key".into(), serde_json::json!("[REDACTED]"));
+        scrubber.register("HOME_DIR", &home);
+        forbidden_literals.push(("HOME_DIR".into(), home));
     }
 
-    // Assemble bundle without sha256 first
+    for check in &mut health.checks {
+        check.message = scrubber.scrub_str(&check.message);
+        if let Some(ref rem) = check.remediation {
+            check.remediation = Some(scrubber.scrub_str(rem));
+        }
+    }
+
+    let sanitized_config = scrubber.scrub_json(&allowlisted_config_summary(config));
+
     let mut bundle = SupportExportBundle {
         export_timestamp: Utc::now().to_rfc3339(),
         grok_muse_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -281,22 +371,40 @@ pub fn export_support_bundle(config: &GmConfig, output_path: &Path) -> Result<Su
         arch: std::env::consts::ARCH.to_string(),
         health,
         sanitized_config,
-        redaction_verified: true,
+        redaction_verified: false,
         scrubbed_secret_count: secret_count,
         sha256_fingerprint: String::new(),
     };
 
-    let serialized = serde_json::to_string_pretty(&bundle)?;
-    // Compute SHA-256 fingerprint
+    let candidate_bytes = serde_json::to_vec_pretty(&bundle)?;
+    if let Some(reason) = find_unredacted_reason(&candidate_bytes, &forbidden_literals) {
+        return Err(gm_core::error::GmError::SafetyViolation(format!(
+            "Support export byte verification detected an unredacted secret or identifying path ({reason})"
+        )));
+    }
+
+    bundle.redaction_verified = true;
+    let fingerprint_input = serde_json::to_string_pretty(&bundle)?;
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(serialized.as_bytes());
-    let hash_hex = hex::encode(hasher.finalize());
-    bundle.sha256_fingerprint = hash_hex;
+    hasher.update(fingerprint_input.as_bytes());
+    bundle.sha256_fingerprint = hex::encode(hasher.finalize());
 
     let final_bytes = serde_json::to_vec_pretty(&bundle)?;
-    gm_core::storage::atomic_write_private(output_path, &final_bytes)?;
+    if let Some(reason) = find_unredacted_reason(&final_bytes, &forbidden_literals) {
+        return Err(gm_core::error::GmError::SafetyViolation(format!(
+            "Support export final byte verification failed ({reason})"
+        )));
+    }
 
+    Ok(bundle)
+}
+
+/// Create an explicitly approved, redacted diagnostic support export scrubbing all secrets.
+pub fn export_support_bundle(config: &GmConfig, output_path: &Path) -> Result<SupportExportBundle> {
+    let bundle = preview_support_bundle(config)?;
+    let final_bytes = serde_json::to_vec_pretty(&bundle)?;
+    gm_core::storage::atomic_write_private(output_path, &final_bytes)?;
     Ok(bundle)
 }
 
@@ -320,16 +428,23 @@ mod tests {
     }
 
     #[test]
-    fn test_support_bundle_redaction_and_fingerprint() {
+    fn test_support_bundle_redaction_allowlist_and_fingerprint() {
         let dir = std::env::temp_dir().join(format!("gm-export-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let export_path = dir.join("support_bundle.json");
 
         unsafe {
             std::env::set_var("TEST_DUMMY_SECRET_KEY", "super-confidential-token-12345");
+            std::env::set_var("TEST_XAI_API_KEY", "xai-real-secret-token-99999");
         }
 
-        let mut config = GmConfig::default();
+        let mut config = GmConfig {
+            storage_dir: dir.clone(),
+            ..Default::default()
+        };
+        config.providers.profiles[0].account_id = Some("private-account-email@example.com".into());
+        config.providers.profiles[0].base_url = "https://user:pass@custom.example/v1?key=1".into();
+        config.providers.profiles[0].last_error = Some("raw error with sk-proj-secret123".into());
         config
             .safety
             .blocklisted_apps
@@ -342,10 +457,20 @@ mod tests {
 
         let file_contents = std::fs::read_to_string(&export_path).unwrap();
         assert!(!file_contents.contains("super-confidential-token-12345"));
-        assert!(file_contents.contains("[REDACTED:ENV_TEST_DUMMY_SECRET_KEY]"));
+        assert!(!file_contents.contains("xai-real-secret-token-99999"));
+        assert!(!file_contents.contains("private-account-email@example.com"));
+        assert!(!file_contents.contains("user:pass"));
+        assert!(!file_contents.contains("sk-proj-secret123"));
+        assert!(!file_contents.contains(&dir.display().to_string()));
+        if let Ok(home) = std::env::var("HOME")
+            && home.len() >= 4
+        {
+            assert!(!file_contents.contains(&home));
+        }
 
         unsafe {
             std::env::remove_var("TEST_DUMMY_SECRET_KEY");
+            std::env::remove_var("TEST_XAI_API_KEY");
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
