@@ -252,7 +252,7 @@ pub fn draw_workspace_section_view(
 
         WorkspaceSection::Spaces => {
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("🧩 Static Spaces Library").color(palette.text_primary));
+                ui.heading(RichText::new("🧩 Pages Library").color(palette.text_primary));
                 if ui.button("↻ Refresh").clicked() {
                     send(DaemonRequest::ListSpaces);
                 }
@@ -265,13 +265,13 @@ pub fn draw_workspace_section_view(
             let enabled = spaces_data["enable_spaces"].as_bool().unwrap_or(false);
             let port = spaces_data["spaces_port"].as_u64().unwrap_or(0);
             ui.small(if enabled {
-                format!("Origin-isolated Static Spaces server active on loopback port {port}")
+                format!("Origin-isolated Pages server active on loopback port {port}")
             } else {
-                "Static Spaces server disabled in config".into()
+                "Pages server disabled in config".into()
             });
 
             ui.group(|ui| {
-                ui.strong("Create Static Space");
+                ui.strong("Create Page");
                 ui.horizontal(|ui| {
                     ui.label("Slug:");
                     ui.add(

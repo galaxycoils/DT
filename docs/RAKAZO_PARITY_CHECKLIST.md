@@ -1,5 +1,7 @@
 # Rakazo Parity Checklist (`grok-muse` vs `elie222/rakazo` @ `3b4faf1`)
 
+v0.7.0 status: the current UI reference is `8aa0f787557697ee7fb5e2f16fb39f4249b35ad4`. Shared tokens and the provider lifecycle are described in [release notes](releases/v0.7.0.md). Historical implementation rows below describe source/fixture coverage; they do not certify live account access. See [provider validation](provider-validation.md).
+
 This checklist maps every capability in Rakazo's [`PRODUCT.md`](https://github.com/elie222/rakazo/blob/3b4faf19540e2883a4bd2833f6c65339e8f7d3f3/PRODUCT.md) and [`docs/self-host-integrations.md`](https://github.com/elie222/rakazo/blob/3b4faf19540e2883a4bd2833f6c65339e8f7d3f3/docs/self-host-integrations.md) to its concrete `grok-muse` module and test coverage.
 
 | Capability Area | `grok-muse` Module(s) | Status & Verification |

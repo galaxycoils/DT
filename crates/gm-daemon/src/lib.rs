@@ -34,15 +34,63 @@ pub use diagnostics::*;
 pub use service::*;
 pub use updater::*;
 
-struct UnavailableLlmBackend;
+struct ProviderLlmBackend {
+    http: ReqwestLlmBackend,
+    local: Option<gm_llm::LocalVlmLlmAdapter>,
+    legacy_local: bool,
+}
+
+impl ProviderLlmBackend {
+    fn use_local(&self, target: &gm_llm::ModelTarget) -> bool {
+        target.api_base.starts_with("local://")
+            || (self.legacy_local && target.profile_id.is_none())
+    }
+}
+
 #[async_trait::async_trait]
-impl LlmBackend for UnavailableLlmBackend {
+impl LlmBackend for ProviderLlmBackend {
     async fn complete(
         &self,
-        _target: &gm_llm::ModelTarget,
-        _messages: &[ChatMessage],
+        target: &gm_llm::ModelTarget,
+        messages: &[ChatMessage],
     ) -> Result<gm_llm::ChatCompletionResponse> {
-        Err(GmError::Config("No model is configured. Add a provider API key or install a compatible checkpoint and tokenizer. Demo inference requires explicit GM_FORCE_MOCK_LLM=1.".into()))
+        if self.use_local(target) {
+            return self
+                .local
+                .as_ref()
+                .ok_or_else(|| {
+                    GmError::Config(
+                        "Install a compatible local checkpoint and tokenizer first".into(),
+                    )
+                })?
+                .complete(target, messages)
+                .await;
+        }
+        self.http.complete(target, messages).await
+    }
+    async fn complete_stream(
+        &self,
+        target: &gm_llm::ModelTarget,
+        messages: &[ChatMessage],
+        max_tokens: u32,
+        temperature: f32,
+        sender: tokio::sync::mpsc::Sender<String>,
+    ) -> Result<gm_llm::LlmResponse> {
+        if self.use_local(target) {
+            return self
+                .local
+                .as_ref()
+                .ok_or_else(|| {
+                    GmError::Config(
+                        "Install a compatible local checkpoint and tokenizer first".into(),
+                    )
+                })?
+                .complete_stream(target, messages, max_tokens, temperature, sender)
+                .await;
+        }
+        self.http
+            .complete_stream(target, messages, max_tokens, temperature, sender)
+            .await
     }
 }
 
@@ -67,20 +115,16 @@ pub fn build_llm_backend(secrets: &KeychainSecrets) -> Arc<dyn LlmBackend> {
         .or_else(|| std::env::var("XAI_API_KEY").ok())
         .filter(|k| !k.trim().is_empty());
 
-    if meta_key.is_some() || xai_key.is_some() {
-        Arc::new(ReqwestLlmBackend::with_keys(meta_key, xai_key))
-    } else if let Some(local_engine) =
-        gm_vlm_candle::ModelRegistry::default_registry().find_installed_engine()
-    {
-        info!(
-            "No cloud API keys found; using installed local Candle VLM ({}) for offline inference",
-            local_engine.config().model_id
-        );
-        Arc::new(gm_llm::LocalVlmLlmAdapter::new(Arc::new(local_engine)))
-    } else {
-        warn!("No provider key or usable local VLM configured; inference is unavailable");
-        Arc::new(UnavailableLlmBackend)
-    }
+    // Resolve credentials for the selected profile at request time, including OAuth-only setups.
+    let local = gm_vlm_candle::ModelRegistry::default_registry()
+        .find_installed_engine()
+        .map(|engine| gm_llm::LocalVlmLlmAdapter::new(Arc::new(engine)));
+    let legacy_local = local.is_some() && meta_key.is_none() && xai_key.is_none();
+    Arc::new(ProviderLlmBackend {
+        http: ReqwestLlmBackend::with_secrets(secrets),
+        local,
+        legacy_local,
+    })
 }
 
 pub async fn ensure_helper_running(config: &GmConfig) -> Result<()> {

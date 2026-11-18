@@ -1,6 +1,7 @@
 //! GrokBot Design System Tokens, Dark/Light/System Theme Application,
 //! 12-Color Bot Palette, Accent Mode (`bot_color` vs `black`), and Vector Bot Shape Primitives.
 
+use crate::ui::tokens;
 use eframe::egui::{self, Color32, CornerRadius, Pos2, Rect, Shape, Stroke, Vec2};
 
 /// Preset 12-color GrokBot palette (`(name, hex)`).
@@ -128,55 +129,44 @@ impl GrokPalette {
         let bot_color = parse_hex_color(bot_color_hex);
         let monochrome = accent_mode.trim().eq_ignore_ascii_case("black");
 
+        let _ = (bot_color, monochrome);
         if dark_mode {
-            let accent = if monochrome {
-                Color32::from_rgb(0x27, 0x2B, 0x36)
-            } else {
-                bot_color
-            };
-            let accent_text = Color32::WHITE;
             Self {
                 dark_mode: true,
-                bg_canvas: Color32::from_rgb(0x0B, 0x0C, 0x0E),
-                bg_sidebar: Color32::from_rgb(0x10, 0x12, 0x15),
-                bg_elevated: Color32::from_rgb(0x1E, 0x22, 0x28),
-                bg_hover: Color32::from_rgb(0x16, 0x19, 0x1D),
-                border_subtle: Color32::from_rgb(0x24, 0x29, 0x32),
-                text_primary: Color32::from_rgb(0xF3, 0xF4, 0xF6),
-                text_secondary: Color32::from_rgb(0x9C, 0xA3, 0xAF),
-                text_muted: Color32::from_rgb(0x6B, 0x72, 0x80),
-                accent,
-                accent_text,
-                status_ok: Color32::from_rgb(0x22, 0xC5, 0x5E),
-                status_warn: Color32::from_rgb(0xF5, 0x9E, 0x0B),
-                status_danger: Color32::from_rgb(0xEF, 0x44, 0x44),
+                bg_canvas: tokens::DARK_BACKGROUND,
+                bg_sidebar: tokens::DARK_SIDEBAR,
+                bg_elevated: tokens::DARK_CARD,
+                bg_hover: tokens::DARK_ACCENT,
+                border_subtle: tokens::DARK_BORDER,
+                text_primary: tokens::DARK_FOREGROUND,
+                text_secondary: tokens::DARK_MUTED_FOREGROUND,
+                text_muted: tokens::DARK_FAINT_FOREGROUND,
+                accent: tokens::DARK_PRIMARY,
+                accent_text: tokens::DARK_PRIMARY_FOREGROUND,
+                status_ok: tokens::DARK_SUCCESS,
+                status_warn: tokens::DARK_WARNING,
+                status_danger: tokens::DARK_DESTRUCTIVE,
             }
         } else {
-            let accent = if monochrome {
-                Color32::from_rgb(0x1C, 0x1F, 0x26)
-            } else {
-                bot_color
-            };
             Self {
                 dark_mode: false,
-                bg_canvas: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-                bg_sidebar: Color32::from_rgb(0xF8, 0xF9, 0xFB),
-                bg_elevated: Color32::from_rgb(0xFF, 0xFF, 0xFF),
-                bg_hover: Color32::from_rgb(0xE5, 0xE7, 0xEB),
-                border_subtle: Color32::from_rgb(0xE5, 0xE7, 0xEB),
-                text_primary: Color32::from_rgb(0x11, 0x18, 0x27),
-                text_secondary: Color32::from_rgb(0x4B, 0x55, 0x63),
-                text_muted: Color32::from_rgb(0x9C, 0xA3, 0xAF),
-                accent,
-                accent_text: Color32::WHITE,
-                status_ok: Color32::from_rgb(0x16, 0xA3, 0x4A),
-                status_warn: Color32::from_rgb(0xD9, 0x77, 0x06),
-                status_danger: Color32::from_rgb(0xDC, 0x26, 0x26),
+                bg_canvas: tokens::LIGHT_BACKGROUND,
+                bg_sidebar: tokens::LIGHT_SIDEBAR,
+                bg_elevated: tokens::LIGHT_CARD,
+                bg_hover: tokens::LIGHT_ACCENT,
+                border_subtle: tokens::LIGHT_BORDER,
+                text_primary: tokens::LIGHT_FOREGROUND,
+                text_secondary: tokens::LIGHT_MUTED_FOREGROUND,
+                text_muted: tokens::LIGHT_FAINT_FOREGROUND,
+                accent: tokens::LIGHT_PRIMARY,
+                accent_text: tokens::LIGHT_PRIMARY_FOREGROUND,
+                status_ok: tokens::LIGHT_SUCCESS,
+                status_warn: tokens::LIGHT_WARNING,
+                status_danger: tokens::LIGHT_DESTRUCTIVE,
             }
         }
     }
 
-    /// Apply this palette to `egui::Context` only when the theme/accent parameters change.
     pub fn apply_to_context(&self, ctx: &egui::Context) {
         let mut style = (*ctx.style()).clone();
         style.visuals = if self.dark_mode {
@@ -185,7 +175,11 @@ impl GrokPalette {
             egui::Visuals::light()
         };
         style.visuals.panel_fill = self.bg_canvas;
-        style.visuals.window_fill = self.bg_elevated;
+        style.visuals.window_fill = if self.dark_mode {
+            tokens::DARK_DIALOG
+        } else {
+            tokens::LIGHT_DIALOG
+        };
         style.visuals.extreme_bg_color = self.bg_sidebar;
         style.visuals.faint_bg_color = self.bg_elevated;
         style.visuals.window_stroke = Stroke::new(1.0_f32, self.border_subtle);
@@ -200,12 +194,16 @@ impl GrokPalette {
         style.visuals.widgets.hovered.weak_bg_fill = self.bg_hover;
         style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, self.accent);
         style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
-        style.visuals.widgets.active.bg_fill = self.accent;
-        style.visuals.widgets.active.weak_bg_fill = self.accent;
-        style.visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.accent_text);
+        style.visuals.widgets.active.bg_fill = self.bg_hover;
+        style.visuals.widgets.active.weak_bg_fill = self.bg_hover;
+        style.visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
         style.visuals.selection.bg_fill = self.accent.gamma_multiply(0.28);
         style.visuals.selection.stroke = Stroke::new(1.0_f32, self.accent);
-        style.visuals.hyperlink_color = self.accent;
+        style.visuals.hyperlink_color = if self.dark_mode {
+            tokens::DARK_LINK
+        } else {
+            tokens::LIGHT_LINK
+        };
 
         style
             .text_styles
@@ -223,7 +221,15 @@ impl GrokPalette {
             .text_styles
             .insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.5));
         style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-        style.spacing.button_padding = Vec2::new(10.0, 5.0);
+        style.spacing.button_padding = Vec2::new(10.0, 7.0);
+        style.visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+        style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+        style.visuals.widgets.active.bg_stroke = Stroke::NONE;
+        style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.border_subtle);
+        style.visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+        style.visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
+        style.visuals.widgets.hovered.corner_radius = CornerRadius::same(8);
+        style.visuals.widgets.active.corner_radius = CornerRadius::same(8);
         ctx.set_style(style);
     }
 }
@@ -305,16 +311,17 @@ pub fn paint_bot_avatar(
             }
         }
 
-        let initials: String = monogram.chars().take(2).collect();
-        if !initials.is_empty() {
-            painter.text(
-                center,
-                egui::Align2::CENTER_CENTER,
-                initials.to_uppercase(),
-                egui::FontId::proportional((radius * 0.85).clamp(9.0, 16.0)),
-                Color32::WHITE,
+        let eye = Stroke::new((radius * 0.12).max(1.3), Color32::from_rgb(30, 24, 24));
+        for x in [-0.23, 0.23] {
+            painter.line_segment(
+                [
+                    center + Vec2::new(radius * x, -radius * 0.16),
+                    center + Vec2::new(radius * x, radius * 0.16),
+                ],
+                eye,
             );
         }
+        let _ = monogram;
     }
 
     if let Some(st) = status {
@@ -329,5 +336,27 @@ pub fn paint_bot_avatar(
         let dot_center = Pos2::new(rect.max.x - 3.0, rect.max.y - 3.0);
         painter.circle_filled(dot_center, 4.5, bg_surface);
         painter.circle_filled(dot_center, 3.2, dot_color);
+    }
+}
+
+/// Use the platform UI font when available; retain egui fallbacks for missing glyphs.
+pub fn install_system_font(ctx: &egui::Context) {
+    let candidates = [
+        "/System/Library/Fonts/SFNS.ttf",
+        "C:/Windows/Fonts/segoeui.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ];
+    if let Some(bytes) = candidates.iter().find_map(|p| std::fs::read(p).ok()) {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts.font_data.insert(
+            "system-ui".into(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "system-ui".into());
+        ctx.set_fonts(fonts);
     }
 }

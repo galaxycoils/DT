@@ -26,44 +26,25 @@ pub trait SecretBackend: Send + Sync {
 #[derive(Clone, Default)]
 pub struct KeychainSecretBackend {
     inner: KeychainSecrets,
-    volatile_fallback: Arc<Mutex<BTreeMap<String, String>>>,
 }
 
 impl KeychainSecretBackend {
     pub fn new(inner: KeychainSecrets) -> Self {
-        Self {
-            inner,
-            volatile_fallback: Arc::new(Mutex::new(BTreeMap::new())),
-        }
+        Self { inner }
     }
 }
 
 impl SecretBackend for KeychainSecretBackend {
     fn get_secret(&self, account: &str) -> Result<String> {
-        match self.inner.get_secret(account) {
-            Ok(val) => Ok(val),
-            Err(err) => self
-                .volatile_fallback
-                .lock()
-                .get(account)
-                .cloned()
-                .ok_or(err),
-        }
+        self.inner.get_secret(account)
     }
 
     fn set_secret(&self, account: &str, secret: &str) -> Result<()> {
-        if self.inner.set_secret(account, secret).is_err() {
-            self.volatile_fallback
-                .lock()
-                .insert(account.to_string(), secret.to_string());
-        }
-        Ok(())
+        self.inner.set_secret(account, secret)
     }
 
     fn delete_secret(&self, account: &str) -> Result<()> {
-        self.volatile_fallback.lock().remove(account);
-        let _ = self.inner.delete_secret(account);
-        Ok(())
+        self.inner.delete_secret(account)
     }
 }
 

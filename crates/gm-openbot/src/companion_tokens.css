@@ -1,0 +1,49 @@
+/* Generated from ui/design-tokens.json. Rakazo semantic palette, Apache-2.0. */
+:root, [data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0A0A0A;
+  --sidebar: #0A0A0A;
+  --dialog: #161616;
+  --card: #232323;
+  --foreground: #F5F5F5;
+  --muted-foreground: #F5F5F5A8;
+  --faint-foreground: #F5F5F58A;
+  --primary: #F5F5F5;
+  --primary-foreground: #121212;
+  --chat-user: #3E3E3E;
+  --chat-user-foreground: #F5F5F5;
+  --border: #F5F5F51A;
+  --sidebar-border: #F5F5F50F;
+  --accent: #F5F5F51A;
+  --input: #F5F5F538;
+  --link: #4D9BFF;
+  --success: #00BA69;
+  --warning: #E28600;
+  --destructive: #FF6463;
+  --unread: #4D9BFF;
+  --working-dot: #0E9F5A;
+}
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #FFFFFF;
+  --sidebar: #F5F5F5;
+  --dialog: #FFFFFF;
+  --card: #F2F2F2;
+  --foreground: #1C1C1C;
+  --muted-foreground: #1C1C1CAD;
+  --faint-foreground: #1C1C1C8F;
+  --primary: #1C1C1C;
+  --primary-foreground: #FCFCFC;
+  --chat-user: #1C1C1C;
+  --chat-user-foreground: #FFFFFF;
+  --border: #1C1C1C1F;
+  --sidebar-border: #1C1C1C1F;
+  --accent: #1C1C1C0F;
+  --input: #1C1C1C3D;
+  --link: #0B6DD3;
+  --success: #00854A;
+  --warning: #AA6300;
+  --destructive: #CD2834;
+  --unread: #0B6DD3;
+  --working-dot: #10AB61;
+}

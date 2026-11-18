@@ -1,6 +1,6 @@
 # Cross-platform release readiness
 
-Status: **blocked; development changes are not public-release certification**.
+Status: **full native certification remains blocked**. An ad-hoc Apple Silicon development preview can be published as a prerelease with its matching checksum; it does not satisfy the signed candidate gates below.
 
 Release targets: macOS ARM64 and Intel, Windows 11 x64, Ubuntu 24.04 x64 with separate X11 and Wayland evidence. The selected release bar includes the advertised CLI-agent, VM and coding workflows. Updates remain manually installed after authenticated staging.
 
@@ -62,4 +62,6 @@ Fixtures, simulated latency and guest-protocol unit tests do not qualify. Author
 4. Complete runtime dependency distribution, platform signing identities, actual signed packages and clean-machine lifecycle evidence.
 5. Native desktop/accessibility/IME/multi-monitor tests, real providers/checkpoints, three-run task acceptance and performance targets on all targets.
 
-Local v0.6.1 validation passed all-feature workspace Clippy and the full locked workspace test suite on macOS, including the native platform test target. The OAuth fixture uses a per-test memory store and requires no desktop credential service. Both release-profile app bundles and the versioned Apple Silicon DMG are checked before preview publication. GitHub CI separately checks macOS, Ubuntu and Windows. These checks cover the development preview. Publisher-signed evidence, clean-machine lifecycle tests, paid model quality and the remaining native release gates above still require certification.
+Local v0.6.1 baseline validation passed all-feature workspace Clippy and the full locked workspace test suite on macOS, including the native platform test target. The OAuth fixture uses a per-test memory store and requires no desktop credential service. Both release-profile app bundles and the versioned Apple Silicon DMG are checked before preview publication. GitHub CI separately checks macOS, Ubuntu and Windows. These checks cover the development preview. Publisher-signed evidence, clean-machine lifecycle tests, paid model quality and the remaining native release gates above still require certification.
+
+The v0.7.0 preview adds the native/browser layout and provider lifecycle described in [release notes](releases/v0.7.0.md). Account-specific inference remains pending as recorded in [provider validation](provider-validation.md).

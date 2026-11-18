@@ -301,14 +301,16 @@ pub fn persist_providers_config(
     config_path: Option<&Path>,
     sup: &OpenBotSupervisor,
 ) -> Result<gm_core::config::ProvidersConfig> {
+    sup.bind_provider_persistence(shared_config, config_path);
+    let mut shared = shared_config.write();
     let providers = sup.providers_config();
-    let mut next = shared_config.read().clone();
+    let mut next = shared.clone();
     next.providers = providers.clone();
     next.validate()?;
     if let Some(path) = config_path {
         next.save(path)?;
     }
-    *shared_config.write() = next;
+    *shared = next;
     Ok(providers)
 }
 
@@ -320,7 +322,9 @@ pub fn apply_and_save_ui_settings(
     sup: &OpenBotSupervisor,
     patch: &serde_json::Value,
 ) -> Result<serde_json::Value> {
-    let mut next = shared_config.read().clone();
+    let mut guard = shared_config.write();
+    let mut next = guard.clone();
+    next.providers = sup.providers_config();
     next.ui = sup.ui_config();
     next.safety.allow_host_desktop = sup.allow_host_desktop();
 
@@ -402,14 +406,25 @@ pub fn apply_and_save_ui_settings(
     }
 
     next.validate()?;
+    sup.set_providers_config(next.providers.clone());
+    if let Some(providers) = patch.get("providers") {
+        let workspace = providers
+            .get("workspace_default_profile_id")
+            .map(|v| v.as_str().unwrap_or_default().to_string());
+        let account = providers
+            .get("account_default_profile_id")
+            .map(|v| v.as_str().unwrap_or_default().to_string());
+        if workspace.is_some() || account.is_some() {
+            sup.set_default_provider_profiles(workspace, account)?;
+        }
+    }
+    next.providers = sup.providers_config();
     if let Some(path) = config_path {
         next.save(path)?;
     }
-
     sup.set_ui_config(next.ui.clone());
     sup.set_allow_host_desktop(next.safety.allow_host_desktop);
-    sup.set_providers_config(next.providers.clone());
-    *shared_config.write() = next.clone();
+    *guard = next.clone();
 
     let _ = sup
         .daemon_event_sender()

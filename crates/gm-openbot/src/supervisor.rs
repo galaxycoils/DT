@@ -60,7 +60,8 @@ pub struct DirectChatDispatchOutcome {
 pub struct OpenBotSupervisor {
     pub(crate) config: GmConfig,
     ui_override: Arc<parking_lot::RwLock<gm_core::config::UiConfig>>,
-    providers_override: Arc<parking_lot::RwLock<gm_core::config::ProvidersConfig>>,
+    pub(crate) providers_override: Arc<parking_lot::RwLock<gm_core::config::ProvidersConfig>>,
+    pub(crate) connections: Arc<crate::provider_connections::ProviderConnections>,
     host_desktop_override: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) runtime_demo: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) runtime_paused: Arc<std::sync::atomic::AtomicBool>,
@@ -86,7 +87,7 @@ pub struct OpenBotSupervisor {
     companion_port: Arc<AtomicU16>,
     spaces_port: Arc<AtomicU16>,
     gui_seat: Arc<AsyncMutex<()>>,
-    daemon_events_tx: broadcast::Sender<DaemonEvent>,
+    pub(crate) daemon_events_tx: broadcast::Sender<DaemonEvent>,
     agui_events_tx: broadcast::Sender<AgUiEvent>,
     audit: Arc<AuditLogger>,
     scrubber: SecretScrubber,
@@ -176,7 +177,33 @@ impl OpenBotSupervisor {
         );
         let (agui_events_tx, _) = broadcast::channel(512);
         let ui_override = Arc::new(parking_lot::RwLock::new(config.ui.clone()));
-        let providers_override = Arc::new(parking_lot::RwLock::new(config.providers.clone()));
+        let mut providers = config.providers.clone();
+        for default in gm_core::config::default_provider_profiles() {
+            if !providers.profiles.iter().any(|p| p.id == default.id) {
+                providers.profiles.push(default);
+            }
+        }
+        for profile in &mut providers.profiles {
+            if profile.preset == gm_core::config::ProviderPreset::KiloGateway
+                && matches!(
+                    profile.base_url.as_str(),
+                    "https://api.kilo.ai/api/gateway/v1"
+                        | "https://api.kilo.ai/api/gateway"
+                        | "https://ai-gateway.kilo.ai/api/v1/v1"
+                )
+            {
+                profile.base_url = "https://ai-gateway.kilo.ai/api/v1".into();
+                profile.connection_state =
+                    gm_core::config::ProviderConnectionState::NeedsRevalidation;
+                profile.health = Default::default();
+            }
+            if profile.connection_state == gm_core::config::ProviderConnectionState::Connected
+                && profile.health.verification_status != "verified"
+            {
+                profile.connection_state = gm_core::config::ProviderConnectionState::Authenticated;
+            }
+        }
+        let providers_override = Arc::new(parking_lot::RwLock::new(providers));
         let host_desktop_override = Arc::new(std::sync::atomic::AtomicBool::new(
             config.safety.allow_host_desktop,
         ));
@@ -185,6 +212,7 @@ impl OpenBotSupervisor {
             config,
             ui_override,
             providers_override,
+            connections: Arc::new(Default::default()),
             host_desktop_override,
             runtime_demo: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             runtime_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -262,8 +290,12 @@ impl OpenBotSupervisor {
         self.providers_override.read().clone()
     }
 
-    pub fn set_providers_config(&self, providers: gm_core::config::ProvidersConfig) {
-        *self.providers_override.write() = providers;
+    pub fn set_providers_config(&self, mut providers: gm_core::config::ProvidersConfig) {
+        let mut live = self.providers_override.write();
+        providers.profiles = live.profiles.clone();
+        providers.workspace_default_profile_id = live.workspace_default_profile_id.clone();
+        providers.account_default_profile_id = live.account_default_profile_id.clone();
+        *live = providers;
     }
 
     pub fn upsert_provider_profile(
@@ -272,20 +304,94 @@ impl OpenBotSupervisor {
         api_key: Option<&str>,
         revalidate_credentials: bool,
     ) -> Result<gm_core::config::ProviderProfileConfig> {
-        let mut cfg = self.providers_config();
+        let mut cfg = self.providers_override.write();
         let mut incoming = profile;
+        let origin = gm_core::config::extract_provider_origin(&incoming.base_url)?;
+        gm_core::config::validate_oauth_destination(
+            incoming.preset,
+            incoming.auth_mode,
+            incoming.protocol,
+            &incoming.base_url,
+        )?;
+        if incoming.id.trim().is_empty() {
+            return Err(GmError::Config(
+                "Provider profile ID cannot be empty".into(),
+            ));
+        }
+        // Secret references and account identity come from the daemon, never a submitted form.
+        incoming.credential_ref = cfg
+            .profile_by_id(&incoming.id)
+            .and_then(|p| p.credential_ref.clone());
+        incoming.account_id = cfg
+            .profile_by_id(&incoming.id)
+            .and_then(|p| p.account_id.clone());
+        incoming.account_label = cfg
+            .profile_by_id(&incoming.id)
+            .and_then(|p| p.account_label.clone());
+        if let Some(current) = cfg.profile_by_id(&incoming.id) {
+            if incoming.revision != current.revision {
+                return Err(GmError::Config(
+                    "Provider settings changed. Reload and try again.".into(),
+                ));
+            }
+            incoming.revision = current.revision.saturating_add(1);
+        }
+        if let Some(current) = cfg.profile_by_id(&incoming.id) {
+            if current.credential_ref.is_some()
+                && current.auth_mode != incoming.auth_mode
+                && api_key.is_none()
+            {
+                return Err(GmError::Config(
+                    "Disconnect before changing authentication type".into(),
+                ));
+            }
+            incoming.model_catalog = current.model_catalog.clone();
+            incoming.discovered_models = current.discovered_models.clone();
+        }
+        self.cancel_provider_sign_in(&incoming.id);
+        incoming.connection_state = cfg
+            .profile_by_id(&incoming.id)
+            .map(|p| match p.connection_state {
+                gm_core::config::ProviderConnectionState::Connected
+                | gm_core::config::ProviderConnectionState::Authenticated => {
+                    gm_core::config::ProviderConnectionState::Authenticated
+                }
+                gm_core::config::ProviderConnectionState::CredentialsSaved => {
+                    gm_core::config::ProviderConnectionState::CredentialsSaved
+                }
+                _ => gm_core::config::ProviderConnectionState::Unconfigured,
+            })
+            .unwrap_or_default();
+        incoming.health = cfg
+            .profile_by_id(&incoming.id)
+            .map(|p| p.health.clone())
+            .unwrap_or_default();
+        if cfg.profile_by_id(&incoming.id).is_some_and(|current| {
+            incoming.base_url != current.base_url || incoming.protocol != current.protocol
+        }) {
+            incoming.health.catalog_status = "stale".into();
+        }
+        incoming.health.verification_status = "not_tested".into();
+        incoming.health.verified_model = None;
+        incoming.health.verified_at = None;
+        incoming.last_error = None;
         if let Some(secret) = api_key.map(str::trim).filter(|s| !s.is_empty()) {
-            let account = format!("gm_provider_{}", incoming.id.replace('-', "_"));
+            use sha2::{Digest, Sha256};
+            let account = format!("gm_provider_{:x}", Sha256::digest(incoming.id.as_bytes()));
             self.vault.backend().set_secret(&account, secret)?;
             incoming.credential_ref = Some(format!("secret://keychain/{account}"));
-            incoming.connection_state = gm_core::config::ProviderConnectionState::Connected;
-            incoming.validated_origin = Some(gm_core::config::extract_provider_origin(
-                &incoming.base_url,
-            )?);
+            incoming.connection_state = gm_core::config::ProviderConnectionState::CredentialsSaved;
+            incoming.validated_origin = Some(origin);
             incoming.last_error = None;
+            incoming.model_catalog.clear();
+            incoming.discovered_models.clear();
+            incoming.health = Default::default();
         }
-        let saved = cfg.upsert_profile(incoming, revalidate_credentials || api_key.is_some())?;
-        self.set_providers_config(cfg);
+        let saved = cfg.upsert_profile(
+            incoming,
+            revalidate_credentials || api_key.is_some_and(|value| !value.trim().is_empty()),
+        )?;
+        drop(cfg);
         let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
             reason: "providers_updated".into(),
         });
@@ -297,7 +403,7 @@ impl OpenBotSupervisor {
         workspace_default: Option<String>,
         account_default: Option<String>,
     ) -> Result<gm_core::config::ProvidersConfig> {
-        let mut cfg = self.providers_config();
+        let mut cfg = self.providers_override.write();
         if let Some(ws_id) = workspace_default {
             cfg.workspace_default_profile_id = if ws_id.trim().is_empty() {
                 None
@@ -312,262 +418,11 @@ impl OpenBotSupervisor {
                 Some(acc_id.trim().to_string())
             };
         }
-        self.set_providers_config(cfg.clone());
+        let cfg = cfg.clone();
         let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
             reason: "providers_updated".into(),
         });
         Ok(cfg)
-    }
-
-    fn resolve_profile_bearer(
-        &self,
-        profile: &gm_core::config::ProviderProfileConfig,
-    ) -> Option<String> {
-        let cred = profile.credential_ref.as_deref()?;
-        let account = cred.strip_prefix("secret://keychain/")?;
-        let raw = self.vault.backend().get_secret(account).ok()?;
-        if raw.trim_start().starts_with('{')
-            && let Ok(bundle) = serde_json::from_str::<gm_llm::OAuthTokenBundle>(&raw)
-        {
-            return Some(bundle.access_token);
-        }
-        Some(raw)
-    }
-
-    pub async fn discover_provider_models(&self, profile_id: &str) -> Result<Vec<String>> {
-        let mut cfg = self.providers_config();
-        let profile = cfg
-            .profiles
-            .iter()
-            .find(|p| p.id == profile_id)
-            .cloned()
-            .ok_or_else(|| GmError::Config(format!("Unknown provider profile '{profile_id}'")))?;
-        if matches!(
-            profile.connection_state,
-            gm_core::config::ProviderConnectionState::NeedsRevalidation
-        ) {
-            return Err(GmError::SafetyViolation(format!(
-                "Provider profile '{}' changed endpoint origin; revalidate credentials before contacting it",
-                profile.id
-            )));
-        }
-        let bearer = self.resolve_profile_bearer(&profile);
-        let backend = gm_llm::ReqwestLlmBackend::new();
-        match backend
-            .discover_models(&profile.base_url, bearer.as_deref())
-            .await
-        {
-            Ok(models) => {
-                if let Some(existing) = cfg.profiles.iter_mut().find(|p| p.id == profile_id) {
-                    existing.discovered_models = models.clone();
-                    existing.connection_state = gm_core::config::ProviderConnectionState::Connected;
-                    existing.last_error = None;
-                }
-                self.set_providers_config(cfg);
-                Ok(models)
-            }
-            Err(err) => {
-                if let Some(existing) = cfg.profiles.iter_mut().find(|p| p.id == profile_id) {
-                    existing.connection_state = gm_core::config::ProviderConnectionState::Error;
-                    existing.last_error = Some(err.to_string());
-                }
-                self.set_providers_config(cfg);
-                Err(err)
-            }
-        }
-    }
-
-    pub async fn oauth_action_for_profile(
-        &self,
-        profile_id: &str,
-        op: &str,
-        payload: &serde_json::Value,
-    ) -> Result<serde_json::Value> {
-        let mut cfg = self.providers_config();
-        let profile = cfg
-            .profiles
-            .iter()
-            .find(|p| p.id == profile_id)
-            .cloned()
-            .ok_or_else(|| GmError::Config(format!("Unknown provider profile '{profile_id}'")))?;
-        match op.trim().to_ascii_lowercase().as_str() {
-            "start" => {
-                let redirect_uri = payload
-                    .get("redirect_uri")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("http://127.0.0.1:1455/auth/callback");
-                let client_id = payload
-                    .get("client_id")
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.trim().is_empty())
-                    .unwrap_or(match profile.preset {
-                        gm_core::config::ProviderPreset::ChatGpt => "app_EMoamEEZ73f0CkXaXp7hrann",
-                        gm_core::config::ProviderPreset::NousPortal => "nous-portal-public",
-                        _ => "grok-muse-oauth",
-                    });
-                let auth_ep = payload.get("authorize_endpoint").and_then(|v| v.as_str());
-                let req = gm_llm::build_oauth_authorize_url(
-                    profile.preset,
-                    client_id,
-                    redirect_uri,
-                    auth_ep,
-                )?;
-                Ok(serde_json::to_value(req)?)
-            }
-            "exchange" | "save_bundle" => {
-                let bundle = if op.eq_ignore_ascii_case("save_bundle") {
-                    gm_llm::OAuthTokenBundle {
-                        provider_id: profile.id.clone(),
-                        account_id: payload
-                            .get("account_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("default")
-                            .to_string(),
-                        account_label: payload
-                            .get("account_label")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("Signed-in Account")
-                            .to_string(),
-                        access_token: payload
-                            .get("access_token")
-                            .and_then(|v| v.as_str())
-                            .filter(|s| !s.trim().is_empty())
-                            .ok_or_else(|| GmError::Config("Missing OAuth access_token".into()))?
-                            .to_string(),
-                        refresh_token: payload
-                            .get("refresh_token")
-                            .and_then(|v| v.as_str())
-                            .map(ToString::to_string),
-                        expires_at: payload
-                            .get("expires_at")
-                            .and_then(|v| v.as_str())
-                            .map(ToString::to_string),
-                        token_endpoint: payload
-                            .get("token_endpoint")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or(match profile.preset {
-                                gm_core::config::ProviderPreset::ChatGpt => {
-                                    "https://auth.openai.com/oauth/token"
-                                }
-                                gm_core::config::ProviderPreset::NousPortal => {
-                                    "https://portal.nousresearch.com/oauth/token"
-                                }
-                                _ => &profile.base_url,
-                            })
-                            .to_string(),
-                        client_id: payload
-                            .get("client_id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("grok-muse-oauth")
-                            .to_string(),
-                    }
-                } else {
-                    let token_endpoint = payload
-                        .get("token_endpoint")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(match profile.preset {
-                            gm_core::config::ProviderPreset::ChatGpt => {
-                                "https://auth.openai.com/oauth/token"
-                            }
-                            gm_core::config::ProviderPreset::NousPortal => {
-                                "https://portal.nousresearch.com/oauth/token"
-                            }
-                            _ => {
-                                return Err(GmError::Config(
-                                    "token_endpoint required for custom OAuth exchange".into(),
-                                ));
-                            }
-                        });
-                    let client_id = payload
-                        .get("client_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("app_EMoamEEZ73f0CkXaXp7hrann");
-                    let code = payload
-                        .get("code")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            GmError::Config("Missing OAuth authorization code".into())
-                        })?;
-                    let redirect_uri = payload
-                        .get("redirect_uri")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("http://127.0.0.1:1455/auth/callback");
-                    let verifier = payload
-                        .get("code_verifier")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| GmError::Config("Missing PKCE code_verifier".into()))?;
-                    let account_id = payload
-                        .get("account_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("default");
-                    let account_label = payload
-                        .get("account_label")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("OAuth Account");
-                    let client = reqwest::Client::new();
-                    gm_llm::exchange_oauth_code(
-                        &client,
-                        profile.preset,
-                        token_endpoint,
-                        client_id,
-                        code,
-                        redirect_uri,
-                        verifier,
-                        account_id,
-                        account_label,
-                    )
-                    .await?
-                };
-                let account =
-                    gm_llm::keychain_account_for_oauth(profile.preset, &bundle.account_id)?;
-                let bundle_json = serde_json::to_string(&bundle)?;
-                self.scrubber.register(&account, &bundle.access_token);
-                self.vault.backend().set_secret(&account, &bundle_json)?;
-                let secret_ref = format!("secret://keychain/{account}");
-                let mut updated = profile.clone();
-                updated.credential_ref = Some(secret_ref);
-                updated.account_label = Some(bundle.account_label.clone());
-                updated.connection_state = gm_core::config::ProviderConnectionState::Connected;
-                updated.validated_origin =
-                    Some(gm_core::config::extract_provider_origin(&updated.base_url)?);
-                updated.last_error = None;
-                let saved = cfg.upsert_profile(updated, true)?;
-                self.set_providers_config(cfg);
-                let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
-                    reason: "providers_updated".into(),
-                });
-                Ok(serde_json::json!({
-                    "profile": saved,
-                    "connected": true,
-                }))
-            }
-            "disconnect" => {
-                if let Some(account) = profile
-                    .credential_ref
-                    .as_deref()
-                    .and_then(|s| s.strip_prefix("secret://keychain/"))
-                {
-                    let _ = self.vault.backend().delete_secret(account);
-                }
-                let mut updated = profile.clone();
-                updated.credential_ref = None;
-                updated.account_label = None;
-                updated.connection_state = gm_core::config::ProviderConnectionState::Unconfigured;
-                updated.last_error = None;
-                let saved = cfg.upsert_profile(updated, false)?;
-                self.set_providers_config(cfg);
-                let _ = self.daemon_events_tx.send(DaemonEvent::ActivityUpdated {
-                    reason: "providers_updated".into(),
-                });
-                Ok(serde_json::json!({
-                    "profile": saved,
-                    "connected": false,
-                }))
-            }
-            other => Err(GmError::Config(format!(
-                "Unsupported OAuth op '{other}'. Expected start, exchange, save_bundle, or disconnect"
-            ))),
-        }
     }
 
     pub fn allow_host_desktop(&self) -> bool {
@@ -908,6 +763,8 @@ impl OpenBotSupervisor {
             "routines": routines,
             "unread_counts": unread_counts,
             "bot_statuses": bot_statuses,
+            "conversation_previews": self.direct_chat.conversation_previews().unwrap_or_default(),
+            "channel_previews": self.channels.conversation_previews().unwrap_or_default(),
             "connected_app_count": connected_app_count,
             "integrations": integrations,
             "custom_connectors": custom_connectors,
@@ -1084,7 +941,8 @@ impl OpenBotSupervisor {
 
         let prompt_text = explicit_chat.unwrap_or(trimmed);
         let cfg = shared_cfg.unwrap_or(&self.config);
-        let routed_router = router.clone().with_preference(
+        let _ = router;
+        let routed_router = LlmRouter::new(self.providers_config()).with_preference(
             profile.preferred_provider.as_deref(),
             profile.preferred_model.as_deref(),
         )?;

@@ -97,100 +97,102 @@ pub fn draw_chat_canvas(
             .unwrap_or("circle"),
     );
 
-    // 1. 48px Chat Header Bar
+    if ctx.input(|i| i.focused)
+        && let Some(last) = rows.last()
+    {
+        let key = format!(
+            "{}:{}",
+            ui_state.active_chat_kind,
+            if ui_state.active_chat_kind == "channel" {
+                active_channel
+            } else {
+                active_bot.as_str()
+            }
+        );
+        let cursor = ui_state.last_read_seq.entry(key).or_default();
+        if last.seq > *cursor {
+            *cursor = last.seq;
+            send(DaemonRequest::MarkChatRead {
+                chat_kind: ui_state.active_chat_kind.clone(),
+                chat_id: if ui_state.active_chat_kind == "channel" {
+                    active_channel.into()
+                } else {
+                    active_bot.clone()
+                },
+            });
+        }
+    }
+    // Centered conversation identity, with secondary actions in the overflow menu.
     egui::Frame::NONE
         .fill(palette.bg_canvas)
-        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-        .inner_margin(egui::Margin::symmetric(14, 8))
+        .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
+            use crate::ui::icons::{self, Icon};
             ui.horizontal(|ui| {
-                if ui
-                    .add_enabled(ui_state.nav_history.can_back(), egui::Button::new("<"))
+                if icons::button(ui, Icon::Search, "Search messages", palette.text_secondary)
                     .clicked()
                 {
-                    ui_state.nav_request = -1;
+                    ui_state.search_bar_open = !ui_state.search_bar_open;
                 }
-                if ui
-                    .add_enabled(ui_state.nav_history.can_forward(), egui::Button::new(">"))
-                    .clicked()
-                {
-                    ui_state.nav_request = 1;
-                }
-                if ui.small_button("☰").clicked() {
-                    ui_state.sidebar_manual_override =
-                        Some(!ui_state.sidebar_manual_override.unwrap_or(false));
-                }
-                if ui_state.active_chat_kind == "channel" && ui.small_button("Edit Group").clicked()
-                {
-                    ui_state.channel_draft = ui_state.server_snapshot["channels"]
-                        .as_array()
-                        .and_then(|a| a.iter().find(|c| c["id"].as_str() == Some(active_channel)))
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({"id":active_channel}));
-                    ui_state.active_modal = Some(ActiveModal::EditChannel);
-                }
-                let (avatar_rect, avatar_resp) =
-                    ui.allocate_exact_size(Vec2::new(28.0, 28.0), Sense::click());
-                let tex = textures
-                    .get(&format!("avatar:{active_bot}"))
-                    .map(|(t, _)| t);
-                paint_bot_avatar(
-                    ui.painter(),
-                    avatar_rect,
-                    bot_shape,
-                    bot_color,
-                    &bot_display_name,
-                    tex,
-                    Some(if connected { "online" } else { "offline" }),
-                    palette.bg_canvas,
+                let title = if ui_state.active_chat_kind == "channel" {
+                    format!("# {active_channel}")
+                } else {
+                    bot_display_name.clone()
+                };
+                let width = (ui.available_width() - 40.0).max(100.0);
+                ui.allocate_ui_with_layout(
+                    Vec2::new(width, 36.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.set_min_width(width);
+                        let title_width = (title.chars().count() as f32 * 8.0 + 56.0).min(width);
+                        ui.add_space(((width - title_width) / 2.0).max(0.0));
+                        egui::Frame::NONE
+                            .fill(palette.bg_elevated)
+                            .corner_radius(20)
+                            .inner_margin(egui::Margin::symmetric(8, 2))
+                            .show(ui, |ui| {
+                                let (rect, response) =
+                                    ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
+                                paint_bot_avatar(
+                                    ui.painter(),
+                                    rect,
+                                    bot_shape,
+                                    bot_color,
+                                    &title,
+                                    textures
+                                        .get(&format!("avatar:{active_bot}"))
+                                        .map(|(t, _)| t),
+                                    None,
+                                    palette.bg_canvas,
+                                );
+                                if response.on_hover_text("Customize avatar").clicked() {
+                                    ui_state.active_modal = Some(ActiveModal::AvatarPicker {
+                                        bot_id: active_bot.clone(),
+                                    });
+                                }
+                                if ui
+                                    .button(RichText::new(title).strong().size(15.0))
+                                    .on_hover_text(format!("{bot_role_title} · {status_line}"))
+                                    .clicked()
+                                {
+                                    ui_state.details_drawer_open = !ui_state.details_drawer_open;
+                                }
+                            });
+                    },
                 );
-                if avatar_resp
-                    .on_hover_text("Customize Bot shape, color & avatar")
-                    .clicked()
-                {
-                    ui_state.active_modal = Some(ActiveModal::AvatarPicker {
-                        bot_id: active_bot.clone(),
-                    });
-                }
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let details_btn = egui::Button::new(RichText::new("◧ Details").color(
-                        if ui_state.details_drawer_open {
-                            palette.accent_text
-                        } else {
-                            palette.text_primary
-                        },
-                    ))
-                    .fill(if ui_state.details_drawer_open {
-                        palette.accent
-                    } else {
-                        palette.bg_elevated
-                    });
-                    if ui
-                        .add(details_btn)
-                        .on_hover_text("Toggle Bot Details Drawer (Cmd/Ctrl+Alt+B)")
-                        .clicked()
-                    {
+                let more = icons::button(
+                    ui,
+                    Icon::More,
+                    "Conversation options",
+                    palette.text_secondary,
+                );
+                egui::Popup::menu(&more).show(|ui| {
+                    if ui.button("Bot details").clicked() {
                         ui_state.details_drawer_open = !ui_state.details_drawer_open;
+                        ui.close();
                     }
-
-                    let comp_btn = egui::Button::new(RichText::new("🖥 Computer").color(
-                        if ui_state.live_computer_open {
-                            palette.accent_text
-                        } else {
-                            palette.text_primary
-                        },
-                    ))
-                    .fill(if ui_state.live_computer_open {
-                        palette.accent
-                    } else {
-                        palette.bg_elevated
-                    });
-                    if ui
-                        .add(comp_btn)
-                        .on_hover_text("Toggle Live Computer Viewer (adaptive 2–5 FPS)")
-                        .clicked()
-                    {
+                    if ui.button("Live computer").clicked() {
                         ui_state.live_computer_open = !ui_state.live_computer_open;
                         if ui_state.live_computer_open {
                             ui_state.details_drawer_open = true;
@@ -202,13 +204,9 @@ pub fn draw_chat_canvas(
                         } else {
                             textures.evict_prefix("live_computer:");
                         }
+                        ui.close();
                     }
-
-                    if ui
-                        .button("📄 SOUL.md")
-                        .on_hover_text("Open SOUL.md in Split Page Editor")
-                        .clicked()
-                    {
+                    if ui.button("Open SOUL.md").clicked() {
                         send(DaemonRequest::ReadRuntimeFile {
                             bot_id: Some(active_bot.clone()),
                             file: "SOUL.md".into(),
@@ -219,62 +217,40 @@ pub fn draw_chat_canvas(
                             title: format!("@{active_bot} / SOUL.md"),
                             editing: false,
                         });
+                        ui.close();
                     }
-
-                    let search_btn =
-                        egui::Button::new(RichText::new("🔍").color(if ui_state.search_bar_open {
-                            palette.accent_text
-                        } else {
-                            palette.text_primary
-                        }))
-                        .fill(if ui_state.search_bar_open {
-                            palette.accent
-                        } else {
-                            palette.bg_elevated
-                        });
+                    if ui_state.active_chat_kind == "channel" && ui.button("Edit group").clicked() {
+                        ui_state.channel_draft = ui_state.server_snapshot["channels"]
+                            .as_array()
+                            .and_then(|a| {
+                                a.iter().find(|c| c["id"].as_str() == Some(active_channel))
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({"id":active_channel}));
+                        ui_state.active_modal = Some(ActiveModal::EditChannel);
+                        ui.close();
+                    }
+                    ui.separator();
                     if ui
-                        .add(search_btn)
-                        .on_hover_text("Search messages (Cmd/Ctrl+F)")
+                        .add_enabled(
+                            ui_state.nav_history.can_back(),
+                            egui::Button::new("Previous conversation"),
+                        )
                         .clicked()
                     {
-                        ui_state.search_bar_open = !ui_state.search_bar_open;
+                        ui_state.nav_request = -1;
+                        ui.close();
                     }
-
-                    ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width(), 30.0),
-                        Layout::top_down(Align::Min),
-                        |ui| {
-                            let title = if ui_state.active_chat_kind == "channel" {
-                                format!("# {active_channel}")
-                            } else {
-                                bot_display_name.clone()
-                            };
-                            let subtitle = if ui_state.active_chat_kind == "channel" {
-                                format!("Shared group channel · {status_line}")
-                            } else {
-                                format!("{bot_role_title} · {status_line}")
-                            };
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&title)
-                                        .strong()
-                                        .size(15.0)
-                                        .color(palette.text_primary),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(title);
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(&subtitle)
-                                        .small()
-                                        .color(palette.text_secondary),
-                                )
-                                .truncate(),
-                            )
-                            .on_hover_text(subtitle);
-                        },
-                    );
+                    if ui
+                        .add_enabled(
+                            ui_state.nav_history.can_forward(),
+                            egui::Button::new("Next conversation"),
+                        )
+                        .clicked()
+                    {
+                        ui_state.nav_request = 1;
+                        ui.close();
+                    }
                 });
             });
         });
@@ -339,310 +315,493 @@ pub fn draw_chat_canvas(
         .frame(
             egui::Frame::NONE
                 .fill(palette.bg_canvas)
-                .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-                .inner_margin(egui::Margin::symmetric(14, 10)),
+                .inner_margin(egui::Margin::symmetric(24, 18)),
         )
         .show_inside(ui, |ui| {
-            // Reply-to banner (Tier 5 Escape target)
-            if let Some(reply) = ui_state.reply_to.clone() {
-                egui::Frame::NONE
-                    .fill(palette.bg_elevated)
-                    .corner_radius(CornerRadius::same(6))
-                    .inner_margin(egui::Margin::symmetric(8, 4))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.small(
-                                RichText::new(format!("↩ Replying to {}: {}", reply.author, reply.snippet))
-                                    .color(palette.text_secondary),
-                            );
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.small_button("✕").clicked() {
-                                    ui_state.reply_to = None;
-                                }
-                            });
-                        });
-                    });
-                ui.add_space(4.0);
-            }
-
-            // Attachment pills (`< 25 MB` limit enforced)
-            if !ui_state.pending_attachments.is_empty() {
-                ui.horizontal_wrapped(|ui| {
-                    let mut remove_idx = None;
-                    for (idx, att) in ui_state.pending_attachments.iter().enumerate() {
-                        ui.group(|ui| {
-                            ui.small(format!("📎 {att}"));
-                            if ui.small_button("✕").clicked() {
-                                remove_idx = Some(idx);
-                            }
-                        });
-                    }
-                    if let Some(i) = remove_idx {
-                        ui_state.pending_attachments.remove(i);
-                    }
-                });
-                ui.add_space(4.0);
-            }
-
-            // `@bot` and `/command` autocomplete popovers (Tier 1 Escape target)
-            if draft.ends_with('@') || ui_state.mention_popup_open {
-                ui_state.mention_popup_open = draft.contains('@');
-                if ui_state.mention_popup_open {
+            let gutter = ((ui.available_width() - 960.0) / 2.0).max(0.0);
+            ui.horizontal(|ui| {
+                ui.add_space(gutter);
+                ui.vertical(|ui| {
+                    ui.set_width((ui.available_width() - gutter).min(960.0));
                     egui::Frame::NONE
                         .fill(palette.bg_elevated)
-                        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-                        .corner_radius(CornerRadius::same(6))
-                        .inner_margin(egui::Margin::symmetric(8, 4))
+                        .corner_radius(26)
+                        .inner_margin(egui::Margin::symmetric(16, 12))
                         .show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.small(RichText::new("Mention:").color(palette.text_muted));
-                                let mut targets=vec!["everyone".to_string()];
-                                if let Some(items)=ui_state.server_snapshot["integrations"].as_array() {targets.extend(items.iter().filter_map(|x|x["id"].as_str()).map(|id|format!("app:{id}")));}
-                                if let Some(items)=ui_state.server_snapshot["routines"].as_array() {targets.extend(items.iter().filter_map(|x|x["routine"]["id"].as_str()).map(|id|format!("routine:{id}")));}
-                                for target in targets {if ui.small_button(format!("@{target}")).clicked() {*draft=draft.trim_end_matches('@').to_string()+"@"+&target+" ";ui_state.mention_popup_open=false;}}
+                            // Reply-to banner (Tier 5 Escape target)
+                            if let Some(reply) = ui_state.reply_to.clone() {
+                                egui::Frame::NONE
+                                    .fill(palette.bg_elevated)
+                                    .corner_radius(CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(8, 4))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.small(
+                                                RichText::new(format!(
+                                                    "↩ Replying to {}: {}",
+                                                    reply.author, reply.snippet
+                                                ))
+                                                .color(palette.text_secondary),
+                                            );
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    if ui.small_button("✕").clicked() {
+                                                        ui_state.reply_to = None;
+                                                    }
+                                                },
+                                            );
+                                        });
+                                    });
+                                ui.add_space(4.0);
+                            }
 
-                                for b in bots {
-                                    if let Some(bid) = b["id"].as_str()
-                                        && ui.small_button(format!("@{bid}")).clicked()
+                            // Attachment pills (`< 25 MB` limit enforced)
+                            if !ui_state.pending_attachments.is_empty() {
+                                ui.horizontal_wrapped(|ui| {
+                                    let mut remove_idx = None;
+                                    for (idx, att) in
+                                        ui_state.pending_attachments.iter().enumerate()
                                     {
-                                        if draft.ends_with('@') {
-                                            draft.push_str(&format!("{bid} "));
-                                        } else {
-                                            draft.push_str(&format!(" @{bid} "));
+                                        ui.group(|ui| {
+                                            ui.small(format!("📎 {att}"));
+                                            if ui.small_button("✕").clicked() {
+                                                remove_idx = Some(idx);
+                                            }
+                                        });
+                                    }
+                                    if let Some(i) = remove_idx {
+                                        ui_state.pending_attachments.remove(i);
+                                    }
+                                });
+                                ui.add_space(4.0);
+                            }
+
+                            // `@bot` and `/command` autocomplete popovers (Tier 1 Escape target)
+                            if draft.ends_with('@') || ui_state.mention_popup_open {
+                                ui_state.mention_popup_open = draft.contains('@');
+                                if ui_state.mention_popup_open {
+                                    egui::Frame::NONE
+                                        .fill(palette.bg_elevated)
+                                        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                                        .corner_radius(CornerRadius::same(6))
+                                        .inner_margin(egui::Margin::symmetric(8, 4))
+                                        .show(ui, |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.small(
+                                                    RichText::new("Mention:")
+                                                        .color(palette.text_muted),
+                                                );
+                                                let mut targets = vec!["everyone".to_string()];
+                                                if let Some(items) =
+                                                    ui_state.server_snapshot["integrations"]
+                                                        .as_array()
+                                                {
+                                                    targets.extend(
+                                                        items
+                                                            .iter()
+                                                            .filter_map(|x| x["id"].as_str())
+                                                            .map(|id| format!("app:{id}")),
+                                                    );
+                                                }
+                                                if let Some(items) =
+                                                    ui_state.server_snapshot["routines"].as_array()
+                                                {
+                                                    targets.extend(
+                                                        items
+                                                            .iter()
+                                                            .filter_map(|x| {
+                                                                x["routine"]["id"].as_str()
+                                                            })
+                                                            .map(|id| format!("routine:{id}")),
+                                                    );
+                                                }
+                                                for target in targets {
+                                                    if ui
+                                                        .small_button(format!("@{target}"))
+                                                        .clicked()
+                                                    {
+                                                        *draft =
+                                                            draft.trim_end_matches('@').to_string()
+                                                                + "@"
+                                                                + &target
+                                                                + " ";
+                                                        ui_state.mention_popup_open = false;
+                                                    }
+                                                }
+
+                                                for b in bots {
+                                                    if let Some(bid) = b["id"].as_str()
+                                                        && ui
+                                                            .small_button(format!("@{bid}"))
+                                                            .clicked()
+                                                    {
+                                                        if draft.ends_with('@') {
+                                                            draft.push_str(&format!("{bid} "));
+                                                        } else {
+                                                            draft.push_str(&format!(" @{bid} "));
+                                                        }
+                                                        ui_state.mention_popup_open = false;
+                                                    }
+                                                }
+                                            });
+                                        });
+                                }
+                            }
+                            if draft.starts_with('/') && !draft.contains(' ') {
+                                ui_state.slash_popup_open = true;
+                                egui::Frame::NONE
+                                    .fill(palette.bg_elevated)
+                                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                                    .corner_radius(CornerRadius::same(6))
+                                    .inner_margin(egui::Margin::symmetric(8, 4))
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            let skills = ui_state.server_snapshot["skills"]
+                                                .as_array()
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            for skill in skills {
+                                                if let Some(name) = skill["name"].as_str()
+                                                    && ui.small_button(format!("/{name}")).clicked()
+                                                {
+                                                    *draft = format!("/{name} ");
+                                                    ui_state.slash_popup_open = false;
+                                                }
+                                            }
+                                            for (cmd, desc) in SLASH_COMMANDS {
+                                                if ui
+                                                    .small_button(*cmd)
+                                                    .on_hover_text(*desc)
+                                                    .clicked()
+                                                {
+                                                    *draft = (*cmd).to_string();
+                                                    ui_state.slash_popup_open = false;
+                                                }
+                                            }
+                                        });
+                                    });
+                            } else {
+                                ui_state.slash_popup_open = false;
+                            }
+
+                            // Detect IME composition & Backspace for Smart Composer `->` -> `→` + single-Backspace undo
+                            let (ime_composing, backspace_pressed) = ctx.input(|i| {
+                                let mut had_ime = false;
+                                for event in &i.events {
+                                    if let egui::Event::Ime(event) = event {
+                                        had_ime = true;
+                                        match event {
+                                            egui::ImeEvent::Enabled
+                                            | egui::ImeEvent::Preedit(_) => {
+                                                ui_state.ime_composing = true
+                                            }
+                                            egui::ImeEvent::Commit(_)
+                                            | egui::ImeEvent::Disabled => {
+                                                ui_state.ime_composing = false
+                                            }
                                         }
-                                        ui_state.mention_popup_open = false;
                                     }
                                 }
+                                (
+                                    ui_state.ime_composing || had_ime,
+                                    i.key_pressed(Key::Backspace),
+                                )
+                            });
+
+                            let composer_id = egui::Id::new("main-draft");
+                            let plain_enter = !ime_composing
+                                && !ui_state.mention_popup_open
+                                && !ui_state.slash_popup_open
+                                && ctx.memory(|m| m.has_focus(composer_id))
+                                && ctx.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, Key::Enter)
+                                });
+                            let command_enter =
+                                !ime_composing && crate::native::take_composer_shortcut(ctx);
+                            let edit_resp = ui.add(
+                                egui::TextEdit::multiline(draft)
+                                    .id(composer_id)
+                                    .desired_width(ui.available_width())
+                                    .frame(false)
+                                    .desired_rows(1)
+                                    .hint_text(format!("Message {bot_display_name}…")),
+                            );
+                            if edit_resp.changed() || backspace_pressed {
+                                apply_smart_composer_edit(
+                                    draft,
+                                    ime_composing,
+                                    backspace_pressed,
+                                    &mut ui_state.last_auto_arrow_pos,
+                                );
+                            }
+
+                            let send_enter = !ime_composing && (command_enter || plain_enter);
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                use crate::ui::icons::{self, Icon};
+                                let plus = icons::button(
+                                    ui,
+                                    Icon::Plus,
+                                    "Add to message",
+                                    palette.text_secondary,
+                                );
+                                egui::Popup::menu(&plus).show(|ui| {
+                                    if ui.button("Attach file (<25 MB)").clicked() {
+                                        ui_state.active_modal = Some(ActiveModal::AttachFile);
+                                        ui.close();
+                                    }
+                                    if ui.button("Mention a bot or app").clicked() {
+                                        draft.push('@');
+                                        ui_state.mention_popup_open = true;
+                                        ui.close();
+                                    }
+                                    if ui.button("Slash commands").clicked() {
+                                        if draft.is_empty() {
+                                            draft.push('/');
+                                        }
+                                        ui_state.slash_popup_open = true;
+                                        ui.close();
+                                    }
+                                    if ui
+                                        .button(if ui_state.dictation_active {
+                                            "Stop dictation"
+                                        } else {
+                                            "Dictate"
+                                        })
+                                        .clicked()
+                                    {
+                                        ui_state.dictation_active = !ui_state.dictation_active;
+                                        ui.close();
+                                    }
+                                });
+                                let providers = ui_state.server_snapshot["providers"].clone();
+                                let selected = providers["workspace_default_profile_id"]
+                                    .as_str()
+                                    .or_else(|| providers["account_default_profile_id"].as_str());
+                                let profile = providers["profiles"].as_array().and_then(|items| {
+                                    items.iter().find(|p| p["id"].as_str() == selected)
+                                });
+                                let model = profile
+                                    .and_then(|p| p["selected_model"].as_str())
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or("Choose model");
+                                if ui
+                                    .small_button(model)
+                                    .on_hover_text("Providers & models")
+                                    .clicked()
+                                {
+                                    ui_state.settings_pane =
+                                        crate::ui::state::SettingsPane::Providers;
+                                    ui_state.active_modal = Some(ActiveModal::Settings);
+                                }
+
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    let has_text = !draft.trim().is_empty()
+                                        || !ui_state.pending_attachments.is_empty();
+                                    if has_text {
+                                        // Morphs into ↑ Send circle button when text is present
+                                        let send_btn = egui::Button::new(
+                                            RichText::new(if sending { "…" } else { "↑" })
+                                                .strong()
+                                                .color(palette.accent_text),
+                                        )
+                                        .fill(palette.accent)
+                                        .corner_radius(CornerRadius::same(18))
+                                        .min_size(Vec2::splat(34.0));
+                                        if (ui
+                                            .add_enabled(connected && !sending, send_btn)
+                                            .clicked()
+                                            || (send_enter && connected && !sending))
+                                            && has_text
+                                        {
+                                            let mut payload = draft.trim().to_string();
+                                            for att in ui_state.pending_attachments.drain(..) {
+                                                if !payload.is_empty() {
+                                                    payload.push('\n');
+                                                }
+                                                payload.push_str(&format!("Attached file: {att}"));
+                                            }
+                                            let reply_id =
+                                                ui_state.reply_to.take().map(|r| r.message_id);
+                                            submit_message(payload, reply_id);
+                                        }
+                                    } else {
+                                        // Morphs into 🎙 Voice pill when composer is empty
+                                        let voice_label = if ui_state.voice_active {
+                                            "⏹ End Voice"
+                                        } else {
+                                            "Voice"
+                                        };
+                                        let voice_btn =
+                                            egui::Button::new(RichText::new(voice_label).color(
+                                                if ui_state.voice_active {
+                                                    Color32::WHITE
+                                                } else {
+                                                    palette.text_primary
+                                                },
+                                            ))
+                                            .fill(if ui_state.voice_active {
+                                                palette.status_danger
+                                            } else {
+                                                palette.bg_elevated
+                                            })
+                                            .corner_radius(CornerRadius::same(14));
+                                        if ui
+                                            .add(voice_btn)
+                                            .on_hover_text("Start/Stop Realtime Voice Session")
+                                            .clicked()
+                                        {
+                                            ui_state.active_modal = Some(ActiveModal::ConnectApps);
+                                        }
+                                    }
+                                });
                             });
                         });
-                }
-            }
-            if draft.starts_with('/') && !draft.contains(' ') {
-                ui_state.slash_popup_open = true;
-                egui::Frame::NONE
-                    .fill(palette.bg_elevated)
-                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-                    .corner_radius(CornerRadius::same(6))
-                    .inner_margin(egui::Margin::symmetric(8, 4))
-                    .show(ui, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            let skills=ui_state.server_snapshot["skills"].as_array().cloned().unwrap_or_default();
-                            for skill in skills {if let Some(name)=skill["name"].as_str() && ui.small_button(format!("/{name}")).clicked() {*draft=format!("/{name} ");ui_state.slash_popup_open=false;}}
-                            for (cmd, desc) in SLASH_COMMANDS {
-                                if ui.small_button(*cmd).on_hover_text(*desc).clicked() {
-                                    *draft = (*cmd).to_string();
-                                    ui_state.slash_popup_open = false;
-                                }
-                            }
-                        });
-                    });
-            } else {
-                ui_state.slash_popup_open = false;
-            }
-
-            // Detect IME composition & Backspace for Smart Composer `->` -> `→` + single-Backspace undo
-            let (ime_composing, backspace_pressed) = ctx.input(|i| {
-                let mut had_ime = false;
-                for event in &i.events {
-                    if let egui::Event::Ime(event) = event {
-                        had_ime = true;
-                        match event {
-                            egui::ImeEvent::Enabled | egui::ImeEvent::Preedit(_) => ui_state.ime_composing = true,
-                            egui::ImeEvent::Commit(_) | egui::ImeEvent::Disabled => ui_state.ime_composing = false,
-                        }
-                    }
-                }
-                (ui_state.ime_composing || had_ime, i.key_pressed(Key::Backspace))
-            });
-
-            let composer_id = egui::Id::new("main-draft");
-            let plain_enter = !ime_composing && !ui_state.mention_popup_open && !ui_state.slash_popup_open
-                && ctx.memory(|m| m.has_focus(composer_id))
-                && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter));
-            let command_enter = !ime_composing && crate::native::take_composer_shortcut(ctx);
-            let edit_resp = ui.add(
-                egui::TextEdit::multiline(draft)
-                    .id(composer_id)
-                    .desired_width(ui.available_width())
-                    .desired_rows(2)
-                    .hint_text(
-                        "Message, /do task, @bot handoff, or type -> for → (Drop files < 25 MB to attach)",
-                    ),
-            );
-            if edit_resp.changed() || backspace_pressed {
-                apply_smart_composer_edit(
-                    draft,
-                    ime_composing,
-                    backspace_pressed,
-                    &mut ui_state.last_auto_arrow_pos,
-                );
-            }
-
-            let send_enter = !ime_composing && (command_enter || plain_enter);
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                if ui
-                    .small_button("📎 Attach")
-                    .on_hover_text("Attach file from workspace (< 25 MB)")
-                    .clicked()
-                {
-                    ui_state.active_modal = Some(ActiveModal::AttachFile);
-                }
-                if ui
-                    .small_button("@ Mention")
-                    .on_hover_text("Insert @bot mention")
-                    .clicked()
-                {
-                    draft.push('@');
-                    ui_state.mention_popup_open = true;
-                }
-                if ui
-                    .small_button("/ Command")
-                    .on_hover_text("Insert slash command")
-                    .clicked()
-                {
-                    if draft.is_empty() {
-                        draft.push('/');
-                    }
-                    ui_state.slash_popup_open = true;
-                }
-
-                // Dictation indicator (`Cmd/Ctrl+D`)
-                let dictate_label = if ui_state.dictation_active {
-                    "🔴 [Dictate ON]"
-                } else {
-                    "🎙 Dictate"
-                };
-                if ui
-                    .small_button(dictate_label)
-                    .on_hover_text("Toggle Dictation (Cmd/Ctrl+D)")
-                    .clicked()
-                {
-                    ui_state.dictation_active = !ui_state.dictation_active;
-                }
-
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let has_text = !draft.trim().is_empty() || !ui_state.pending_attachments.is_empty();
-                    if has_text {
-                        // Morphs into ↑ Send circle button when text is present
-                        let send_btn = egui::Button::new(
-                            RichText::new("↑ Send")
-                                .strong()
-                                .color(palette.accent_text),
-                        )
-                        .fill(palette.accent)
-                        .corner_radius(CornerRadius::same(14));
-                        if (ui.add_enabled(connected && !sending, send_btn).clicked()
-                            || (send_enter && connected && !sending))
-                            && has_text
-                        {
-                            let mut payload = draft.trim().to_string();
-                            for att in ui_state.pending_attachments.drain(..) {
-                                if !payload.is_empty() {
-                                    payload.push('\n');
-                                }
-                                payload.push_str(&format!("Attached file: {att}"));
-                            }
-                            let reply_id = ui_state.reply_to.take().map(|r| r.message_id);
-                            submit_message(payload, reply_id);
-                        }
-                    } else {
-                        // Morphs into 🎙 Voice pill when composer is empty
-                        let voice_label = if ui_state.voice_active {
-                            "⏹ End Voice"
-                        } else {
-                            "🎙 Voice"
-                        };
-                        let voice_btn = egui::Button::new(
-                            RichText::new(voice_label).color(if ui_state.voice_active {
-                                Color32::WHITE
-                            } else {
-                                palette.text_primary
-                            }),
-                        )
-                        .fill(if ui_state.voice_active {
-                            palette.status_danger
-                        } else {
-                            palette.bg_elevated
-                        })
-                        .corner_radius(CornerRadius::same(14));
-                        if ui
-                            .add(voice_btn)
-                            .on_hover_text("Start/Stop Realtime Voice Session")
-                            .clicked()
-                        {
-                            ui_state.voice_active = !ui_state.voice_active;
-                        }
-                    }
                 });
             });
         });
 
-    // 4. Virtualized Transcript (`ScrollArea::vertical().show_rows`)
+    // Variable-height virtualization: measured rows replace estimates as they enter the viewport.
     let avail_width = ui.available_width().max(260.0);
-    let row_height = 84.0;
-    let total_rows = filtered_indices.len();
-
+    let content_width = (avail_width - 48.0).clamp(200.0, 960.0);
+    if (ui_state.transcript_width - content_width).abs() > 1.0 {
+        ui_state.transcript_heights.clear();
+        ui_state.transcript_width = content_width;
+    }
+    if ui_state.transcript_heights.len() > 12000 {
+        ui_state.transcript_heights.clear();
+    }
+    let mut offsets = Vec::with_capacity(filtered_indices.len() + 1);
+    offsets.push(0.0);
+    for &idx in &filtered_indices {
+        let row = &rows[idx];
+        let estimate = ui_state
+            .transcript_heights
+            .get(&row.id)
+            .copied()
+            .unwrap_or_else(|| {
+                (row.content.len() as f32 / (content_width / 7.0).max(1.0)).ceil() * 21.0 + 68.0
+            });
+        offsets.push(offsets.last().copied().unwrap_or(0.0) + estimate);
+    }
     egui::ScrollArea::vertical()
-        .id_salt("grok_virtualized_transcript")
+        .id_salt((
+            "grok_virtualized_transcript",
+            active_bot.as_str(),
+            active_channel,
+        ))
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .show_rows(ui, row_height, total_rows, |ui, row_range| {
-            if total_rows == 0 && streaming_text.is_empty() {
-                ui.add_space(32.0);
-                ui.vertical_centered(|ui| {
-                    ui.heading(
-                        RichText::new(format!("Chat with {bot_display_name}"))
-                            .color(palette.text_primary),
-                    );
-                    ui.label(
-                        RichText::new(
-                            "Send a message, type /do to queue a task, or press Cmd/Ctrl+K for the Command Palette.",
-                        )
-                        .color(palette.text_secondary),
-                    );
+        .show_viewport(ui, |ui, viewport| {
+            ui.horizontal(|ui| {
+                ui.add_space(((avail_width - content_width) / 2.0).max(0.0));
+                ui.vertical(|ui| {
+                    ui.set_width(content_width);
+                    if filtered_indices.is_empty() && streaming_text.is_empty() {
+                        ui.add_space((viewport.height() * 0.25).max(28.0));
+                        ui.vertical_centered(|ui| {
+                            ui.heading(
+                                RichText::new(format!("Chat with {bot_display_name}")).size(24.0),
+                            );
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new("Ask anything, or give your bot a task.")
+                                    .color(palette.text_secondary),
+                            );
+                        });
+                    }
+                    let start = offsets
+                        .partition_point(|&height| height < viewport.min.y - 200.0)
+                        .saturating_sub(1)
+                        .min(filtered_indices.len());
+                    let end = offsets
+                        .partition_point(|&height| height < viewport.max.y + 200.0)
+                        .min(filtered_indices.len());
+                    ui.add_space(offsets[start]);
+                    for &row_idx in &filtered_indices[start..end] {
+                        let row = &rows[row_idx];
+                        let layout = layout_cache
+                            .get_or_compute(
+                                &row.id,
+                                &row.content,
+                                row.card.is_some(),
+                                content_width,
+                            )
+                            .clone();
+                        let top = ui.cursor().top();
+                        ui.push_id(&row.id, |ui| {
+                            let is_user = row.role == "user"
+                                || row.author == "You"
+                                || row.author == "operator";
+                            ui.with_layout(
+                                if is_user {
+                                    Layout::right_to_left(Align::Min)
+                                } else {
+                                    Layout::left_to_right(Align::Min)
+                                },
+                                |ui| {
+                                    ui.allocate_ui_with_layout(
+                                        Vec2::new(
+                                            if is_user {
+                                                (ui.painter()
+                                                    .layout(
+                                                        row.content.clone(),
+                                                        egui::FontId::proportional(14.0),
+                                                        palette.text_primary,
+                                                        (content_width * 0.84 - 32.0).max(120.0),
+                                                    )
+                                                    .size()
+                                                    .x
+                                                    + 32.0)
+                                                    .clamp(180.0, (content_width * 0.84).max(180.0))
+                                            } else {
+                                                (content_width * 0.84).max(180.0)
+                                            },
+                                            0.0,
+                                        ),
+                                        Layout::top_down(Align::Min),
+                                        |ui| {
+                                            draw_transcript_row(
+                                                ui,
+                                                ctx,
+                                                ui_state,
+                                                palette,
+                                                active_bot,
+                                                row,
+                                                &layout.parts,
+                                                &layout.tables,
+                                                &layout.markdown,
+                                                connected && !sending,
+                                                &mut send,
+                                                &mut submit_message,
+                                            );
+                                        },
+                                    );
+                                },
+                            );
+                        });
+                        ui.add_space(14.0);
+                        ui_state
+                            .transcript_heights
+                            .insert(row.id.clone(), ui.cursor().top() - top);
+                    }
+                    ui.add_space((offsets.last().copied().unwrap_or(0.0) - offsets[end]).max(0.0));
+                    if !streaming_text.is_empty() {
+                        egui::Frame::NONE
+                            .fill(palette.bg_elevated)
+                            .corner_radius(20)
+                            .inner_margin(egui::Margin::symmetric(16, 12))
+                            .show(ui, |ui| {
+                                ui.small(
+                                    RichText::new(format!("{bot_display_name} · thinking…"))
+                                        .color(palette.text_muted),
+                                );
+                                ui.add(egui::Label::new(streaming_text).selectable(true).wrap());
+                            });
+                    }
                 });
-            }
-
-            for visible_pos in row_range {
-                let Some(&row_idx) = filtered_indices.get(visible_pos) else {
-                    continue;
-                };
-                let row = &rows[row_idx];
-                let layout = layout_cache
-                    .get_or_compute(&row.id, &row.content, row.card.is_some(), avail_width)
-                    .clone();
-
-                ui.push_id(&row.id, |ui| {
-                    draw_transcript_row(
-                        ui,
-                        ctx,
-                        ui_state,
-                        palette,
-                        active_bot,
-                        row,
-                        &layout.parts,
-                        &layout.tables,
-                        &layout.markdown,
-                        connected && !sending,
-                        &mut send,
-                        &mut submit_message,
-                    );
-                });
-                ui.add_space(6.0);
-            }
-
-            if !streaming_text.is_empty() {
-                egui::Frame::NONE
-                    .fill(palette.bg_elevated)
-                    .stroke(Stroke::new(1.0_f32, palette.accent))
-                    .corner_radius(CornerRadius::same(8))
-                    .inner_margin(egui::Margin::symmetric(12, 8))
-                    .show(ui, |ui| {
-                        ui.small(RichText::new(format!("{bot_display_name} · streaming…")).color(palette.accent));
-                        ui.add(egui::Label::new(streaming_text).selectable(true).wrap());
-                    });
-            }
+            });
         });
 }
 
@@ -663,80 +822,67 @@ fn draw_transcript_row(
 ) {
     let is_user = row.role == "user" || row.author == "You" || row.author == "operator";
     let frame_bg = if is_user {
-        palette.accent.gamma_multiply(0.12)
+        if palette.dark_mode {
+            crate::ui::tokens::DARK_CHAT_USER
+        } else {
+            crate::ui::tokens::LIGHT_CHAT_USER
+        }
     } else {
         palette.bg_elevated
     };
 
+    if !is_user {
+        let profile = ui_state.server_snapshot["bots"]
+            .as_array()
+            .and_then(|bots| {
+                bots.iter().find(|b| {
+                    b["id"].as_str() == Some(&row.author)
+                        || b["display_name"].as_str() == Some(&row.author)
+                })
+            });
+        let color = profile
+            .and_then(|p| p["avatar_color"].as_str().or_else(|| p["color"].as_str()))
+            .map(parse_hex_color)
+            .unwrap_or(palette.text_secondary);
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+            paint_bot_avatar(
+                ui.painter(),
+                rect,
+                BotAvatarShape::Circle,
+                color,
+                &row.author,
+                None,
+                None,
+                palette.bg_canvas,
+            );
+            ui.label(RichText::new(&row.author).color(color).size(13.0));
+        });
+        ui.add_space(4.0);
+    }
     let frame_resp = egui::Frame::NONE
         .fill(frame_bg)
-        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(12, 8))
+        .corner_radius(CornerRadius::same(20))
+        .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
-            // Header row: Author + Timestamp + Request-ID badge + Quick Hover Actions
-            ui.horizontal(|ui| {
-                ui.strong(RichText::new(&row.author).size(13.0).color(if is_user {
-                    palette.accent
-                } else {
-                    palette.text_primary
-                }));
-                if let Some(parent) = &row.reply_to_id {
-                    ui.small(format!("Reply to {parent}"));
-                }
-                ui.label("·")
-                    .on_hover_text(format!("Message sequence {}", row.seq));
-                if !row.created_at.is_empty() {
-                    ui.small(RichText::new(&row.created_at).color(palette.text_muted));
-                }
-                if let Some(req_id) = &row.request_id
-                    && !req_id.is_empty()
-                {
-                    let short_id: String = req_id.chars().take(10).collect();
-                    if ui
-                        .small_button(format!("#{short_id}"))
-                        .on_hover_text(format!("Copy Request ID: {req_id}"))
-                        .clicked()
-                    {
-                        ctx.copy_text(req_id.clone());
-                    }
-                }
+            // User bubbles use a dark surface in both themes, including their markdown/code blocks.
+            let user_palette = GrokPalette::resolve("dark", true, "black", "#000000");
+            let palette = if is_user {
+                *ui.visuals_mut() = egui::Visuals::dark();
+                ui.visuals_mut().override_text_color =
+                    Some(crate::ui::tokens::DARK_CHAT_USER_FOREGROUND);
+                &user_palette
+            } else {
+                palette
+            };
 
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .small_button("⎘")
-                        .on_hover_text("Copy message text")
-                        .clicked()
-                    {
-                        ctx.copy_text(row.content.clone());
-                    }
-                    if ui
-                        .small_button("☺")
-                        .on_hover_text("React with emoji")
-                        .clicked()
-                    {
-                        ui_state.emoji_picker_msg =
-                            if ui_state.emoji_picker_msg.as_deref() == Some(row.id.as_str()) {
-                                None
-                            } else {
-                                Some(row.id.clone())
-                            };
-                    }
-                    if ui
-                        .small_button("↩")
-                        .on_hover_text("Reply to this message")
-                        .clicked()
-                    {
-                        let snippet: String = row.content.chars().take(60).collect();
-                        ui_state.reply_to = Some(ReplyBanner {
-                            message_id: row.id.clone(),
-                            author: row.author.clone(),
-                            snippet,
-                        });
-                    }
-                });
-            });
-
+            if is_user {
+                ui.set_min_width(ui.available_width());
+            }
+            if let Some(parent) = &row.reply_to_id {
+                ui.small("Reply")
+                    .on_hover_text(format!("Reply to message {parent}"));
+            }
             // 6-Emoji Quick Reaction Picker Popover (Tier 1 Escape target)
             if ui_state.emoji_picker_msg.as_deref() == Some(row.id.as_str()) {
                 ui.horizontal(|ui| {
@@ -905,7 +1051,51 @@ fn draw_transcript_row(
                 });
             }
         });
-    let _ = frame_resp;
+    let response = frame_resp
+        .response
+        .interact(Sense::focusable_noninteractive());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            format!("Message actions for {}", row.author),
+        )
+    });
+    if response.contains_pointer() || response.has_focus() {
+        ui_state.message_actions_id = Some(row.id.clone());
+    }
+    let hovered = ui_state.message_actions_id.as_deref() == Some(&row.id);
+    ui.scope_builder(
+        if hovered {
+            egui::UiBuilder::new()
+        } else {
+            egui::UiBuilder::new().invisible()
+        },
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.small(short_message_time(&row.created_at))
+                    .on_hover_text(&row.created_at);
+                if ui.small_button("Copy").clicked() {
+                    ctx.copy_text(row.content.clone());
+                }
+                if ui.small_button("Reply").clicked() {
+                    ui_state.reply_to = Some(ReplyBanner {
+                        message_id: row.id.clone(),
+                        author: row.author.clone(),
+                        snippet: row.content.chars().take(60).collect(),
+                    });
+                }
+                if ui.small_button("React").clicked() {
+                    ui_state.emoji_picker_msg = Some(row.id.clone());
+                }
+                if let Some(request) = &row.request_id
+                    && ui.small_button("Request ID").clicked()
+                {
+                    ctx.copy_text(request.clone());
+                }
+            });
+        },
+    );
 }
 
 /// Renders all 14 GrokBot inline interactive card types inside the chat stream.
@@ -1614,4 +1804,14 @@ fn draw_markdown_blocks(
             }
         }
     }
+}
+
+fn short_message_time(value: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|date| {
+            date.with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| value.chars().take(16).collect())
 }

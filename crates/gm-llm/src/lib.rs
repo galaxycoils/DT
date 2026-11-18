@@ -1,3 +1,5 @@
+pub mod chatgpt_auth;
+pub use chatgpt_auth::*;
 pub mod budget;
 pub mod circuit_breaker;
 pub mod cli_driver;

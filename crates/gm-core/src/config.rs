@@ -286,6 +286,9 @@ pub enum ProviderConnectionState {
     #[default]
     Unconfigured,
     Connected,
+    Connecting,
+    CredentialsSaved,
+    Authenticated,
     NeedsRevalidation,
     AuthExpired,
     Error,
@@ -336,6 +339,72 @@ pub fn extract_provider_origin(raw_url: &str) -> crate::error::Result<String> {
     }
 }
 
+/// OAuth grants are valid only at their provider's documented inference resource.
+pub fn validate_oauth_destination(
+    preset: ProviderPreset,
+    auth: ProviderAuthMode,
+    protocol: WireProtocol,
+    base: &str,
+) -> crate::error::Result<()> {
+    let base = base.trim_end_matches('/');
+    let valid = match auth {
+        ProviderAuthMode::ChatGptOAuth => {
+            preset == ProviderPreset::ChatGpt
+                && protocol == WireProtocol::Responses
+                && base == "https://api.openai.com/v1"
+        }
+        ProviderAuthMode::NousPortalOAuth => {
+            preset == ProviderPreset::NousPortal
+                && matches!(
+                    base,
+                    "https://inference-api.nousresearch.com/v1"
+                        | "https://welcome-api.nousresearch.com/v1"
+                )
+        }
+        _ => !matches!(preset, ProviderPreset::ChatGpt | ProviderPreset::NousPortal),
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(crate::error::GmError::SafetyViolation(
+            "OAuth credentials cannot be sent to a custom destination or used as an API key".into(),
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderModel {
+    pub id: String,
+    pub display_name: String,
+    pub context_window: Option<u64>,
+    pub input_modalities: Vec<String>,
+    pub output_modalities: Vec<String>,
+    pub supports_tools: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProviderHealth {
+    pub catalog_status: String,
+    pub models_refreshed_at: Option<String>,
+    pub verification_status: String,
+    pub verified_model: Option<String>,
+    pub verified_at: Option<String>,
+}
+
+impl Default for ProviderHealth {
+    fn default() -> Self {
+        Self {
+            catalog_status: "not_checked".into(),
+            models_refreshed_at: None,
+            verification_status: "not_tested".into(),
+            verified_model: None,
+            verified_at: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderProfileConfig {
@@ -355,6 +424,9 @@ pub struct ProviderProfileConfig {
     pub fallback_profile_id: Option<String>,
     pub connection_state: ProviderConnectionState,
     pub last_error: Option<String>,
+    pub model_catalog: Vec<ProviderModel>,
+    pub health: ProviderHealth,
+    pub revision: u64,
 }
 
 impl Default for ProviderProfileConfig {
@@ -376,6 +448,9 @@ impl Default for ProviderProfileConfig {
             fallback_profile_id: None,
             connection_state: ProviderConnectionState::Unconfigured,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
         }
     }
 }
@@ -390,8 +465,8 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             auth_mode: ProviderAuthMode::ApiKey,
             base_url: "https://api.meta.ai/v1".into(),
             validated_origin: Some("https://api.meta.ai".into()),
-            selected_model: "muse-spark".into(),
-            discovered_models: vec!["muse-spark".into(), "muse-wonder".into()],
+            selected_model: "muse-spark-1.3".into(),
+            discovered_models: vec![],
             credential_ref: Some("secret://keychain/meta_api_key".into()),
             account_id: None,
             account_label: None,
@@ -399,6 +474,9 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             fallback_profile_id: Some("xai-default".into()),
             connection_state: ProviderConnectionState::Unconfigured,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
         },
         ProviderProfileConfig {
             id: "xai-default".into(),
@@ -408,8 +486,8 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             auth_mode: ProviderAuthMode::ApiKey,
             base_url: "https://api.x.ai/v1".into(),
             validated_origin: Some("https://api.x.ai".into()),
-            selected_model: "grok-4".into(),
-            discovered_models: vec!["grok-4".into(), "grok-4-fast".into()],
+            selected_model: "grok-4.7".into(),
+            discovered_models: vec![],
             credential_ref: Some("secret://keychain/xai_api_key".into()),
             account_id: None,
             account_label: None,
@@ -417,6 +495,9 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             fallback_profile_id: None,
             connection_state: ProviderConnectionState::Unconfigured,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
         },
         ProviderProfileConfig {
             id: "chatgpt-default".into(),
@@ -427,7 +508,7 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             base_url: "https://api.openai.com/v1".into(),
             validated_origin: Some("https://api.openai.com".into()),
             selected_model: "gpt-5".into(),
-            discovered_models: vec!["gpt-5".into(), "gpt-5-mini".into(), "o3".into()],
+            discovered_models: vec![],
             credential_ref: None,
             account_id: None,
             account_label: None,
@@ -435,6 +516,9 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             fallback_profile_id: None,
             connection_state: ProviderConnectionState::Unconfigured,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
         },
         ProviderProfileConfig {
             id: "kilo-default".into(),
@@ -442,8 +526,8 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             preset: ProviderPreset::KiloGateway,
             protocol: WireProtocol::ChatCompletions,
             auth_mode: ProviderAuthMode::ApiKey,
-            base_url: "https://api.kilo.ai/api/gateway/v1".into(),
-            validated_origin: Some("https://api.kilo.ai".into()),
+            base_url: "https://ai-gateway.kilo.ai/api/v1".into(),
+            validated_origin: Some("https://ai-gateway.kilo.ai".into()),
             selected_model: "anthropic/claude-sonnet-4".into(),
             discovered_models: vec![],
             credential_ref: Some("secret://keychain/kilo_api_key".into()),
@@ -453,6 +537,9 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             fallback_profile_id: None,
             connection_state: ProviderConnectionState::Unconfigured,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
         },
         ProviderProfileConfig {
             id: "openrouter-default".into(),
@@ -471,6 +558,9 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             fallback_profile_id: None,
             connection_state: ProviderConnectionState::Unconfigured,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
         },
         ProviderProfileConfig {
             id: "nous-default".into(),
@@ -481,7 +571,7 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             base_url: "https://inference-api.nousresearch.com/v1".into(),
             validated_origin: Some("https://inference-api.nousresearch.com".into()),
             selected_model: "Hermes-3-Llama-3.1-70B".into(),
-            discovered_models: vec!["Hermes-3-Llama-3.1-70B".into()],
+            discovered_models: vec![],
             credential_ref: None,
             account_id: None,
             account_label: None,
@@ -489,6 +579,20 @@ pub fn default_provider_profiles() -> Vec<ProviderProfileConfig> {
             fallback_profile_id: None,
             connection_state: ProviderConnectionState::Unconfigured,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
+        },
+        ProviderProfileConfig {
+            id: "openai-api".into(),
+            display_name: "OpenAI API key".into(),
+            preset: ProviderPreset::Custom,
+            protocol: WireProtocol::Responses,
+            auth_mode: ProviderAuthMode::ApiKey,
+            base_url: "https://api.openai.com/v1".into(),
+            validated_origin: Some("https://api.openai.com".into()),
+            selected_model: String::new(),
+            ..Default::default()
         },
         ProviderProfileConfig::default(),
     ]
@@ -534,11 +638,11 @@ impl ProvidersConfig {
             ));
         }
         if let Some(existing) = self.profile_by_id(&incoming.id).cloned() {
-            let old_origin = extract_provider_origin(&existing.base_url).ok();
-            let origin_changed = old_origin.as_deref() != Some(origin.as_str());
-            if origin_changed && incoming.credential_ref.is_some() && !revalidate_credentials {
+            if incoming.credential_ref.is_some() && !revalidate_credentials {
                 incoming.validated_origin = existing.validated_origin;
-                incoming.connection_state = ProviderConnectionState::NeedsRevalidation;
+                if incoming.validated_origin.as_deref() != Some(origin.as_str()) {
+                    incoming.connection_state = ProviderConnectionState::NeedsRevalidation;
+                }
             } else if revalidate_credentials {
                 incoming.validated_origin = Some(origin);
             }
@@ -561,10 +665,10 @@ impl Default for ProvidersConfig {
     fn default() -> Self {
         Self {
             meta_api_base: "https://api.meta.ai/v1".into(),
-            meta_cu_model: "muse-spark".into(),
-            meta_reasoning_model: "muse-wonder".into(),
+            meta_cu_model: "muse-spark-1.3".into(),
+            meta_reasoning_model: "muse-spark-1.3".into(),
             xai_api_base: "https://api.x.ai/v1".into(),
-            xai_model: "grok-4".into(),
+            xai_model: "grok-4.7".into(),
             allow_screenshot_egress_meta: false,
             allow_screenshot_egress_xai: false,
             profiles: default_provider_profiles(),
@@ -947,6 +1051,9 @@ mod tests {
             fallback_profile_id: None,
             connection_state: ProviderConnectionState::Connected,
             last_error: None,
+            model_catalog: Vec::new(),
+            health: Default::default(),
+            revision: 0,
         };
         cfg.upsert_profile(custom.clone(), true).unwrap();
         custom.base_url = "https://llm-b.example.com/v1".into();
@@ -966,6 +1073,8 @@ mod tests {
 #[serde(default)]
 pub struct UiConfig {
     pub theme: String,
+    pub sidebar_width: u16,
+    pub details_width: u16,
     pub accent_mode: String,
     pub hardware_acceleration: bool,
     pub sidebar_collapsed: bool,
@@ -990,6 +1099,8 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             theme: "system".into(),
+            sidebar_width: 316,
+            details_width: 384,
             accent_mode: "bot_color".into(),
             hardware_acceleration: false,
             sidebar_collapsed: false,
@@ -1084,5 +1195,49 @@ impl Default for WorkspaceVmConfig {
             trusted_public_key_hex: String::new(),
             firmware_path: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod oauth_destination_tests {
+    use super::*;
+    #[test]
+    fn oauth_grants_cannot_be_retargeted() {
+        assert!(
+            validate_oauth_destination(
+                ProviderPreset::ChatGpt,
+                ProviderAuthMode::ChatGptOAuth,
+                WireProtocol::Responses,
+                "https://api.openai.com/v1"
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_oauth_destination(
+                ProviderPreset::ChatGpt,
+                ProviderAuthMode::ChatGptOAuth,
+                WireProtocol::Responses,
+                "https://other.example/v1"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_oauth_destination(
+                ProviderPreset::ChatGpt,
+                ProviderAuthMode::ApiKey,
+                WireProtocol::Responses,
+                "https://api.openai.com/v1"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_oauth_destination(
+                ProviderPreset::Custom,
+                ProviderAuthMode::ChatGptOAuth,
+                WireProtocol::Responses,
+                "https://api.openai.com/v1"
+            )
+            .is_err()
+        );
     }
 }

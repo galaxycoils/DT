@@ -30,18 +30,8 @@ impl WorkspaceSection {
             Self::Bots => "Bots",
             Self::Feed => "Feed",
             Self::Goals => "Goals",
-            Self::Spaces => "Spaces",
+            Self::Spaces => "Pages",
             Self::Audit => "Audit",
-        }
-    }
-
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Self::Bots => "🤖",
-            Self::Feed => "⚡",
-            Self::Goals => "🎯",
-            Self::Spaces => "🧩",
-            Self::Audit => "🛡",
         }
     }
 }
@@ -98,42 +88,6 @@ impl NavHistory {
     }
 }
 
-/// Adaptive Bot Sidebar layout mode computed from visible bot count (or user override).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SidebarMode {
-    /// `<= 1` visible bot: sidebar auto-collapses so the main chat gets maximum width.
-    AutoCollapsed,
-    /// `2..=4` visible bots: compact `60px` icon rail with vector shape avatars + unread dots.
-    CompactRail,
-    /// `>= 5` visible bots: full `240px` sidebar with search, sections, groups, and hidden bots footer.
-    FullList,
-}
-
-impl SidebarMode {
-    pub fn from_visible_bot_count(count: usize, manual_override: Option<bool>) -> Self {
-        if let Some(expanded) = manual_override {
-            return if expanded {
-                Self::FullList
-            } else {
-                Self::AutoCollapsed
-            };
-        }
-        match count {
-            0 | 1 => Self::AutoCollapsed,
-            2..=4 => Self::CompactRail,
-            _ => Self::FullList,
-        }
-    }
-
-    pub fn width_px(&self) -> f32 {
-        match self {
-            Self::AutoCollapsed => 0.0,
-            Self::CompactRail => 60.0,
-            Self::FullList => 240.0,
-        }
-    }
-}
-
 /// Four tabs in the 340px right-hand `Bot Details` Drawer (`Cmd/Ctrl+Alt+B`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BotDetailsTab {
@@ -173,11 +127,13 @@ pub enum SettingsPane {
     VaultAndPayments,
     UsageAndBudget,
     SystemAndUpdates,
+    Providers,
 }
 
 impl SettingsPane {
-    pub const ALL: [SettingsPane; 5] = [
+    pub const ALL: [SettingsPane; 6] = [
         SettingsPane::General,
+        SettingsPane::Providers,
         SettingsPane::RulesAndAccess,
         SettingsPane::VaultAndPayments,
         SettingsPane::UsageAndBudget,
@@ -187,6 +143,7 @@ impl SettingsPane {
     pub fn label(&self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Providers => "Providers & models",
             Self::RulesAndAccess => "Rules & Access",
             Self::VaultAndPayments => "Vault & Payments",
             Self::UsageAndBudget => "Usage & Budget",
@@ -295,6 +252,16 @@ pub struct GrokUiState {
     pub sidebar_manual_override: Option<bool>,
     pub show_hidden_bots: bool,
     pub sidebar_search: String,
+    pub sidebar_search_open: bool,
+    pub sidebar_width: f32,
+    pub sidebar_saved_width: f32,
+    pub details_saved_width: f32,
+    pub last_read_seq: HashMap<String, i64>,
+    pub details_width: f32,
+    pub transcript_heights: eframe::egui::ahash::HashMap<String, f32>,
+    pub transcript_width: f32,
+    pub provider_opened_attempt: String,
+    pub provider_poll_at: std::time::Instant,
 
     pub active_chat_kind: String, // "dm" or "channel"
     pub details_drawer_open: bool,
@@ -307,6 +274,7 @@ pub struct GrokUiState {
 
     // Tier 1 transient popovers
     pub emoji_picker_msg: Option<String>,
+    pub message_actions_id: Option<String>,
     pub mention_popup_open: bool,
     pub slash_popup_open: bool,
     pub context_menu_bot: Option<String>,
@@ -424,6 +392,16 @@ impl Default for GrokUiState {
             sidebar_manual_override: None,
             show_hidden_bots: false,
             sidebar_search: String::new(),
+            sidebar_search_open: false,
+            sidebar_width: 316.0,
+            sidebar_saved_width: 316.0,
+            details_saved_width: 384.0,
+            last_read_seq: HashMap::new(),
+            details_width: 384.0,
+            transcript_heights: Default::default(),
+            transcript_width: 0.0,
+            provider_opened_attempt: String::new(),
+            provider_poll_at: std::time::Instant::now(),
             active_chat_kind: "dm".into(),
             details_drawer_open: false,
             details_tab: BotDetailsTab::Settings,
@@ -433,6 +411,7 @@ impl Default for GrokUiState {
             active_modal: None,
             settings_pane: SettingsPane::General,
             emoji_picker_msg: None,
+            message_actions_id: None,
             mention_popup_open: false,
             slash_popup_open: false,
             context_menu_bot: None,
@@ -465,7 +444,7 @@ impl Default for GrokUiState {
             feedback_note: String::new(),
             diagnostics_consent: false,
             bot_profile_draft: None,
-            theme_pref: "dark".into(),
+            theme_pref: "system".into(),
             accent_mode: "bot_color".into(),
             execution_mode: "ask".into(),
             sleep_prevention: false,
@@ -504,7 +483,7 @@ impl Default for GrokUiState {
             attachment_path: String::new(),
             applied_style_key: String::new(),
             media_zoom: 1.0,
-            provider_selected_id: "xai-default".into(),
+            provider_selected_id: "chatgpt-default".into(),
             provider_api_key_draft: Zeroizing::new(String::new()),
             provider_oauth_token_draft: Zeroizing::new(String::new()),
             provider_revalidate_check: false,

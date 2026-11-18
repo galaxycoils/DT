@@ -38,11 +38,7 @@ pub fn draw_active_modal(
     active_bot: &mut String,
     new_channel: &mut String,
     settings_config: &mut GmConfig,
-    meta_key: &mut String,
-    xai_key: &mut String,
-    credentials_notice: &str,
     settings_notice: &mut String,
-    mut save_api_keys: impl FnMut(),
     mut save_config_disk: impl FnMut(),
     mut send: impl FnMut(DaemonRequest),
 ) {
@@ -112,7 +108,7 @@ pub fn draw_active_modal(
                         }),
                     ));
                     actions.push((
-                        "🧩 Open Static Spaces Library".into(),
+                        "🧩 Open Pages Library".into(),
                         "Workspace".into(),
                         Box::new(|st, _, s| {
                             st.section = WorkspaceSection::Spaces;
@@ -260,15 +256,21 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::Settings => {
-            egui::Window::new("⚙ Settings & Governance")
+            let settings_size = egui::vec2(
+                (ctx.content_rect().width() - 48.0).min(1080.0),
+                (ctx.content_rect().height() - 60.0).min(740.0),
+            );
+            egui::Window::new("Settings")
                 .open(&mut keep_open)
-                .default_width(680.0)
-                .max_height(620.0)
+                .fixed_size(settings_size)
+                .fixed_pos(ctx.content_rect().center()-settings_size*0.5)
+                .resizable(false)
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(egui::vec2(200.0,ui.available_height()),egui::Layout::top_down(egui::Align::Min),|ui| {
                         for pane in SettingsPane::ALL {
                             let active = ui_state.settings_pane == pane;
-                            if ui.selectable_label(active, pane.label()).clicked() {
+                            if ui.add_sized([190.0,38.0],egui::Button::new(pane.label()).selected(active)).clicked() {
                                 ui_state.settings_pane = pane;
                                 match pane {
                                     SettingsPane::RulesAndAccess => {
@@ -295,18 +297,21 @@ pub fn draw_active_modal(
                         }
                     });
                     ui.separator();
+                    ui.vertical(|ui| {
+                        ui.set_width((settings_size.x-240.0).max(240.0));
 
                     egui::ScrollArea::vertical()
                         .id_salt("grok_settings_pane_scroll")
-                        .max_height(500.0)
+                        .max_height((ctx.content_rect().height()-150.0).min(660.0))
                         .show(ui, |ui| match ui_state.settings_pane {
+                            SettingsPane::Providers => crate::ui::providers::draw(ui,ui_state,palette,settings_config,&mut send),
                             SettingsPane::General => {
                                 ui.strong("Appearance & Accent");
                                 ui.horizontal(|ui| {
                                     ui.label("Theme:");
                                     for (val, lbl) in [
-                                        ("dark", "Dark (#0B0D10)"),
-                                        ("light", "Light (#F8FAFC)"),
+                                        ("dark", "Dark"),
+                                        ("light", "Light"),
                                         ("system", "Follow System"),
                                     ] {
                                         if ui
@@ -320,23 +325,7 @@ pub fn draw_active_modal(
                                         }
                                     }
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label("Accent Mode:");
-                                    for (val, lbl) in [
-                                        ("bot_color", "Active Bot Color"),
-                                        ("black", "Monochrome High-Contrast"),
-                                    ] {
-                                        if ui
-                                            .selectable_label(ui_state.accent_mode == val, lbl)
-                                            .clicked()
-                                        {
-                                            ui_state.accent_mode = val.to_string();
-                                            send(DaemonRequest::SaveUiSettings {
-                                                ui: serde_json::json!({ "accent_mode": val }),
-                                            });
-                                        }
-                                    }
-                                });
+                                ui.small("Bot colors appear in avatars and message authors.");
 
                                 ui.separator();
                                 ui.strong("Performance");
@@ -386,35 +375,8 @@ pub fn draw_active_modal(
                                 }
 
                                 ui.separator();
-                                ui.strong("Provider API Credentials (OS Keychain)");
-                                ui.horizontal(|ui| {
-                                    ui.label("Meta API Key:");
-                                    ui.add(
-                                        egui::TextEdit::singleline(meta_key)
-                                            .password(true)
-                                            .desired_width(220.0),
-                                    );
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label("xAI API Key:");
-                                    ui.add(
-                                        egui::TextEdit::singleline(xai_key)
-                                            .password(true)
-                                            .desired_width(220.0),
-                                    );
-                                });
-                                if ui
-                                    .add_enabled(
-                                        !meta_key.is_empty() || !xai_key.is_empty(),
-                                        egui::Button::new("Save API Keys to Keychain"),
-                                    )
-                                    .clicked()
-                                {
-                                    save_api_keys();
-                                }
-                                if !credentials_notice.is_empty() {
-                                    ui.small(credentials_notice);
-                                }
+                                if ui.button("Providers & models").clicked(){ui_state.settings_pane=SettingsPane::Providers;}
+
                             }
 
                             SettingsPane::RulesAndAccess => {
@@ -712,301 +674,6 @@ pub fn draw_active_modal(
                                     });
                                 }
 
-                                ui.separator();
-                                ui.strong("LLM Provider Profiles (ChatGPT OAuth, Kilo, OpenRouter, Nous, Custom)");
-                                if settings_config.providers.profiles.is_empty() {
-                                    settings_config.providers.profiles =
-                                        gm_core::config::default_provider_profiles();
-                                }
-                                ui.horizontal(|ui| {
-                                    ui.label("Workspace default:");
-                                    let ws_curr = settings_config
-                                        .providers
-                                        .workspace_default_profile_id
-                                        .clone()
-                                        .unwrap_or_else(|| "(auto)".into());
-                                    egui::ComboBox::from_id_salt("ws_default_provider")
-                                        .selected_text(&ws_curr)
-                                        .show_ui(ui, |ui| {
-                                            for p in &settings_config.providers.profiles {
-                                                let selected = settings_config
-                                                    .providers
-                                                    .workspace_default_profile_id
-                                                    .as_deref()
-                                                    == Some(p.id.as_str());
-                                                if ui
-                                                    .selectable_label(selected, &p.display_name)
-                                                    .clicked()
-                                                {
-                                                    settings_config
-                                                        .providers
-                                                        .workspace_default_profile_id =
-                                                        Some(p.id.clone());
-                                                }
-                                            }
-                                        });
-                                    ui.label("Account default:");
-                                    let acc_curr = settings_config
-                                        .providers
-                                        .account_default_profile_id
-                                        .clone()
-                                        .unwrap_or_else(|| "(auto)".into());
-                                    egui::ComboBox::from_id_salt("acc_default_provider")
-                                        .selected_text(&acc_curr)
-                                        .show_ui(ui, |ui| {
-                                            for p in &settings_config.providers.profiles {
-                                                let selected = settings_config
-                                                    .providers
-                                                    .account_default_profile_id
-                                                    .as_deref()
-                                                    == Some(p.id.as_str());
-                                                if ui
-                                                    .selectable_label(selected, &p.display_name)
-                                                    .clicked()
-                                                {
-                                                    settings_config
-                                                        .providers
-                                                        .account_default_profile_id =
-                                                        Some(p.id.clone());
-                                                }
-                                            }
-                                        });
-                                });
-
-                                ui.horizontal_wrapped(|ui| {
-                                    for p in &settings_config.providers.profiles {
-                                        let state_dot = match p.connection_state {
-                                            gm_core::config::ProviderConnectionState::Connected => "●",
-                                            gm_core::config::ProviderConnectionState::NeedsRevalidation => "⚠",
-                                            gm_core::config::ProviderConnectionState::Error => "✕",
-                                            gm_core::config::ProviderConnectionState::Unconfigured
-                                            | gm_core::config::ProviderConnectionState::AuthExpired => "○",
-                                        };
-                                        if ui
-                                            .selectable_label(
-                                                ui_state.provider_selected_id == p.id,
-                                                format!("{state_dot} {}", p.display_name),
-                                            )
-                                            .clicked()
-                                        {
-                                            ui_state.provider_selected_id = p.id.clone();
-                                            ui_state.provider_revalidate_check = false;
-                                        }
-                                    }
-                                    if ui.small_button("+ Custom").clicked() {
-                                        let id = format!(
-                                            "custom-{}",
-                                            settings_config.providers.profiles.len() + 1
-                                        );
-                                        settings_config.providers.profiles.push(
-                                            gm_core::config::ProviderProfileConfig {
-                                                id: id.clone(),
-                                                display_name: format!("Custom ({id})"),
-                                                preset: gm_core::config::ProviderPreset::Custom,
-                                                protocol: gm_core::config::WireProtocol::ChatCompletions,
-                                                auth_mode: gm_core::config::ProviderAuthMode::ApiKey,
-                                                base_url: "https://api.example.com/v1".into(),
-                                                selected_model: "gpt-4o-mini".into(),
-                                                ..Default::default()
-                                            },
-                                        );
-                                        ui_state.provider_selected_id = id;
-                                    }
-                                });
-
-                                if let Some(idx) = settings_config
-                                    .providers
-                                    .profiles
-                                    .iter()
-                                    .position(|p| p.id == ui_state.provider_selected_id)
-                                {
-                                    let prof = &mut settings_config.providers.profiles[idx];
-                                    ui.group(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.strong(&prof.display_name);
-                                            ui.small(format!(
-                                                "({:?} / {:?} / {:?})",
-                                                prof.preset, prof.auth_mode, prof.connection_state
-                                            ));
-                                        });
-                                        if let Some(ref err) = prof.last_error {
-                                            ui.colored_label(
-                                                egui::Color32::from_rgb(0xEF, 0x44, 0x44),
-                                                err,
-                                            );
-                                        }
-                                        if matches!(
-                                            prof.connection_state,
-                                            gm_core::config::ProviderConnectionState::NeedsRevalidation
-                                        ) {
-                                            ui.colored_label(
-                                                egui::Color32::from_rgb(0xF5, 0x9E, 0x0B),
-                                                "Endpoint origin changed: revalidate credentials before sending requests.",
-                                            );
-                                            ui.checkbox(
-                                                &mut ui_state.provider_revalidate_check,
-                                                "Revalidate credentials for new endpoint origin",
-                                            );
-                                        }
-                                        ui.horizontal(|ui| {
-                                            ui.label("Base URL:");
-                                            ui.text_edit_singleline(&mut prof.base_url);
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.label("Selected model:");
-                                            ui.text_edit_singleline(&mut prof.selected_model);
-                                            if matches!(
-                                                prof.preset,
-                                                gm_core::config::ProviderPreset::Custom
-                                            ) {
-                                                let proto_lbl = match prof.protocol {
-                                                    gm_core::config::WireProtocol::Responses => "Responses (/responses)",
-                                                    gm_core::config::WireProtocol::ChatCompletions => "ChatCompletions",
-                                                    gm_core::config::WireProtocol::Cli => "CLI",
-                                                };
-                                                egui::ComboBox::from_id_salt("custom_proto")
-                                                    .selected_text(proto_lbl)
-                                                    .show_ui(ui, |ui| {
-                                                        ui.selectable_value(
-                                                            &mut prof.protocol,
-                                                            gm_core::config::WireProtocol::ChatCompletions,
-                                                            "ChatCompletions",
-                                                        );
-                                                        ui.selectable_value(
-                                                            &mut prof.protocol,
-                                                            gm_core::config::WireProtocol::Responses,
-                                                            "Responses (/responses)",
-                                                        );
-                                                    });
-                                            }
-                                        });
-                                        ui.horizontal(|ui| {
-                                            ui.checkbox(
-                                                &mut prof.allow_screenshot_egress,
-                                                "Allow screenshot egress to this provider",
-                                            );
-                                        });
-                                        if matches!(
-                                            prof.auth_mode,
-                                            gm_core::config::ProviderAuthMode::ChatGptOAuth
-                                                | gm_core::config::ProviderAuthMode::NousPortalOAuth
-                                        ) {
-                                            ui.horizontal(|ui| {
-                                                if ui.button("Start OAuth Sign-In").clicked() {
-                                                    send(DaemonRequest::ProviderOAuthAction {
-                                                        profile_id: prof.id.clone(),
-                                                        op: "start".into(),
-                                                        payload: serde_json::json!({}),
-                                                    });
-                                                }
-                                                if prof.credential_ref.is_some()
-                                                    && ui.button("Disconnect OAuth").clicked()
-                                                {
-                                                    send(DaemonRequest::ProviderOAuthAction {
-                                                        profile_id: prof.id.clone(),
-                                                        op: "disconnect".into(),
-                                                        payload: serde_json::json!({}),
-                                                    });
-                                                }
-                                            });
-                                            if let Some(auth_url) = ui_state.responses
-                                                ["provider_oauth"]["authorize_url"]
-                                                .as_str()
-                                            {
-                                                ui.hyperlink_to(
-                                                    "Open Sign-In Window in Browser",
-                                                    auth_url,
-                                                );
-                                            }
-                                            ui.horizontal(|ui| {
-                                                ui.label("OAuth token:");
-                                                ui.add(
-                                                    egui::TextEdit::singleline(
-                                                        &mut *ui_state.provider_oauth_token_draft,
-                                                    )
-                                                    .password(true)
-                                                    .desired_width(210.0)
-                                                    .hint_text("Access token from callback"),
-                                                );
-                                                if ui
-                                                    .add_enabled(
-                                                        !ui_state
-                                                            .provider_oauth_token_draft
-                                                            .trim()
-                                                            .is_empty(),
-                                                        egui::Button::new("Connect OAuth"),
-                                                    )
-                                                    .clicked()
-                                                {
-                                                    let tok = std::mem::take(
-                                                        &mut *ui_state.provider_oauth_token_draft,
-                                                    );
-                                                    send(DaemonRequest::ProviderOAuthAction {
-                                                        profile_id: prof.id.clone(),
-                                                        op: "save_bundle".into(),
-                                                        payload: serde_json::json!({
-                                                            "access_token": tok,
-                                                        }),
-                                                    });
-                                                }
-                                            });
-                                        } else {
-                                            ui.horizontal(|ui| {
-                                                ui.label("API Key / Token:");
-                                                ui.add(
-                                                    egui::TextEdit::singleline(
-                                                        &mut *ui_state.provider_api_key_draft,
-                                                    )
-                                                    .password(true)
-                                                    .desired_width(210.0)
-                                                    .hint_text("Stored in OS Keychain"),
-                                                );
-                                            });
-                                        }
-                                        ui.horizontal(|ui| {
-                                            if ui.button("Save Provider Profile").clicked() {
-                                                let key = std::mem::take(
-                                                    &mut *ui_state.provider_api_key_draft,
-                                                );
-                                                let api_key = if key.trim().is_empty() {
-                                                    None
-                                                } else {
-                                                    Some(key)
-                                                };
-                                                send(DaemonRequest::SaveProviderProfile {
-                                                    profile: Box::new(prof.clone()),
-                                                    api_key,
-                                                    revalidate_credentials: ui_state
-                                                        .provider_revalidate_check,
-                                                    workspace_default_profile_id: settings_config
-                                                        .providers
-                                                        .workspace_default_profile_id
-                                                        .clone(),
-                                                    account_default_profile_id: settings_config
-                                                        .providers
-                                                        .account_default_profile_id
-                                                        .clone(),
-                                                });
-                                                ui_state.provider_revalidate_check = false;
-                                            }
-                                            if ui.button("Discover Models").clicked() {
-                                                send(DaemonRequest::DiscoverProviderModels {
-                                                    profile_id: prof.id.clone(),
-                                                });
-                                            }
-                                        });
-                                        if !prof.discovered_models.is_empty() {
-                                            ui.horizontal_wrapped(|ui| {
-                                                ui.small("Discovered:");
-                                                for m in prof.discovered_models.iter().take(10) {
-                                                    if ui.small_button(m).clicked() {
-                                                        prof.selected_model = m.clone();
-                                                    }
-                                                }
-                                            });
-                                        }
-                                    });
-                                }
 
                                 ui.separator();
                                 ui.label("Legacy Meta / xAI endpoints & models");
@@ -1044,6 +711,8 @@ pub fn draw_active_modal(
                                 }
                             }
                         });
+                    });
+                    });
                 });
         }
 

@@ -47,9 +47,10 @@ pub fn draw_bot_details_drawer(
         return;
     }
 
-    egui::SidePanel::right("grok_bot_details_drawer")
-        .exact_width(340.0)
-        .resizable(false)
+    let response=egui::SidePanel::right("grok_bot_details_drawer")
+        .default_width(ui_state.details_width)
+        .width_range(320.0..=600.0)
+        .resizable(true)
         .frame(
             egui::Frame::NONE
                 .fill(palette.bg_sidebar)
@@ -565,6 +566,15 @@ pub fn draw_bot_details_drawer(
                     }
                 });
         });
+    ui_state.details_width = response.response.rect.width();
+    if ctx.input(|i| i.pointer.any_released())
+        && (ui_state.details_width - ui_state.details_saved_width).abs() > 0.5
+    {
+        ui_state.details_saved_width = ui_state.details_width;
+        send(DaemonRequest::SaveUiSettings {
+            ui: serde_json::json!({"details_width":ui_state.details_width.round() as u16}),
+        });
+    }
 }
 
 impl GrokUiState {

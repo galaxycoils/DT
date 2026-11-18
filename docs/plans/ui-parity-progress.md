@@ -1,23 +1,33 @@
-# GrokBot parity implementation
+# v0.7.0 implementation status
 
-The implementation is on `feat/grokbot-ui-parity`, PR #5, targeting v0.5.0.
-The original design and handoff are archived in `grokbot-ui-parity.md` and
-`astra-continuation.md`; their absolute links refer to the original machine.
+Authorized scope: implement the accepted native/browser Rakazo layout and provider connection plan, then push and publish an ad-hoc Apple Silicon prerelease. Work is on `codex/v0.7.0-rakazo-providers` in the attached checkout. Preserve the separate, dirty original checkout.
 
-The legacy companion has been replaced by the responsive rail/sidebar/chat,
-Details, Split Space and modal architecture. Native UI data contracts, buffered
-editing, routines/history/webhooks, group metadata, memory workflows, settings,
-attachments, navigation, avatar/media loading and workspace controls are wired to
-local backend operations. Bridge-dependent actions expose setup states.
+The reference is pinned to Rakazo `8aa0f787557697ee7fb5e2f16fb39f4249b35ad4`. Shared semantic colors are generated from `ui/design-tokens.json`. The current implementation uses one remembered sidebar, conversation previews and avatars, a centered header, measured message virtualization, rounded composer, navigation under Activity/Pages, resizable details, and a provider settings page. Native system fonts retain egui fallbacks. Existing explicit theme preferences remain valid.
 
-The companion build stays below the strict 45 KiB raw CSS+JS budget. It uses inert
-HTML metadata for static forms/copy and a generated, framework-free script.
-`tools/companion/README.md` documents generation and real-browser verification.
+Provider setup owns the OAuth lifecycle in the daemon. It separates durable credential storage, authentication, catalog refresh, and selected-model reply verification. Revision checks reject stale completion and disconnect races. Provider-only startup and live routing use the current settings. Binary lookup now prefers the running app over an older installation.
 
-Validation includes full workspace Clippy/tests, WGPU compilation, formatting,
-DOM/SSE tests and an isolated daemon browser smoke. CI runs the platform-specific
-Linux capture and macOS packaging checks. See PR #5 checks for the final commit.
+Files are indexed by responsibility:
 
-The release does not claim that headless tests certify process RSS, idle CPU,
-macOS TCC permissions, or real cloud adapters. Those require the configured
-native-certification runner and connected adapters described in the design.
+- Config and model metadata: `crates/gm-core/src/config.rs`.
+- Provider transport, account identity, renewal: `crates/gm-llm/src/{client,chatgpt_auth,providers_oauth,responses_api}.rs`.
+- Daemon-owned connection actions: `crates/gm-openbot/src/provider_connections.rs`.
+- Native shell and provider UI: `crates/gm-ui/src/ui/`.
+- Browser source: `crates/gm-openbot/src/companion_ui.source.{js,html}` and `companion_layout.css`.
+- Shared token generation: `tools/generate-ui-tokens.py`.
+
+The companion remains framework-free and now has a 64 KiB combined raw CSS/JS ceiling, including the expanded provider UI. HTML contains inert static form/copy data. Generation must run before Cargo embeds assets.
+
+Verification commands:
+
+```sh
+npm run build --prefix tools/companion
+npm test --prefix tools/companion
+node --test tools/tests/companion-events.test.cjs
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+```
+
+Local validation logs and isolated native/browser test storage live under `/tmp/gm-v070/`; this path is disposable and is not release evidence. The full workspace run passed 352 tests, including catalog, group preview, contrast, and relocated-bundle coverage. Targeted connection tests were repeated after the final OAuth resource/destination checks. Final checks, visual review, GitHub CI, and tagged packaging must use the final source before publishing.
+
+Account access is absent. [Provider validation](../provider-validation.md) records pending live checks. Full native certification, signed updater delivery, and other existing platform gates remain in [release readiness](../release-readiness.md).

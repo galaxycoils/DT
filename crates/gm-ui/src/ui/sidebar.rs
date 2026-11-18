@@ -2,9 +2,9 @@
 //! `FullList` `240px` for `5+`), Vector Bot Avatars, Unread Badges, Context Menus, and `Hidden Bots (N)`.
 
 use crate::ui::cache::BoundedTextureCache;
-use crate::ui::state::{ActiveModal, GrokUiState, SidebarMode};
+use crate::ui::state::{ActiveModal, GrokUiState};
 use crate::ui::theme::{BotAvatarShape, GrokPalette, paint_bot_avatar, parse_hex_color};
-use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Sense, Stroke, Vec2};
+use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Sense, Vec2};
 use gm_core::ipc::DaemonRequest;
 use serde_json::Value;
 
@@ -22,235 +22,250 @@ pub fn draw_adaptive_sidebar(
     active_channel: &mut String,
     mut send: impl FnMut(DaemonRequest),
 ) {
-    if ctx.content_rect().width() < 900.0 {
-        if ui_state.sidebar_manual_override == Some(true) {
-            let mut open = true;
-            egui::Window::new("Bots & Groups")
-                .open(&mut open)
-                .fixed_pos(egui::pos2(48.0, 52.0))
-                .default_width(240.0)
-                .max_height(ctx.content_rect().height() - 100.0)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.button("＋ Bot").clicked() {
-                            ui_state.active_modal = Some(ActiveModal::CreateBot);
-                        }
-                        if ui.button("＋ Group").clicked() {
-                            ui_state.active_modal = Some(ActiveModal::CreateChannel);
-                        }
-                    });
-                    ui.text_edit_singleline(&mut ui_state.sidebar_search);
-                    let needle = ui_state.sidebar_search.to_lowercase();
-                    for bot in bots.iter().filter(|b| matches_bot_filter(b, &needle)) {
-                        let id = bot["id"].as_str().unwrap_or_default();
-                        let unread = unread_counts[format!("dm:{id}")].as_u64().unwrap_or(0);
-
-                        if ui
-                            .button(format!(
-                                "{} · {unread}",
-                                bot["display_name"].as_str().unwrap_or(id)
-                            ))
-                            .clicked()
-                        {
-                            *active_bot = id.into();
-                            ui_state.active_chat_kind = "dm".into();
-                            send(DaemonRequest::GetDirectChatHistory {
-                                bot_id: id.into(),
-                                before_seq: None,
-                                limit: Some(50),
-                            });
-                            ui_state.sidebar_manual_override = Some(false);
-                        }
-                    }
-                    for channel in channels {
-                        let id = channel["id"].as_str().unwrap_or_default();
-                        if ui.button(format!("# {id}")).clicked() {
-                            *active_channel = id.into();
-                            ui_state.active_chat_kind = "channel".into();
-                            send(DaemonRequest::ChannelHistory {
-                                channel_id: id.into(),
-                            });
-                            ui_state.sidebar_manual_override = Some(false);
-                        }
-                    }
-                });
-            if !open {
-                ui_state.sidebar_manual_override = Some(false);
-            }
-        }
-        return;
-    }
-    let visible_bots: Vec<&Value> = bots
-        .iter()
-        .filter(|b| !b["hidden_from_sidebar"].as_bool().unwrap_or(false))
-        .collect();
-    let hidden_bots: Vec<&Value> = bots
-        .iter()
-        .filter(|b| b["hidden_from_sidebar"].as_bool().unwrap_or(false))
-        .collect();
-
-    let mode = SidebarMode::from_visible_bot_count(
-        if !sections.is_empty() {
-            5.max(visible_bots.len() + channels.len())
-        } else {
-            visible_bots.len() + channels.len()
-        },
-        ui_state.sidebar_manual_override,
-    );
-
-    if mode == SidebarMode::AutoCollapsed {
-        return;
-    }
-
-    if mode == SidebarMode::CompactRail {
-        egui::SidePanel::left("grok_compact_bot_rail")
-            .exact_width(mode.width_px())
-            .resizable(false)
-            .frame(
-                egui::Frame::NONE
-                    .fill(palette.bg_sidebar)
-                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-                    .inner_margin(egui::Margin::symmetric(8, 8)),
-            )
-            .show(ctx, |ui| {
-                ui.vertical_centered(|ui| {
-                    if ui
-                        .small_button("»")
-                        .on_hover_text("Expand full bot sidebar")
-                        .clicked()
-                    {
-                        ui_state.sidebar_manual_override = Some(true);
-                    }
-                    ui.add_space(6.0);
-                    for bot in &visible_bots {
-                        let id = bot["id"].as_str().unwrap_or("muse");
-                        let name = bot["display_name"].as_str().unwrap_or(id);
-                        let color = parse_hex_color(
-                            bot["avatar_color"]
-                                .as_str()
-                                .or_else(|| bot["color"].as_str())
-                                .unwrap_or("#2F7CF6"),
-                        );
-                        let shape = BotAvatarShape::from_name(
-                            bot["avatar_shape"].as_str().unwrap_or("Circle"),
-                        );
-                        let is_selected =
-                            ui_state.active_chat_kind == "dm" && active_bot.as_str() == id;
-                        let (rect, resp) =
-                            ui.allocate_exact_size(Vec2::new(38.0, 38.0), Sense::click());
-                        if is_selected {
-                            ui.painter().rect_stroke(
-                                rect.expand(2.0),
-                                CornerRadius::same(10),
-                                Stroke::new(2.0_f32, palette.accent),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-                        let tex = textures.get(&format!("avatar:{id}")).map(|(t, _)| t);
-                        paint_bot_avatar(
-                            ui.painter(),
-                            rect.shrink(3.0),
-                            shape,
-                            color,
-                            name,
-                            tex,
-                            Some("online"),
-                            palette.bg_sidebar,
-                        );
-                        if resp.clicked() {
-                            *active_bot = id.to_string();
-                            ui_state.active_chat_kind = "dm".into();
-                            send(DaemonRequest::GetDirectChatHistory {
-                                bot_id: id.to_string(),
-                                before_seq: None,
-                                limit: Some(100),
-                            });
-                            send(DaemonRequest::MarkChatRead {
-                                chat_kind: "dm".into(),
-                                chat_id: id.to_string(),
-                            });
-                        }
-                        resp.on_hover_text(name);
-                        ui.add_space(6.0);
-                    }
-                    if ui.small_button("＋").on_hover_text("New Bot").clicked() {
-                        ui_state.active_modal = Some(ActiveModal::CreateBot);
-                    }
-                });
-            });
-        return;
-    }
-
-    // Full 240px Sidebar
-    egui::SidePanel::left("grok_full_bot_sidebar")
-        .exact_width(mode.width_px())
-        .resizable(false)
+    use crate::ui::{
+        icons::{self, Icon},
+        rail::select_section,
+        state::{SettingsPane, WorkspaceSection},
+    };
+    let collapsed = ui_state.sidebar_manual_override == Some(false);
+    let narrow = ctx.content_rect().width() < 760.0;
+    let mini = collapsed || narrow;
+    let response = egui::SidePanel::left("grok_conversation_sidebar")
+        .default_width(if mini { 72.0 } else { ui_state.sidebar_width })
+        .width_range(if mini { 72.0..=72.0 } else { 240.0..=480.0 })
+        .resizable(!mini)
         .frame(
             egui::Frame::NONE
                 .fill(palette.bg_sidebar)
-                .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-                .inner_margin(egui::Margin::symmetric(10, 10)),
+                .inner_margin(egui::Margin::symmetric(12, 14)),
         )
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.strong(RichText::new("Workspace").color(palette.text_primary));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if icons::button(
+                    ui,
+                    Icon::Sidebar,
+                    if mini {
+                        "Expand sidebar"
+                    } else {
+                        "Collapse sidebar"
+                    },
+                    palette.text_secondary,
+                )
+                .clicked()
+                {
+                    ui_state.sidebar_manual_override = Some(collapsed);
+                    send(DaemonRequest::SaveUiSettings {
+                        ui: serde_json::json!({"sidebar_collapsed":!collapsed}),
+                    });
+                }
+                if !mini {
+                    ui.add_space(4.0);
+                    ui.strong("Grok Muse");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let plus = icons::button(ui, Icon::Plus, "Create", palette.text_secondary);
+                        egui::Popup::menu(&plus).show(|ui| {
+                            for (label, modal) in [
+                                ("New bot", ActiveModal::CreateBot),
+                                ("New group", ActiveModal::CreateChannel),
+                                ("Studio · skills & routines", ActiveModal::Studio),
+                            ] {
+                                if ui.button(label).clicked() {
+                                    ui_state.active_modal = Some(modal);
+                                    ui.close();
+                                }
+                            }
+                        });
+                        if icons::button(
+                            ui,
+                            Icon::Search,
+                            "Search conversations",
+                            palette.text_secondary,
+                        )
+                        .clicked()
+                        {
+                            ui_state.sidebar_search_open = !ui_state.sidebar_search_open;
+                        }
+                    });
+                }
+            });
+            ui.add_space(18.0);
+            if ui_state.sidebar_search_open && !mini {
+                ui.add(
+                    egui::TextEdit::singleline(&mut ui_state.sidebar_search)
+                        .hint_text("Search conversations…")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.add_space(10.0);
+            }
+            ui.horizontal(|ui| {
+                let activity =
+                    icons::button(ui, Icon::Activity, "Activity", palette.text_secondary);
+                egui::Popup::menu(&activity).show(|ui| {
+                    for section in [
+                        WorkspaceSection::Feed,
+                        WorkspaceSection::Goals,
+                        WorkspaceSection::Audit,
+                    ] {
+                        if ui
+                            .selectable_label(ui_state.section == section, section.label())
+                            .clicked()
+                        {
+                            select_section(ui_state, section, &mut send);
+                            ui.close();
+                        }
+                    }
+                    ui.separator();
+                    let paused = ui_state.server_snapshot["status"]["paused"]
+                        .as_bool()
+                        .unwrap_or(false);
                     if ui
-                        .small_button("«")
-                        .on_hover_text("Collapse sidebar")
+                        .button(if paused {
+                            "Resume tasks"
+                        } else {
+                            "Pause tasks"
+                        })
                         .clicked()
                     {
-                        ui_state.sidebar_manual_override = Some(false);
-                    }
-                    if ui.small_button("＋ Group").clicked() {
-                        ui_state.active_modal = Some(ActiveModal::CreateChannel);
+                        send(DaemonRequest::SetPaused { paused: !paused });
+                        ui.close();
                     }
                     if ui
-                        .small_button("＋ Bot")
-                        .on_hover_text("Create a new specialist Bot")
+                        .button(RichText::new("Stop all tasks").color(palette.status_danger))
                         .clicked()
                     {
-                        ui_state.active_modal = Some(ActiveModal::CreateBot);
+                        send(DaemonRequest::EmergencyKill);
+                        ui.close();
                     }
                 });
-            });
-            ui.add_space(4.0);
-            ui.add(
-                egui::TextEdit::singleline(&mut ui_state.sidebar_search)
-                    .desired_width(ui.available_width())
-                    .hint_text("Filter bots or #channels…"),
-            );
-            ui.add_space(6.0);
-
-            let status = &ui_state.server_snapshot["status"];
-            ui.small(format!(
-                "${:.2} / ${:.2} · {}",
-                status["daily_spend_usd"].as_f64().unwrap_or(0.0),
-                status["daily_cap_usd"].as_f64().unwrap_or(0.0),
-                if status["paused"].as_bool().unwrap_or(false) {
-                    "Paused"
-                } else {
-                    "Daemon"
+                if !mini {
+                    ui.label(RichText::new("Activity").color(palette.text_secondary));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if icons::button(ui, Icon::Pages, "Pages", palette.text_secondary).clicked()
+                        {
+                            select_section(ui_state, WorkspaceSection::Spaces, &mut send);
+                        }
+                    });
                 }
-            ));
+            });
+            ui.add_space(12.0);
+            // Footer remains visible while conversations scroll.
+            egui::TopBottomPanel::bottom("grok_sidebar_account")
+                .frame(egui::Frame::NONE)
+                .show_inside(ui, |ui| {
+                    ui.add_space(10.0);
+                    if !mini
+                        && ui
+                            .add_sized(
+                                [ui.available_width(), 36.0],
+                                egui::Button::new("Connect apps")
+                                    .fill(palette.bg_elevated)
+                                    .corner_radius(12),
+                            )
+                            .clicked()
+                    {
+                        ui_state.active_modal = Some(ActiveModal::ConnectApps);
+                    }
+                    ui.horizontal(|ui| {
+                        if icons::button(ui, Icon::Settings, "Settings", palette.text_secondary)
+                            .clicked()
+                        {
+                            ui_state.active_modal = Some(ActiveModal::Settings);
+                        }
+                        if !mini {
+                            ui.menu_button("Your workspace", |ui| {
+                                if ui.button("Providers & models").clicked() {
+                                    ui_state.settings_pane = SettingsPane::Providers;
+                                    ui_state.active_modal = Some(ActiveModal::Settings);
+                                    ui.close();
+                                }
+                                if ui.button("Keyboard shortcuts").clicked() {
+                                    ui_state.active_modal = Some(ActiveModal::Shortcuts);
+                                    ui.close();
+                                }
+                                if ui.button("Command palette").clicked() {
+                                    ui_state.active_modal = Some(ActiveModal::CommandPalette);
+                                    ui.close();
+                                }
+                            });
+                        }
+                    });
+                });
             let needle = ui_state.sidebar_search.trim().to_ascii_lowercase();
-
+            let mut visible: Vec<_> = bots
+                .iter()
+                .filter(|b| {
+                    !b["hidden_from_sidebar"].as_bool().unwrap_or(false)
+                        && matches_bot_filter(b, &needle)
+                })
+                .collect();
+            visible.sort_by_key(|bot| !bot["pinned"].as_bool().unwrap_or(false));
             egui::ScrollArea::vertical()
                 .id_salt("grok_sidebar_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    // Pinned & Primary Bots
-                    let pinned: Vec<&&Value> = visible_bots
-                        .iter()
-                        .filter(|b| {
-                            (b["is_primary"].as_bool().unwrap_or(false)
-                                || b["pinned"].as_bool().unwrap_or(false))
-                                && matches_bot_filter(b, &needle)
-                        })
-                        .collect();
-                    if !pinned.is_empty() {
-                        ui.small(RichText::new("PINNED").color(palette.text_muted));
-                        for bot in pinned {
+                    if !mini {
+                        ui.label(
+                            RichText::new("Personal")
+                                .size(12.0)
+                                .color(palette.text_muted),
+                        );
+                        ui.add_space(8.0);
+                    }
+                    for bot in &visible {
+                        if !mini
+                            && !bot["pinned"].as_bool().unwrap_or(false)
+                            && bot["section_id"].as_str().is_some_and(|id| {
+                                sections
+                                    .iter()
+                                    .any(|section| section["id"].as_str() == Some(id))
+                            })
+                        {
+                            continue;
+                        }
+
+                        if mini {
+                            let id = bot["id"].as_str().unwrap_or("muse");
+                            let name = bot["display_name"].as_str().unwrap_or(id);
+                            let (rect, resp) =
+                                ui.allocate_exact_size(Vec2::splat(46.0), Sense::click());
+                            if active_bot == id && ui_state.section == WorkspaceSection::Bots {
+                                ui.painter().rect_filled(rect, 14, palette.bg_hover);
+                            }
+                            paint_bot_avatar(
+                                ui.painter(),
+                                rect.shrink(7.0),
+                                BotAvatarShape::from_name(
+                                    bot["avatar_shape"].as_str().unwrap_or("circle"),
+                                ),
+                                parse_hex_color(
+                                    bot["avatar_color"]
+                                        .as_str()
+                                        .or_else(|| bot["color"].as_str())
+                                        .unwrap_or("#D8B4FE"),
+                                ),
+                                name,
+                                textures.get(&format!("avatar:{id}")).map(|(t, _)| t),
+                                None,
+                                palette.bg_sidebar,
+                            );
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name)
+                            });
+                            if resp.on_hover_text(name).clicked() {
+                                *active_bot = id.into();
+                                ui_state.active_chat_kind = "dm".into();
+                                ui_state.section = WorkspaceSection::Bots;
+                                send(DaemonRequest::GetDirectChatHistory {
+                                    bot_id: id.into(),
+                                    before_seq: None,
+                                    limit: Some(100),
+                                });
+                                send(DaemonRequest::MarkChatRead {
+                                    chat_kind: "dm".into(),
+                                    chat_id: id.into(),
+                                });
+                            }
+                        } else {
                             draw_bot_row(
                                 ui,
                                 ui_state,
@@ -263,170 +278,199 @@ pub fn draw_adaptive_sidebar(
                                 &mut send,
                             );
                         }
-                        ui.add_space(6.0);
                     }
-
-                    // Custom Sections
-                    for sec in sections {
-                        let sec_id = sec["id"].as_str().unwrap_or("");
-                        let sec_name = sec["name"].as_str().unwrap_or("Section");
-                        let collapsed = sec["collapsed"].as_bool().unwrap_or(false);
-                        let sec_bots: Vec<&&Value> = visible_bots
-                            .iter()
-                            .filter(|b| {
-                                !b["is_primary"].as_bool().unwrap_or(false)
-                                    && !b["pinned"].as_bool().unwrap_or(false)
-                                    && b["section_id"].as_str() == Some(sec_id)
-                                    && matches_bot_filter(b, &needle)
-                            })
-                            .collect();
-                        ui.horizontal(|ui| {
-                            let arrow = if collapsed { "▸" } else { "▾" };
+                    if !mini {
+                        for section in sections {
+                            let id = section["id"].as_str().unwrap_or_default();
+                            let name = section["name"].as_str().unwrap_or("Section");
+                            let collapsed = section["collapsed"].as_bool().unwrap_or(false);
+                            ui.add_space(12.0);
                             if ui
-                                .small_button(format!("{arrow} {}", sec_name.to_uppercase()))
+                                .small_button(format!(
+                                    "{} {name}",
+                                    if collapsed { "▸" } else { "▾" }
+                                ))
                                 .clicked()
                             {
                                 send(DaemonRequest::ManageBotSection {
                                     op: "collapse".into(),
-                                    id: Some(sec_id.to_string()),
+                                    id: Some(id.into()),
                                     name: None,
                                     collapsed: Some(!collapsed),
                                     sort_order: None,
                                 });
                             }
-                        });
-                        if !collapsed {
-                            for bot in sec_bots {
-                                draw_bot_row(
-                                    ui,
-                                    ui_state,
-                                    palette,
-                                    textures,
-                                    bot,
-                                    sections,
-                                    unread_counts,
-                                    active_bot,
-                                    &mut send,
-                                );
+                            if !collapsed {
+                                for bot in visible.iter().filter(|bot| {
+                                    !bot["pinned"].as_bool().unwrap_or(false)
+                                        && bot["section_id"].as_str() == Some(id)
+                                }) {
+                                    draw_bot_row(
+                                        ui,
+                                        ui_state,
+                                        palette,
+                                        textures,
+                                        bot,
+                                        sections,
+                                        unread_counts,
+                                        active_bot,
+                                        &mut send,
+                                    );
+                                }
                             }
                         }
-                        ui.add_space(4.0);
                     }
-
-                    // Unsectioned Bots
-                    let unsectioned: Vec<&&Value> = visible_bots
-                        .iter()
-                        .filter(|b| {
-                            !b["is_primary"].as_bool().unwrap_or(false)
-                                && !b["pinned"].as_bool().unwrap_or(false)
-                                && b["section_id"].as_str().map(str::is_empty).unwrap_or(true)
-                                && matches_bot_filter(b, &needle)
-                        })
-                        .collect();
-                    if !unsectioned.is_empty() {
-                        ui.small(RichText::new("BOTS").color(palette.text_muted));
-                        for bot in unsectioned {
-                            draw_bot_row(
-                                ui,
-                                ui_state,
-                                palette,
-                                textures,
-                                bot,
-                                sections,
-                                unread_counts,
-                                active_bot,
-                                &mut send,
+                    if !mini {
+                        if !channels.is_empty() {
+                            ui.add_space(18.0);
+                            ui.label(RichText::new("Groups").size(12.0).color(palette.text_muted));
+                            ui.add_space(8.0);
+                        }
+                        for ch in channels {
+                            let id = ch["id"].as_str().unwrap_or("general");
+                            if !needle.is_empty() && !id.to_lowercase().contains(&needle) {
+                                continue;
+                            }
+                            let count =
+                                unread_counts[format!("channel:{id}")].as_u64().unwrap_or(0);
+                            let name = ch["name"].as_str().unwrap_or(id).trim_start_matches('#');
+                            let preview =
+                                ui_state.server_snapshot["channel_previews"][id]["preview"]
+                                    .as_str()
+                                    .or_else(|| ch["topic"].as_str())
+                                    .unwrap_or("Shared conversation");
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(ui.available_width(), 64.0),
+                                Sense::click(),
                             );
-                        }
-                        ui.add_space(6.0);
-                    }
-
-                    // Group Channels (`#channels`)
-                    ui.horizontal(|ui| {
-                        ui.small(RichText::new("GROUPS").color(palette.text_muted));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .small_button("＋")
-                                .on_hover_text("Create group channel")
-                                .clicked()
-                            {
-                                ui_state.active_modal = Some(ActiveModal::CreateChannel);
+                            let selected =
+                                ui_state.active_chat_kind == "channel" && active_channel == id;
+                            response.widget_info(|| {
+                                egui::WidgetInfo::selected(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    selected,
+                                    name,
+                                )
+                            });
+                            if selected || response.hovered() {
+                                ui.painter().rect_filled(rect, 14, palette.bg_hover);
                             }
-                        });
-                    });
-                    for ch in channels {
-                        let ch_id = ch["id"].as_str().unwrap_or("general");
-                        if !needle.is_empty() && !ch_id.to_ascii_lowercase().contains(&needle) {
-                            continue;
-                        }
-                        let selected =
-                            ui_state.active_chat_kind == "channel" && active_channel == ch_id;
-                        let unread = unread_counts[format!("channel:{ch_id}")]
-                            .as_u64()
-                            .unwrap_or(0);
-                        let label = if unread > 0 {
-                            format!("# {ch_id}  ({unread})")
-                        } else {
-                            format!("# {ch_id}")
-                        };
-                        let btn = egui::Button::new(RichText::new(label).color(if selected {
-                            palette.accent_text
-                        } else {
-                            palette.text_primary
-                        }))
-                        .min_size(Vec2::new(ui.available_width(), 28.0))
-                        .fill(if selected {
-                            palette.accent
-                        } else {
-                            Color32::TRANSPARENT
-                        });
-                        if ui.add(btn).clicked() {
-                            *active_channel = ch_id.to_string();
-                            ui_state.active_chat_kind = "channel".into();
-                            send(DaemonRequest::ChannelHistory {
-                                channel_id: ch_id.to_string(),
-                            });
-                            send(DaemonRequest::MarkChatRead {
-                                chat_kind: "channel".into(),
-                                chat_id: ch_id.to_string(),
-                            });
-                        }
-                    }
-
-                    // Hidden Bots (N) expandable footer
-                    if !hidden_bots.is_empty() {
-                        ui.add_space(10.0);
-                        ui.separator();
-                        let toggle_label = format!(
-                            "{} Hidden Bots ({})",
-                            if ui_state.show_hidden_bots {
-                                "▾"
-                            } else {
-                                "▸"
-                            },
-                            hidden_bots.len()
-                        );
-                        if ui.small_button(toggle_label).clicked() {
-                            ui_state.show_hidden_bots = !ui_state.show_hidden_bots;
-                        }
-                        if ui_state.show_hidden_bots {
-                            for bot in &hidden_bots {
-                                draw_bot_row(
-                                    ui,
-                                    ui_state,
-                                    palette,
-                                    textures,
-                                    bot,
-                                    sections,
-                                    unread_counts,
-                                    active_bot,
-                                    &mut send,
+                            let participants = ch["participants"].as_array();
+                            for index in 0..3 {
+                                let bot = participants
+                                    .and_then(|ids| ids.get(index))
+                                    .and_then(|value| value.as_str())
+                                    .and_then(|id| {
+                                        bots.iter().find(|b| b["id"].as_str() == Some(id))
+                                    });
+                                let color = parse_hex_color(
+                                    bot.and_then(|b| {
+                                        b["avatar_color"].as_str().or_else(|| b["color"].as_str())
+                                    })
+                                    .unwrap_or(["#4D9BFF", "#D85AA6", "#35BFA5"][index]),
                                 );
+                                let center = rect.left_top()
+                                    + Vec2::new(
+                                        18.0 + (index % 2) as f32 * 16.0,
+                                        24.0 + (index / 2) as f32 * 16.0,
+                                    );
+                                paint_bot_avatar(
+                                    ui.painter(),
+                                    egui::Rect::from_center_size(center, Vec2::splat(19.0)),
+                                    BotAvatarShape::Circle,
+                                    color,
+                                    name,
+                                    None,
+                                    None,
+                                    palette.bg_sidebar,
+                                );
+                            }
+                            let painter = ui.painter().with_clip_rect(egui::Rect::from_min_max(
+                                rect.left_top() + Vec2::new(54.0, 0.0),
+                                rect.right_bottom() - Vec2::new(24.0, 0.0),
+                            ));
+                            painter.text(
+                                rect.left_top() + Vec2::new(54.0, 20.0),
+                                egui::Align2::LEFT_CENTER,
+                                name,
+                                egui::FontId::proportional(14.0),
+                                palette.text_primary,
+                            );
+                            painter.text(
+                                rect.left_top() + Vec2::new(54.0, 43.0),
+                                egui::Align2::LEFT_CENTER,
+                                preview,
+                                egui::FontId::proportional(12.0),
+                                palette.text_muted,
+                            );
+                            if count > 0 {
+                                ui.painter().circle_filled(
+                                    rect.right_center() - Vec2::new(12.0, 0.0),
+                                    8.0,
+                                    palette.accent,
+                                );
+                                ui.painter().text(
+                                    rect.right_center() - Vec2::new(12.0, 0.0),
+                                    egui::Align2::CENTER_CENTER,
+                                    count.to_string(),
+                                    egui::FontId::proportional(10.0),
+                                    palette.accent_text,
+                                );
+                            }
+                            if response.clicked() {
+                                *active_channel = id.into();
+                                ui_state.active_chat_kind = "channel".into();
+                                ui_state.section = WorkspaceSection::Bots;
+                                send(DaemonRequest::ChannelHistory {
+                                    channel_id: id.into(),
+                                });
+                                send(DaemonRequest::MarkChatRead {
+                                    chat_kind: "channel".into(),
+                                    chat_id: id.into(),
+                                });
+                            }
+                        }
+                        let hidden: Vec<_> = bots
+                            .iter()
+                            .filter(|b| b["hidden_from_sidebar"].as_bool().unwrap_or(false))
+                            .collect();
+                        if !hidden.is_empty() {
+                            ui.add_space(16.0);
+                            ui.checkbox(
+                                &mut ui_state.show_hidden_bots,
+                                format!("Hidden bots ({})", hidden.len()),
+                            );
+                            if ui_state.show_hidden_bots {
+                                for bot in hidden {
+                                    draw_bot_row(
+                                        ui,
+                                        ui_state,
+                                        palette,
+                                        textures,
+                                        bot,
+                                        sections,
+                                        unread_counts,
+                                        active_bot,
+                                        &mut send,
+                                    );
+                                }
                             }
                         }
                     }
                 });
         });
+    if !mini {
+        ui_state.sidebar_width = response.response.rect.width();
+        if ctx.input(|i| i.pointer.any_released())
+            && (ui_state.sidebar_saved_width - ui_state.sidebar_width).abs() > 0.5
+        {
+            ui_state.sidebar_saved_width = ui_state.sidebar_width;
+            send(DaemonRequest::SaveUiSettings {
+                ui: serde_json::json!({"sidebar_width":ui_state.sidebar_width.round() as u16}),
+            });
+        }
+    }
 }
 
 fn matches_bot_filter(bot: &Value, needle: &str) -> bool {
@@ -483,7 +527,7 @@ fn draw_bot_row(
         .unwrap_or(false);
 
     let (row_rect, resp) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 64.0), Sense::click());
     resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, name));
     let bg = if selected {
         palette.bg_hover
@@ -493,16 +537,11 @@ fn draw_bot_row(
         Color32::TRANSPARENT
     };
     ui.painter()
-        .rect_filled(row_rect, CornerRadius::same(7), bg);
-    if selected {
-        let bar = egui::Rect::from_min_size(row_rect.min, Vec2::new(3.0, row_rect.height()));
-        ui.painter()
-            .rect_filled(bar, CornerRadius::same(2), palette.accent);
-    }
+        .rect_filled(row_rect, CornerRadius::same(14), bg);
 
     let avatar_rect = egui::Rect::from_center_size(
-        egui::Pos2::new(row_rect.min.x + 18.0, row_rect.center().y),
-        Vec2::new(22.0, 22.0),
+        egui::Pos2::new(row_rect.min.x + 26.0, row_rect.center().y),
+        Vec2::new(34.0, 34.0),
     );
     let tex = textures.get(&format!("avatar:{id}")).map(|(t, _)| t);
     paint_bot_avatar(
@@ -512,27 +551,42 @@ fn draw_bot_row(
         color,
         name,
         tex,
-        Some("online"),
+        None,
         palette.bg_sidebar,
     );
 
-    let title_str = if is_primary {
-        format!("{name} ★")
-    } else {
-        name.to_string()
-    };
+    let title_str = short_preview(name, ((row_rect.width() - 120.0) / 7.0).max(6.0) as usize);
+    if let Some(date) = ui_state.server_snapshot["conversation_previews"][&id]["created_at"]
+        .as_str()
+        .and_then(|date| chrono::DateTime::parse_from_rfc3339(date).ok())
+    {
+        ui.painter().text(
+            egui::pos2(row_rect.right() - 8.0, row_rect.top() + 17.0),
+            egui::Align2::RIGHT_CENTER,
+            date.with_timezone(&chrono::Local)
+                .format("%H:%M")
+                .to_string(),
+            egui::FontId::proportional(10.0),
+            palette.text_muted,
+        );
+    }
     ui.painter().text(
-        egui::Pos2::new(row_rect.min.x + 36.0, row_rect.center().y - 5.0),
+        egui::Pos2::new(row_rect.min.x + 54.0, row_rect.center().y - 10.0),
         egui::Align2::LEFT_CENTER,
         title_str,
-        egui::FontId::proportional(13.0),
+        egui::FontId::proportional(14.0),
         palette.text_primary,
     );
     ui.painter().text(
-        egui::Pos2::new(row_rect.min.x + 36.0, row_rect.center().y + 7.0),
+        egui::Pos2::new(row_rect.min.x + 54.0, row_rect.center().y + 11.0),
         egui::Align2::LEFT_CENTER,
-        phrase,
-        egui::FontId::proportional(10.5),
+        ui_state.server_snapshot["conversation_previews"][&id]["preview"]
+            .as_str()
+            .unwrap_or(phrase)
+            .chars()
+            .take(((row_rect.width() - 85.0) / 6.5).max(5.0) as usize)
+            .collect::<String>(),
+        egui::FontId::proportional(12.0),
         palette.text_muted,
     );
 
@@ -558,6 +612,7 @@ fn draw_bot_row(
     if resp.clicked() {
         *active_bot = id.clone();
         ui_state.active_chat_kind = "dm".into();
+        ui_state.section = crate::ui::state::WorkspaceSection::Bots;
         send(DaemonRequest::GetDirectChatHistory {
             bot_id: id.clone(),
             before_seq: None,
@@ -654,4 +709,16 @@ fn draw_bot_row(
             }
         }
     });
+}
+
+fn short_preview(value: &str, limit: usize) -> String {
+    if value.chars().count() > limit {
+        value
+            .chars()
+            .take(limit.saturating_sub(1))
+            .collect::<String>()
+            + "…"
+    } else {
+        value.into()
+    }
 }

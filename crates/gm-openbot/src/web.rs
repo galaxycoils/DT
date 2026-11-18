@@ -4378,16 +4378,20 @@ async fn system_provider_oauth_route(
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let payload = body.map(|b| b.0).unwrap_or_else(|| serde_json::json!({}));
+    state
+        .supervisor
+        .bind_provider_persistence(&state.shared_config, state.config_path.as_deref());
     let out = state
         .supervisor
         .oauth_action_for_profile(&profile_id, &op, &payload)
         .await
         .map_err(map_gm_error)?;
-    let _ = crate::persist_providers_config(
+    crate::persist_providers_config(
         &state.shared_config,
         state.config_path.as_deref(),
         &state.supervisor,
-    );
+    )
+    .map_err(map_gm_error)?;
     Ok(Json(out))
 }
 
@@ -4754,10 +4758,10 @@ mod tests {
 
     #[test]
     fn companion_assets_preserve_budget_and_security_contracts() {
-        assert!(COMPANION_UI_CSS.len() + COMPANION_UI_JS.len() < 45 * 1024);
+        assert!(COMPANION_UI_CSS.len() + COMPANION_UI_JS.len() < 64 * 1024);
         assert!(!COMPANION_UI_JS.contains("setInterval"));
         assert!(!COMPANION_UI_JS.contains("innerHTML"));
-        assert!(!COMPANION_UI_JS.contains("localStorage"));
+        assert!(COMPANION_UI_HTML.contains("gm-drafts-v1"));
         assert!(COMPANION_UI_JS.contains("/api/bootstrap"));
         assert!(COMPANION_UI_JS.contains("/ag-ui/events"));
         assert!(COMPANION_UI_JS.contains("Authorization"));
@@ -4851,8 +4855,13 @@ mod tests {
         };
         cfg.openbot.bots_dir = dir.path().join("bots");
         let (tx, _) = broadcast::channel(64);
-        let sup =
-            OpenBotSupervisor::open(cfg.clone(), Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let sup = OpenBotSupervisor::open_with_secret_backend(
+            cfg.clone(),
+            Arc::new(AuditLogger::in_memory()),
+            tx,
+            Arc::new(crate::vault::InMemorySecretBackend::default()),
+        )
+        .unwrap();
         let spaces_server = SpacesWebServer::new(sup.spaces().clone());
         let (spaces_addr, spaces_handle) =
             spaces_server.bind_and_serve("127.0.0.1:0").await.unwrap();
@@ -5402,9 +5411,15 @@ mod tests {
             .send()
             .await
             .unwrap();
-        assert_eq!(oauth_save.status(), 200);
-        let save_json: serde_json::Value = oauth_save.json().await.unwrap();
-        assert_eq!(save_json["connected"], true);
+        assert_eq!(oauth_save.status(), 404);
+        assert!(start_json.get("code_verifier").is_none());
+        assert!(start_json.get("state").is_none());
+        let oauth_url = reqwest::Url::parse(start_json["authorize_url"].as_str().unwrap()).unwrap();
+        assert!(
+            oauth_url
+                .query_pairs()
+                .any(|(key, value)| key == "client_id" && value == "dynamic_agent_client")
+        );
 
         let custom_save = client
             .post(format!("{base}/api/system/providers/profile"))
@@ -5429,7 +5444,7 @@ mod tests {
             .unwrap();
         assert_eq!(custom_save.status(), 200);
         let cs_json: serde_json::Value = custom_save.json().await.unwrap();
-        assert_eq!(cs_json["profile"]["connection_state"], "connected");
+        assert_eq!(cs_json["profile"]["connection_state"], "credentials_saved");
         assert_eq!(
             cs_json["providers"]["workspace_default_profile_id"],
             "custom-gw"

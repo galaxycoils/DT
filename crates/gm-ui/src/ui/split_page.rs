@@ -1,6 +1,6 @@
-//! Side-by-Side Split Page & Static Space Canvas (`Tier 3` of the Escape Dismissal Stack):
+//! Side-by-Side Split Page & Page Canvas (`Tier 3` of the Escape Dismissal Stack):
 //! - Markdown Viewer/Editor with CAS SHA-256 optimistic concurrency save
-//! - Static Space capability launcher & HTML source inspector
+//! - Page capability launcher & HTML source inspector
 //! - `"Message about <Title>"` quick action that focuses the Smart Composer with context
 
 use crate::ui::state::{GrokUiState, SplitPageTarget};
@@ -185,7 +185,7 @@ pub fn draw_split_page_panel(
                 ui.separator();
 
                 ui.small(format!(
-                    "Origin-Isolated Static Space (`{slug}`) · Strict CSP (`script-src 'self'`)"
+                    "Origin-Isolated Page (`{slug}`) · Strict CSP (`script-src 'self'`)"
                 ));
                 if let Some(ref cap_url) = url {
                     ui.horizontal_wrapped(|ui| {
@@ -212,13 +212,13 @@ pub fn draw_split_page_panel(
                             .desired_width(ui.available_width())
                             .code_editor(),
                     );
-                    if ui.button("Save Static Space HTML").clicked() {
+                    if ui.button("Save Page HTML").clicked() {
                         send(DaemonRequest::ManageSpace { op:"edit".into(), slug:slug.clone(), payload:serde_json::json!({"relative_path":"index.html","content":space_html_draft}) });
                     }
                 } else {
                     ui.group(|ui| {
                         ui.label(
-                            "Desktop native mode launches Static Spaces in your system browser via capability-tokenized loopback URL so WebViews never inflate gm-ui RSS.",
+                            "Desktop native mode launches Pages in your system browser via capability-tokenized loopback URL so WebViews never inflate gm-ui RSS.",
                         );
                     });
                 }

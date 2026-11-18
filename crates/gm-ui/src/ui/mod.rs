@@ -10,12 +10,15 @@ pub mod cache;
 pub mod chat;
 pub mod details_drawer;
 pub mod hotkeys;
+pub mod icons;
 pub mod modals;
+pub mod providers;
 pub mod rail;
 pub mod sidebar;
 pub mod split_page;
 pub mod state;
 pub mod theme;
+pub mod tokens;
 pub mod workspace_views;
 
 #[cfg(test)]
@@ -26,44 +29,11 @@ mod tests {
     };
     use super::chat::{TranscriptRow, draw_chat_canvas};
     use super::state::{
-        ActiveModal, GrokUiState, ReplyBanner, SidebarMode, SplitPageTarget,
-        apply_smart_composer_edit,
+        ActiveModal, GrokUiState, ReplyBanner, SplitPageTarget, apply_smart_composer_edit,
     };
     use super::theme::{BotAvatarShape, GrokPalette};
     use eframe::egui;
     use std::time::Instant;
-
-    #[test]
-    fn adaptive_sidebar_transitions_across_bot_counts() {
-        assert_eq!(
-            SidebarMode::from_visible_bot_count(0, None),
-            SidebarMode::AutoCollapsed
-        );
-        assert_eq!(
-            SidebarMode::from_visible_bot_count(1, None),
-            SidebarMode::AutoCollapsed
-        );
-        assert_eq!(
-            SidebarMode::from_visible_bot_count(2, None),
-            SidebarMode::CompactRail
-        );
-        assert_eq!(
-            SidebarMode::from_visible_bot_count(4, None),
-            SidebarMode::CompactRail
-        );
-        assert_eq!(
-            SidebarMode::from_visible_bot_count(5, None),
-            SidebarMode::FullList
-        );
-        assert_eq!(
-            SidebarMode::from_visible_bot_count(1, Some(true)),
-            SidebarMode::FullList
-        );
-        assert_eq!(
-            SidebarMode::from_visible_bot_count(8, Some(false)),
-            SidebarMode::AutoCollapsed
-        );
-    }
 
     #[test]
     fn smart_composer_replaces_arrow_undoes_on_single_backspace_and_respects_ime() {
@@ -155,6 +125,20 @@ mod tests {
 
         // Empty stack returns false
         assert!(!st.dismiss_escape_layer());
+    }
+
+    #[test]
+    fn strong_text_stays_legible_in_both_themes() {
+        for theme in ["dark", "light"] {
+            let ctx = egui::Context::default();
+            let palette = GrokPalette::resolve(theme, true, "bot_color", "#2F7CF6");
+            palette.apply_to_context(&ctx);
+            let text = ctx.style().visuals.strong_text_color();
+            assert!(
+                text.r().abs_diff(palette.bg_canvas.r()) > 100,
+                "{theme} strong text is unreadable"
+            );
+        }
     }
 
     #[test]
@@ -311,6 +295,7 @@ mod tests {
             }
         }
         let avg_ms = start.elapsed().as_secs_f64() * 1000.0 / 20.0;
+        eprintln!("10k transcript frame average: {avg_ms:.3}ms");
         assert!(
             !repaint_requested,
             "Idle frame must not request immediate 0ms repaint: {:?}",

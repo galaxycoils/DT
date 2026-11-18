@@ -6,7 +6,7 @@ use gm_core::error::{GmError, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OAuthTokenBundle {
     pub provider_id: String,
     pub account_id: String,
@@ -16,6 +16,10 @@ pub struct OAuthTokenBundle {
     pub expires_at: Option<String>,
     pub token_endpoint: String,
     pub client_id: String,
+    #[serde(default)]
+    pub identity: Option<crate::OAuthIdentity>,
+    #[serde(default)]
+    pub inference_base_url: Option<String>,
 }
 
 impl OAuthTokenBundle {
@@ -208,6 +212,8 @@ pub async fn exchange_oauth_code(
         expires_at,
         token_endpoint: token_endpoint.to_string(),
         client_id: client_id.to_string(),
+        identity: None,
+        inference_base_url: None,
     })
 }
 
@@ -217,42 +223,126 @@ pub async fn refresh_oauth_bundle(
     preset: ProviderPreset,
     secret_ref: &str,
 ) -> Result<OAuthTokenBundle> {
+    type RefreshLocks = parking_lot::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    >;
+    static LOCKS: std::sync::OnceLock<RefreshLocks> = std::sync::OnceLock::new();
+    let initial = load_oauth_bundle(secrets, secret_ref)?;
+    let lock = LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .entry(secret_ref.to_owned())
+        .or_default()
+        .clone();
+    let _lease = lock.lock().await;
     let mut bundle = load_oauth_bundle(secrets, secret_ref)?;
-    let refresh_tok = bundle.refresh_token.clone().ok_or_else(|| {
-        GmError::Config("OAuth account has no refresh_token; please sign in again".into())
-    })?;
-    let resp = client
-        .post(&bundle.token_endpoint)
-        .form(&[
+    if bundle.access_token != initial.access_token {
+        return Ok(bundle);
+    }
+    let refresh = bundle
+        .refresh_token
+        .clone()
+        .ok_or_else(|| GmError::Config("Sign in again to renew this provider account".into()))?;
+    let expected = match preset {
+        ProviderPreset::ChatGpt => crate::chatgpt_auth::CHATGPT_TOKEN_ENDPOINT,
+        ProviderPreset::NousPortal => "https://portal.nousresearch.com/api/oauth/token",
+        _ => {
+            return Err(GmError::Config(
+                "Provider does not use OAuth renewal".into(),
+            ));
+        }
+    };
+    let fixture_allowed = cfg!(test) && bundle.token_endpoint.starts_with("http://127.0.0.1:");
+    if bundle.token_endpoint != expected && !fixture_allowed {
+        return Err(GmError::SafetyViolation(
+            "OAuth renewal destination is invalid. Sign in again.".into(),
+        ));
+    }
+    let mut request = client.post(&bundle.token_endpoint);
+    if preset == ProviderPreset::NousPortal {
+        request = request.header("x-nous-refresh-token", &refresh).form(&[
             ("grant_type", "refresh_token"),
             ("client_id", bundle.client_id.as_str()),
-            ("refresh_token", refresh_tok.as_str()),
-        ])
-        .send()
-        .await
-        .map_err(|e| GmError::Provider(format!("OAuth refresh failed: {e}")))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        ]);
+    } else {
+        let mut form = vec![
+            ("grant_type", "refresh_token"),
+            ("client_id", bundle.client_id.as_str()),
+            ("refresh_token", refresh.as_str()),
+        ];
+        if bundle.identity.is_some() {
+            form.push(("resource", "https://api.openai.com/v1"));
+        }
+        request = request.form(&form);
+    }
+    let response = request.send().await.map_err(|_| {
+        GmError::Provider("Provider token renewal could not reach the service".into())
+    })?;
+    if !response.status().is_success() {
         return Err(GmError::Provider(format!(
-            "OAuth refresh returned {status}: {text}"
+            "Provider token renewal returned HTTP {}. Check connection or sign in again.",
+            response.status()
         )));
     }
-    let val: serde_json::Value = resp
+    let value: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| GmError::Provider(format!("Invalid OAuth refresh JSON: {e}")))?;
-    bundle.access_token = val["access_token"]
+        .map_err(|_| GmError::Provider("Provider returned an invalid token renewal".into()))?;
+    bundle.access_token = value["access_token"]
         .as_str()
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| GmError::Provider("OAuth refresh missing access_token".into()))?
-        .to_string();
-    if let Some(new_rt) = val["refresh_token"].as_str() {
-        bundle.refresh_token = Some(new_rt.to_string());
+        .ok_or_else(|| GmError::Provider("Provider token renewal omitted its access token".into()))?
+        .into();
+    if let Some(token) = value["refresh_token"].as_str() {
+        bundle.refresh_token = Some(token.into());
     }
-    if let Some(secs) = val["expires_in"].as_i64() {
-        bundle.expires_at = Some((Utc::now() + Duration::seconds(secs)).to_rfc3339());
+    if let Some(seconds) = value["expires_in"].as_i64() {
+        bundle.expires_at = Some((Utc::now() + Duration::seconds(seconds)).to_rfc3339());
+    }
+    if preset == ProviderPreset::NousPortal
+        && let Some(base) = value["inference_base_url"].as_str()
+    {
+        gm_core::config::validate_oauth_destination(
+            preset,
+            gm_core::config::ProviderAuthMode::NousPortalOAuth,
+            gm_core::config::WireProtocol::ChatCompletions,
+            base,
+        )?;
+        bundle.inference_base_url = Some(base.trim_end_matches('/').into());
+    }
+    if let Some(identity) = &mut bundle.identity {
+        if let Some(token) = value["id_token"].as_str() {
+            let (subject, email) = crate::validate_chatgpt_identity(
+                client,
+                token,
+                &identity.client_id,
+                None,
+                Some(&identity.subject),
+            )
+            .await?;
+            identity.id_token = token.into();
+            identity.subject = subject;
+            identity.email = email;
+        }
+        if let Some(scope) = value["scope"].as_str() {
+            identity.scopes = scope.split_whitespace().map(str::to_owned).collect();
+        }
+    }
+    // A disconnect or credential replacement during HTTP must not revive the old account.
+    if load_oauth_bundle(secrets, secret_ref)?.access_token != initial.access_token {
+        return Err(GmError::Config(
+            "Provider credentials changed during renewal".into(),
+        ));
     }
     let _ = store_oauth_bundle(secrets, preset, &bundle)?;
     Ok(bundle)
+}
+
+impl std::fmt::Debug for OAuthTokenBundle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenBundle")
+            .field("provider_id", &self.provider_id)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }

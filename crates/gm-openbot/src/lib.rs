@@ -16,6 +16,7 @@ pub mod library;
 pub mod marketplace;
 pub mod meetings_google;
 pub mod meetings_zoom;
+mod provider_connections;
 pub mod queue;
 pub mod relay;
 pub mod roster;

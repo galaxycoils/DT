@@ -133,23 +133,17 @@ pub fn resolve_binaries(custom_bin_dir: Option<&Path>) -> (PathBuf, PathBuf) {
         return (d, h);
     }
 
-    // 1. Check standard /Applications bundle locations
+    // Prefer this app's binaries so a preview cannot silently launch an older installation.
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(pair) = binaries_near(&exe)
+    {
+        return pair;
+    }
     let app_daemon = PathBuf::from("/Applications/GrokMuse.app/Contents/MacOS/gm-daemon");
     let app_helper =
         PathBuf::from("/Applications/GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper");
     if app_daemon.exists() && app_helper.exists() {
         return (app_daemon, app_helper);
-    }
-
-    // 2. Check directory of current executable
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let d = parent.join("gm-daemon");
-        let h = parent.join("gm-cu-helper");
-        if d.exists() && h.exists() {
-            return (d, h);
-        }
     }
 
     // 3. Check workspace target/release or target/debug
@@ -182,6 +176,23 @@ pub fn resolve_binaries(custom_bin_dir: Option<&Path>) -> (PathBuf, PathBuf) {
     }
 
     (app_daemon, app_helper)
+}
+
+fn binaries_near(executable: &Path) -> Option<(PathBuf, PathBuf)> {
+    let parent = executable.parent()?;
+    let daemon = parent.join(format!("gm-daemon{}", std::env::consts::EXE_SUFFIX));
+    if !daemon.exists() {
+        return None;
+    }
+    let helper = parent.join(format!("gm-cu-helper{}", std::env::consts::EXE_SUFFIX));
+    if helper.exists() {
+        return Some((daemon, helper));
+    }
+    let helper = parent
+        .ancestors()
+        .nth(3)?
+        .join("GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper");
+    helper.exists().then_some((daemon, helper))
 }
 
 fn run_launchctl(args: &[&str]) -> bool {
@@ -450,6 +461,21 @@ mod tests {
         let (d, h) = resolve_binaries(Some(custom));
         assert_eq!(d, custom.join("gm-daemon"));
         assert_eq!(h, custom.join("gm-cu-helper"));
+    }
+
+    #[test]
+    fn relocated_app_uses_its_sibling_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("GrokMuse.app/Contents/MacOS");
+        let helper = dir
+            .path()
+            .join("GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        let daemon = main.join(format!("gm-daemon{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&daemon, []).unwrap();
+        std::fs::write(&helper, []).unwrap();
+        assert_eq!(binaries_near(&main.join("gm-ui")), Some((daemon, helper)));
     }
 
     #[test]

@@ -2,6 +2,14 @@
 
 All notable changes to **Grok-Muse** are documented in this file.
 
+## [v0.7.0] — UI and Provider Connections (2026-11-17)
+
+- Shared Rakazo design tokens, remembered single sidebar, message previews, measured transcript rows, pill composer, Pages/Activity navigation, and provider settings across native and browser interfaces.
+- Daemon-owned ChatGPT registration/callback, OIDC validation, Nous device authorization, token renewal, cancellation, account switching, and protected credential destinations.
+- Real catalogs and automatic, budgeted model reply checks; separate credential, catalog, and inference states; live provider routing and durable credential errors.
+- Relocated app bundles prefer their own daemon/helper instead of an older installed copy.
+- Release-profile, ad-hoc Apple Silicon preview. Real cloud account checks and full native certification remain pending; see the release notes.
+
 ## [v0.6.1] — Apple Silicon Preview (2026-11-17)
 
 - Isolate OAuth fixtures from OS credential stores and environment secrets.

@@ -1,4 +1,4 @@
-# Grok-Muse Hybrid Agent (`v0.6.1` — Apple Silicon Preview)
+# Grok-Muse Hybrid Agent (`v0.7.0` — Apple Silicon Preview)
 
 > **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native macOS, React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
 > Built in Rust with native Rust desktop rendering, macOS ScreenCaptureKit/Accessibility integration, scoped workspace file access, Candle model support, and multi-provider hybrid LLM routing (`ChatGPT OAuth`, `Kilo Gateway`, `OpenRouter`, `Nous Portal`, `Meta Muse`, `xAI Grok`, `Custom Responses/ChatCompletions`, and `Local VLM`).
@@ -158,22 +158,22 @@ in `.github/workflows/ci.yml` and verified by `tools/bootstrap.sh` (see the [rel
 
 ### Apple Silicon preview
 
-`v0.6.1` provides an optimized release-profile Apple Silicon DMG and matching SHA-256 sidecar. It is ad-hoc signed and requires manual installation. Developer ID signing, notarization, signed-updater distribution, and native certification remain outstanding. Web/mobile clients and hosted adapters have source and fixture coverage; deployed end-to-end certification remains outstanding. See [release notes](docs/releases/v0.6.1.md) and [release readiness](docs/release-readiness.md).
+`v0.7.0` adds the shared Rakazo layout and working provider setup lifecycle. See [provider validation](docs/provider-validation.md) for account checks still required. It provides an optimized release-profile Apple Silicon DMG and matching SHA-256 sidecar. It is ad-hoc signed and requires manual installation. Developer ID signing, notarization, signed-updater distribution, and native certification remain outstanding. Web/mobile clients and hosted adapters have source and fixture coverage; deployed end-to-end certification remains outstanding. See [release notes](docs/releases/v0.7.0.md) and [release readiness](docs/release-readiness.md).
 
-Download both assets from the [v0.6.1 prerelease](https://github.com/galaxycoils/grok-muse/releases/tag/v0.6.1) into one directory, then run:
+Download both assets from the [v0.7.0 prerelease](https://github.com/galaxycoils/grok-muse/releases/tag/v0.7.0) into one directory, then run:
 
 ```sh
-shasum -a 256 -c GrokMuse-0.6.1-macos-aarch64-adhoc.dmg.sha256
+shasum -a 256 -c GrokMuse-0.7.0-macos-aarch64-adhoc.dmg.sha256
 ```
 
 ### Building the DMG
 ```bash
 # Build binaries, bundle .app packages, codesign, and create target/dist/Grok-Muse.dmg
-cargo run --locked --package xtask -- dmg --release --identity - --output target/dist/GrokMuse-0.6.1-macos-aarch64-adhoc.dmg
+cargo run --locked --package xtask -- dmg --release --identity - --output target/dist/GrokMuse-0.7.0-macos-aarch64-adhoc.dmg
 ```
 
 ### Installing on macOS
-1. Open `GrokMuse-0.6.1-macos-aarch64-adhoc.dmg` from your download or build directory.
+1. Open `GrokMuse-0.7.0-macos-aarch64-adhoc.dmg` from your download or build directory.
 2. Drag `GrokMuse.app` to `/Applications`.
 3. Launch `Grok-Muse` or run the CLI onboarding:
    ```bash

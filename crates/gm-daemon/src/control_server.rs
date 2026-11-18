@@ -621,7 +621,6 @@ impl DaemonControlServer {
             event_tx: self.event_tx.clone(),
             budget: Arc::clone(&self.budget),
             llm_client: Arc::clone(&self.llm_client),
-            router: self.router.clone(),
             kill_switch: self.kill_switch.clone(),
             audit_log: Arc::clone(&self.audit_log),
             platform: Arc::clone(&self.platform),
@@ -641,7 +640,6 @@ struct DaemonControlServerState {
     event_tx: broadcast::Sender<DaemonEvent>,
     budget: Arc<BudgetManager>,
     llm_client: Arc<HybridLlmClient>,
-    router: LlmRouter,
     kill_switch: KillSwitch,
     audit_log: Arc<AuditLogger>,
     platform: Arc<IpcPlatformClient>,
@@ -773,13 +771,19 @@ impl DaemonControlServerState {
                 ControlRequestEnvelope::Raw(req) => (0, req),
             };
 
+            let current_router = LlmRouter::new(
+                self.openbot
+                    .as_ref()
+                    .map(|sup| sup.providers_config())
+                    .unwrap_or_else(|| self.shared_config.read().providers.clone()),
+            );
             let routed_chat = matches!(
                 request,
                 DaemonRequest::SendChatMessage { .. }
                     | DaemonRequest::SendChatMessageV1 { .. }
                     | DaemonRequest::SendChatMessageV2 { .. }
             )
-            .then(|| self.router.route(TaskType::Planning));
+            .then(|| current_router.route(TaskType::Planning));
 
             let chat_id = match &request {
                 DaemonRequest::SendChatMessageV1 { message_id, .. }
@@ -936,7 +940,7 @@ impl DaemonControlServerState {
                         }
                     };
                     let (primary, fallback) =
-                        routed_chat.unwrap_or_else(|| self.router.route(TaskType::Planning));
+                        routed_chat.unwrap_or_else(|| current_router.route(TaskType::Planning));
 
                     let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
                     let event_tx_delta = self.event_tx.clone();
@@ -2197,7 +2201,7 @@ impl DaemonControlServerState {
                             reply_to_id.as_deref(),
                             thread_id.as_deref(),
                             &self.llm_client,
-                            &self.router,
+                            &current_router,
                             Some(&self.budget),
                             Some(&self.kill_switch),
                             Some(&cfg_snap),
@@ -3796,10 +3800,14 @@ impl DaemonControlServerState {
                 } => {
                     let result = match self.openbot.as_ref() {
                         Some(sup) => {
-                            let res = sup
+                            sup.bind_provider_persistence(
+                                &self.shared_config,
+                                self.config_path.as_deref(),
+                            );
+                            let result = sup
                                 .oauth_action_for_profile(&profile_id, &op, &op_payload)
-                                .await?;
-                            let _ = gm_openbot::persist_providers_config(
+                                .await;
+                            let persisted = gm_openbot::persist_providers_config(
                                 &self.shared_config,
                                 self.config_path.as_deref(),
                                 sup,
@@ -3807,7 +3815,7 @@ impl DaemonControlServerState {
                             let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
                                 reason: "providers_updated".into(),
                             });
-                            Ok(res)
+                            result.and_then(|value| persisted.map(|_| value))
                         }
                         None => Err(GmError::Config("Task runtime is unavailable".into())),
                     };
