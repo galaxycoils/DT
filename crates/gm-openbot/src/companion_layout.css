@@ -20,3 +20,6 @@ button{border-color:transparent;background:transparent;border-radius:10px}button
 .group-avatar{position:relative;width:34px;height:34px;flex-shrink:0}.group-avatar .avatar{position:absolute;width:19px;height:19px}.group-avatar .avatar:nth-child(2){left:16px}.group-avatar .avatar:nth-child(3){top:16px}.group-avatar .eyes{transform:scale(.55)}
 
 .modal.settings-shell{width:min(1080px,100%)}
+/* Keep actions readable outside the outgoing bubble in both themes. */
+.message.user{color:var(--text)}.message .actions{height:auto;min-height:20px;overflow:visible}
+@media(max-width:759px){.message .actions{opacity:0}.message:hover .actions,.message:focus-within .actions{opacity:1}}
