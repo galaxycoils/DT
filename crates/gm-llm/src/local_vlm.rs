@@ -486,6 +486,7 @@ impl Default for CandleMlxBridgeConfig {
 /// Pluggable Candle / MLX local inference backend bridge.
 pub struct CandleMlxBridgeBackend {
     config: CandleMlxBridgeConfig,
+    #[allow(dead_code)]
     fallback_mock: MockLocalVlmBackend,
 }
 

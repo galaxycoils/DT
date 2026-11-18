@@ -135,12 +135,95 @@ jobs:
         working-directory: grok-muse
         run: cargo run --locked -p xtask -- bench-llm
 
+      - name: Verify Ubuntu .deb installer pipeline (Linux only)
+        if: runner.os == 'Linux'
+        working-directory: grok-muse
+        run: |
+          cargo build --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+          mkdir -p target/dist
+          bash tools/installers/linux/build-deb.sh 1.0.0 target/debug target/dist/dt_1.0.0_amd64.deb
+          dpkg-deb -I target/dist/dt_1.0.0_amd64.deb
+          python3 -c '
+          import hashlib, json, pathlib, runpy, subprocess
+          m = runpy.run_path("tools/package-release.py")
+          out = pathlib.Path("target/dist")
+          name = "dt_1.0.0_amd64.deb"
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
+          (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version="1.0.0", os="linux", architecture="x86_64", sha256=digest), sort_keys=True) + "\n")
+          m["write_sbom"](out, name, "1.0.0", commit, "linux", "x86_64")
+          '
+
+      - name: Upload Ubuntu .deb installer artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-linux-x86_64
+          path: grok-muse/target/dist/dt_1.0.0_amd64.deb*
+
+      - name: Verify Windows NSIS installer pipeline (Windows only)
+        if: runner.os == 'Windows'
+        working-directory: grok-muse
+        shell: bash
+        run: |
+          cargo build --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+          python3 -c '
+          import hashlib, json, pathlib, runpy, subprocess
+          m = runpy.run_path("tools/package-release.py")
+          root = pathlib.Path(".").resolve()
+          bin_dir = (root / "target" / "debug").resolve()
+          out = (root / "target" / "dist").resolve()
+          out.mkdir(parents=True, exist_ok=True)
+          name = "DT-1.0.0-windows-x86_64-setup.exe"
+          exe = out / name
+          subprocess.run([
+              "makensis",
+              "/DVERSION=1.0.0",
+              f"/DBIN_DIR={bin_dir}",
+              f"/DSRC_ROOT={root}",
+              f"/DOUT_FILE={exe}",
+              str(root / "tools/installers/windows/dt-installer.nsi"),
+          ], check=True)
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+          (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version="1.0.0", os="windows", architecture="x86_64", sha256=digest), sort_keys=True) + "\n")
+          m["write_sbom"](out, name, "1.0.0", commit, "windows", "x86_64")
+          '
+
+      - name: Upload Windows NSIS installer artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-windows-x86_64
+          path: grok-muse/target/dist/DT-1.0.0-windows-x86_64-setup.exe*
+
       - name: Verify release DMG pipeline (macOS only)
         if: runner.os == 'macOS'
         working-directory: grok-muse
         run: |
           cargo run --locked -p xtask -- verify-dmg
           (cd target/dist && shasum -a 256 -c Grok-Muse.dmg.sha256)
+          cp target/dist/Grok-Muse.dmg target/dist/DT-1.0.0-macos-aarch64.dmg
+          python3 -c '
+          import hashlib, json, pathlib, runpy, subprocess
+          m = runpy.run_path("tools/package-release.py")
+          out = pathlib.Path("target/dist")
+          name = "DT-1.0.0-macos-aarch64.dmg"
+          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
+          (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version="1.0.0", os="macos", architecture="aarch64", sha256=digest), sort_keys=True) + "\n")
+          m["write_sbom"](out, name, "1.0.0", commit, "macos", "aarch64")
+          '
+
+      - name: Upload macOS DMG installer artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-macos-aarch64
+          path: grok-muse/target/dist/DT-1.0.0-macos-aarch64.dmg*
 
       - name: Verify release-profile Apple Silicon preview
         if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')

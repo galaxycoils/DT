@@ -49,6 +49,8 @@ enum Commands {
         #[arg(long)]
         release: bool,
         #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
         identity: Option<String>,
         #[arg(long, default_value = "target/dist/Grok-Muse.dmg")]
         output: String,
@@ -254,20 +256,28 @@ fn detect_identity() -> String {
     "-".into()
 }
 
-fn cargo_profile_dir(release: bool) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
+fn cargo_profile_dir(release: bool, target: Option<&str>) -> PathBuf {
+    let mut base = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target"))
-        .join(if release { "release" } else { "debug" })
+        .unwrap_or_else(|| PathBuf::from("target"));
+    if let Some(t) = target {
+        base = base.join(t);
+    }
+    base.join(if release { "release" } else { "debug" })
 }
 
-fn create_app_bundles(release: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn create_app_bundles(
+    release: bool,
+    target: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     if let Some(workspace_root) = manifest_dir.parent() {
         let _ = std::env::set_current_dir(workspace_root);
     }
 
-    println!("==> Compiling Grok-Muse binaries for bundling (release={release})...");
+    println!(
+        "==> Compiling Grok-Muse binaries for bundling (release={release}, target={target:?})..."
+    );
     let mut args = vec![
         "build",
         "--locked",
@@ -282,12 +292,16 @@ fn create_app_bundles(release: bool) -> Result<(), Box<dyn std::error::Error>> {
     if release {
         args.push("--release");
     }
+    if let Some(t) = target {
+        args.push("--target");
+        args.push(t);
+    }
     let build_status = Command::new("cargo").args(&args).status()?;
     if !build_status.success() {
         return Err("Failed to build binaries for bundling".into());
     }
 
-    let bin_dir = cargo_profile_dir(release);
+    let bin_dir = cargo_profile_dir(release, target);
     println!(
         "==> Bundling Grok-Muse applications from {}...",
         bin_dir.display()
@@ -419,15 +433,20 @@ fn sign_bundle(
     Ok(())
 }
 
-fn assemble_dmg(id: &str, output: &str, release: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn assemble_dmg(
+    id: &str,
+    output: &str,
+    release: bool,
+    target: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("==> Assembling distributable macOS DMG with identity: {id}");
 
     // 1. Compile & assemble bundles
     println!(
-        "==> Packaging profile={} output={output}",
+        "==> Packaging profile={} target={target:?} output={output}",
         if release { "release" } else { "debug" }
     );
-    create_app_bundles(release)?;
+    create_app_bundles(release, target)?;
 
     // Packaging debug builds should not duplicate their symbol tables in the image.
     for executable in [
@@ -478,6 +497,28 @@ fn assemble_dmg(id: &str, output: &str, release: bool) -> Result<(), Box<dyn std
         .status()?;
     if !cp_ui.success() {
         return Err("Failed to copy GrokMuse.app to staging".into());
+    }
+
+    let cp_dt = Command::new("cp")
+        .args([
+            "-cR",
+            "target/bundle/GrokMuse.app",
+            "target/dmg-staging/DT.app",
+        ])
+        .status()?;
+    if !cp_dt.success() {
+        return Err("Failed to copy DT.app to staging".into());
+    }
+
+    let cp_dt_helper = Command::new("cp")
+        .args([
+            "-cR",
+            "target/bundle/GrokMuseCUHelper.app",
+            "target/dmg-staging/DTCUHelper.app",
+        ])
+        .status()?;
+    if !cp_dt_helper.success() {
+        return Err("Failed to copy DTCUHelper.app to staging".into());
     }
 
     // Create /Applications symlink for drag-and-drop install UX
@@ -607,7 +648,7 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
     if !dmg_path.exists() {
         println!("DMG not found at {dmg_path_str}. Generating distribution DMG first...");
         let id = detect_identity();
-        assemble_dmg(&id, dmg_path_str, false)?;
+        assemble_dmg(&id, dmg_path_str, false, None)?;
     }
 
     #[cfg(target_os = "macos")]
@@ -677,16 +718,30 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
         }
         println!("    ✔ Symlink verified: Applications -> /Applications");
 
-        // 4. Verify code signatures on both bundles
-        println!("  [Step 4/5] Verifying code signatures on mounted app bundles...");
+        // 4. Verify code signatures on bundles and Install DT.pkg presence
+        println!(
+            "  [Step 4/5] Verifying code signatures on mounted app bundles and Install DT.pkg..."
+        );
         let ui_app = mp.join("GrokMuse.app");
         let helper_app = mp.join("GrokMuseCUHelper.app");
+        let dt_app = mp.join("DT.app");
+        let dt_helper_app = mp.join("DTCUHelper.app");
+        let install_pkg = mp.join("Install DT.pkg");
 
         if !ui_app.exists() {
             return Err("GrokMuse.app not found on mounted volume".into());
         }
         if !helper_app.exists() {
             return Err("GrokMuseCUHelper.app not found on mounted volume".into());
+        }
+        if !dt_app.exists() {
+            return Err("DT.app not found on mounted volume".into());
+        }
+        if !dt_helper_app.exists() {
+            return Err("DTCUHelper.app not found on mounted volume".into());
+        }
+        if !install_pkg.exists() {
+            return Err("Install DT.pkg not found on mounted volume".into());
         }
 
         // Verify GrokMuse.app
@@ -951,7 +1006,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match cli.command {
         Commands::Bundle { release } => {
-            create_app_bundles(release)?;
+            create_app_bundles(release, None)?;
         }
 
         Commands::Sign { identity, release } => {
@@ -963,7 +1018,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if !Path::new(helper_app).exists() || !Path::new(main_app).exists() {
                 println!("App bundles not found. Building bundles first...");
-                create_app_bundles(release)?;
+                create_app_bundles(release, None)?;
             }
 
             println!("==> Signing helper and main bundles with hardened runtime & entitlements...");
@@ -977,9 +1032,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             identity,
             output,
             release,
+            target,
         } => {
             let id = identity.unwrap_or_else(detect_identity);
-            assemble_dmg(&id, &output, release)?;
+            assemble_dmg(&id, &output, release, target.as_deref())?;
         }
 
         Commands::VerifyDmg { dmg_path } => {
@@ -1873,7 +1929,7 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
     let t0 = Instant::now();
     let id = identity.unwrap_or_else(detect_identity);
     let dmg_output = "target/dist/Grok-Muse.dmg";
-    let dmg_build_res = assemble_dmg(&id, dmg_output, false);
+    let dmg_build_res = assemble_dmg(&id, dmg_output, false, None);
     let dmg_verify_res = if dmg_build_res.is_ok() {
         run_verify_dmg(dmg_output)
     } else {
@@ -2027,7 +2083,7 @@ fn run_install(
     println!("===============================================================================\n");
 
     // 1. Compile & assemble app bundles
-    create_app_bundles(release)?;
+    create_app_bundles(release, None)?;
 
     // 2. Code sign bundles unless explicitly skipped
     if !no_sign {

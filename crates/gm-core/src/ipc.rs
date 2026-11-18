@@ -812,7 +812,7 @@ pub mod windows_pipe_security {
         expected_sid: &str,
     ) -> Result<()> {
         let mut client_pid = 0u32;
-        let handle = server.as_raw_handle() as *mut c_void;
+        let handle = server.as_raw_handle();
         if unsafe { GetNamedPipeClientProcessId(handle, &mut client_pid) } == 0 || client_pid == 0 {
             return Err(GmError::SafetyViolation(
                 "Unable to verify local named-pipe client PID".into(),

@@ -11,7 +11,7 @@ use gm_platform::permissions::check_all_permissions;
 use gm_safety::SecretScrubber;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const DOCTOR_REPORT_SCHEMA: u32 = 1;
@@ -214,6 +214,7 @@ pub fn remove_stale_socket_if_unowned_live(socket_path: &Path) -> Result<bool> {
     }
     #[cfg(unix)]
     {
+        use std::fs::OpenOptions;
         use std::os::unix::fs::MetadataExt;
         let meta = fs::symlink_metadata(socket_path)?;
         let my_uid = unsafe { libc::geteuid() };
