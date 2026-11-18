@@ -301,11 +301,12 @@ mod tests {
             "Idle frame must not request immediate 0ms repaint: {:?}",
             ctx.repaint_causes()
         );
-        // Debug unoptimized builds in CI/VMs can take slightly longer than release, but virtualized
-        // rendering of 10,000 rows only touches ~12 visible rows (~0.2-1.5ms even in unoptimized debug).
+        // Debug unoptimized builds on contended 2-vCPU CI VMs can experience scheduler preemption,
+        // while release builds must stay strictly under 1ms.
+        let budget_ms = if cfg!(debug_assertions) { 15.0 } else { 1.0 };
         assert!(
-            avg_ms < 5.0,
-            "Expected virtualized 10k transcript frame to be ultra-fast (<5ms debug / <1ms release), got {avg_ms:.3}ms"
+            avg_ms < budget_ms,
+            "Expected virtualized 10k transcript frame to be ultra-fast (<{budget_ms}ms), got {avg_ms:.3}ms"
         );
     }
 

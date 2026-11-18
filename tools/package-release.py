@@ -152,7 +152,8 @@ def main():
                 target = destination / (binary + '.exe')
                 run('signtool.exe', 'sign', '/sha1', args.windows_thumbprint, '/fd', 'SHA256', '/tr', 'http://timestamp.digicert.com', '/td', 'SHA256', target)
                 run('signtool.exe', 'verify', '/pa', '/all', target)
-            run('makensis.exe', f'/DVERSION={args.version}', f'/DBIN_DIR={destination}', f'/DSRC_ROOT={pathlib.Path(".").resolve()}', f'/DOUT_FILE={output.resolve()}', 'tools/installers/windows/dt-installer.nsi')
+            makensis = shutil.which('makensis.exe') or shutil.which('makensis') or r'C:\Program Files (x86)\NSIS\makensis.exe'
+            run(makensis, f'/DVERSION={args.version}', f'/DBIN_DIR={destination}', f'/DSRC_ROOT={pathlib.Path(".").resolve()}', f'/DOUT_FILE={output.resolve()}', 'tools/installers/windows/dt-installer.nsi')
             run('signtool.exe', 'sign', '/sha1', args.windows_thumbprint, '/fd', 'SHA256', '/tr', 'http://timestamp.digicert.com', '/td', 'SHA256', output)
             run('signtool.exe', 'verify', '/pa', '/all', output)
         else:
