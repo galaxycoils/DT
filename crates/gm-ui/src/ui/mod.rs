@@ -295,6 +295,7 @@ mod tests {
             }
         }
         let avg_ms = start.elapsed().as_secs_f64() * 1000.0 / 20.0;
+        eprintln!("10k transcript frame average: {avg_ms:.3}ms");
         assert!(
             !repaint_requested,
             "Idle frame must not request immediate 0ms repaint: {:?}",

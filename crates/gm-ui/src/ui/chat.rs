@@ -670,9 +670,7 @@ pub fn draw_chat_canvas(
         ui_state.transcript_width = content_width;
     }
     if ui_state.transcript_heights.len() > 12000 {
-        ui_state
-            .transcript_heights
-            .retain(|id, _| rows.iter().any(|row| &row.id == id));
+        ui_state.transcript_heights.clear();
     }
     let mut offsets = Vec::with_capacity(filtered_indices.len() + 1);
     offsets.push(0.0);
@@ -683,8 +681,7 @@ pub fn draw_chat_canvas(
             .get(&row.id)
             .copied()
             .unwrap_or_else(|| {
-                (row.content.chars().count() as f32 / (content_width / 7.0).max(1.0)).ceil() * 21.0
-                    + 68.0
+                (row.content.len() as f32 / (content_width / 7.0).max(1.0)).ceil() * 21.0 + 68.0
             });
         offsets.push(offsets.last().copied().unwrap_or(0.0) + estimate);
     }
