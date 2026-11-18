@@ -324,6 +324,7 @@ fn verify_macos_bundle_arch(
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
 fn detect_installer_identity() -> Option<String> {
     if let Ok(id) = std::env::var("DT_INSTALLER_IDENTITY") {
         let trimmed = id.trim();
