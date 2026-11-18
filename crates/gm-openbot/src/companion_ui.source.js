@@ -304,7 +304,7 @@ function navigate(view = state._view, kind = state._kind, target = state._target
     restoreDraft();
     state._epoch++;
     state._reply = null;
-    if (innerWidth < 900) state._sidebar = false;
+    if (innerWidth < 760) state._sidebar = false;
     renderChrome();
     renderWorkspace();
     if (view === "Bots" && state._token) run(loadMessages);
@@ -326,7 +326,7 @@ function icon(name) {
     const path=document.createElementNS(svg.namespaceURI,"path");path.setAttribute("d",paths[name]||paths.more);svg.append(path);return svg;
 }
 function iconButton(name,label,action){const b=button("",action,"icon-button");b.append(icon(name));b.title=label;b.setAttribute("aria-label",label);return b;}
-function toggleSidebar(){state._sidebar=state._sidebar===null?!!state._data.ui?.sidebar_collapsed:!state._sidebar;renderSidebar();if(innerWidth>=760)run(()=>savePrefs({sidebar_collapsed:!state._sidebar}));}
+function toggleSidebar(){const expanded=innerWidth<760?state._sidebar===true:(state._sidebar??!state._data.ui?.sidebar_collapsed);state._sidebar=!expanded;renderSidebar();if(innerWidth>=760)run(()=>savePrefs({sidebar_collapsed:!state._sidebar}));}
 function activityMenu(){const box=modal("Activity");for(const view of ["Feed","Goals","Audit"]){box.append(button(view,()=>{closeModal();navigate(view);}));}box.append(button(state._data.status?.paused?"Resume tasks":"Pause tasks",()=>mutate("/api/system/pause",{paused:!state._data.status?.paused})),button("Stop all tasks",()=>mutate("/api/system/kill"),"danger"),button("Studio · templates, skills & routines",templates));}
 function renderChrome() {
     theme();$("rail").replaceChildren();$("rail").hidden=true;
@@ -370,7 +370,7 @@ function renderSidebar(){
         b.title=bot.display_name||bot.id;b.setAttribute("aria-label",b.title);b.oncontextmenu=e=>{e.preventDefault();botMenu(bot);};parent.append(b);
     }
     const visible=bots.filter(b=>!b.hidden_from_sidebar&&matches(b)).sort((a,b)=>Number(b.pinned)-Number(a.pinned));
-    for(const bot of visible.filter(b=>b.pinned||!b.section_id))botRow(bot);
+    for(const bot of visible.filter(b=>b.pinned||!b.section_id||!(state._data.sections||[]).some(section=>section.id===b.section_id)))botRow(bot);
     for(const section of state._data.sections||[]){const details=node("details",null,"section");details.open=!section.collapsed;details.append(node("summary",section.name));list.append(details);details.ontoggle=()=>run(()=>mutate("/api/sections/"+enc(section.id),{collapsed:!details.open},"PATCH"));for(const bot of visible.filter(b=>!b.pinned&&b.section_id===section.id))botRow(bot,details);}
     if(channels.length)list.append(node("small","Groups","section-label"));
     for(const channel of channels.filter(matches)){

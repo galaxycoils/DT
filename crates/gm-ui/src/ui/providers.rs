@@ -81,7 +81,7 @@ pub fn draw(
     egui::Frame::NONE.fill(palette.bg_canvas).corner_radius(16).inner_margin(20).show(ui,|ui|{
         ui.heading(&profile.display_name);
         if let Some(account)=&profile.account_label{ui.label(account);}
-        let auth=match profile.connection_state{ProviderConnectionState::Connecting=>"Waiting for sign-in",ProviderConnectionState::CredentialsSaved=>"Credentials saved; awaiting verification",ProviderConnectionState::Connected|ProviderConnectionState::Authenticated=>"Authenticated",ProviderConnectionState::NeedsRevalidation=>"Destination approval required",ProviderConnectionState::Error=>"Connection needs attention",_=>if profile.auth_mode==ProviderAuthMode::None{"Local / no authentication"}else{"Sign in or enter an API key"}};
+        let auth=if profile.auth_mode==ProviderAuthMode::None{"Not required (local)"}else{match profile.connection_state{ProviderConnectionState::Connecting=>"Waiting for sign-in",ProviderConnectionState::CredentialsSaved=>"Credentials saved; awaiting verification",ProviderConnectionState::Connected|ProviderConnectionState::Authenticated=>"Authenticated",ProviderConnectionState::NeedsRevalidation=>"Destination approval required",ProviderConnectionState::Error=>"Connection needs attention",_=>if profile.auth_mode==ProviderAuthMode::None{"Local / no authentication"}else{"Sign in or enter an API key"}}};
         ui.add_space(12.0);
         ui.horizontal_wrapped(|ui|{
             ui.label(format!("Account: {auth}"));

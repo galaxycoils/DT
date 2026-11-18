@@ -191,13 +191,14 @@ pub fn draw_adaptive_sidebar(
                     });
                 });
             let needle = ui_state.sidebar_search.trim().to_ascii_lowercase();
-            let visible: Vec<_> = bots
+            let mut visible: Vec<_> = bots
                 .iter()
                 .filter(|b| {
                     !b["hidden_from_sidebar"].as_bool().unwrap_or(false)
                         && matches_bot_filter(b, &needle)
                 })
                 .collect();
+            visible.sort_by_key(|bot| !bot["pinned"].as_bool().unwrap_or(false));
             egui::ScrollArea::vertical()
                 .id_salt("grok_sidebar_scroll")
                 .auto_shrink([false, false])
@@ -211,6 +212,17 @@ pub fn draw_adaptive_sidebar(
                         ui.add_space(8.0);
                     }
                     for bot in &visible {
+                        if !mini
+                            && !bot["pinned"].as_bool().unwrap_or(false)
+                            && bot["section_id"].as_str().is_some_and(|id| {
+                                sections
+                                    .iter()
+                                    .any(|section| section["id"].as_str() == Some(id))
+                            })
+                        {
+                            continue;
+                        }
+
                         if mini {
                             let id = bot["id"].as_str().unwrap_or("muse");
                             let name = bot["display_name"].as_str().unwrap_or(id);
@@ -265,6 +277,47 @@ pub fn draw_adaptive_sidebar(
                                 active_bot,
                                 &mut send,
                             );
+                        }
+                    }
+                    if !mini {
+                        for section in sections {
+                            let id = section["id"].as_str().unwrap_or_default();
+                            let name = section["name"].as_str().unwrap_or("Section");
+                            let collapsed = section["collapsed"].as_bool().unwrap_or(false);
+                            ui.add_space(12.0);
+                            if ui
+                                .small_button(format!(
+                                    "{} {name}",
+                                    if collapsed { "▸" } else { "▾" }
+                                ))
+                                .clicked()
+                            {
+                                send(DaemonRequest::ManageBotSection {
+                                    op: "collapse".into(),
+                                    id: Some(id.into()),
+                                    name: None,
+                                    collapsed: Some(!collapsed),
+                                    sort_order: None,
+                                });
+                            }
+                            if !collapsed {
+                                for bot in visible.iter().filter(|bot| {
+                                    !bot["pinned"].as_bool().unwrap_or(false)
+                                        && bot["section_id"].as_str() == Some(id)
+                                }) {
+                                    draw_bot_row(
+                                        ui,
+                                        ui_state,
+                                        palette,
+                                        textures,
+                                        bot,
+                                        sections,
+                                        unread_counts,
+                                        active_bot,
+                                        &mut send,
+                                    );
+                                }
+                            }
                         }
                     }
                     if !mini {

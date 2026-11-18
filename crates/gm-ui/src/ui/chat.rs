@@ -868,6 +868,17 @@ fn draw_transcript_row(
         .corner_radius(CornerRadius::same(20))
         .inner_margin(egui::Margin::symmetric(16, 12))
         .show(ui, |ui| {
+            // User bubbles use a dark surface in both themes, including their markdown/code blocks.
+            let user_palette = GrokPalette::resolve("dark", true, "black", "#000000");
+            let palette = if is_user {
+                *ui.visuals_mut() = egui::Visuals::dark();
+                ui.visuals_mut().override_text_color =
+                    Some(crate::ui::tokens::DARK_CHAT_USER_FOREGROUND);
+                &user_palette
+            } else {
+                palette
+            };
+
             if is_user {
                 ui.set_min_width(ui.available_width());
             }

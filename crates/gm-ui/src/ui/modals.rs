@@ -256,10 +256,15 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::Settings => {
+            let settings_size = egui::vec2(
+                (ctx.content_rect().width() - 48.0).min(1080.0),
+                (ctx.content_rect().height() - 60.0).min(740.0),
+            );
             egui::Window::new("Settings")
                 .open(&mut keep_open)
-                .default_size(egui::vec2(1080.0,760.0))
-                .max_size(ctx.content_rect().size()-egui::vec2(40.0,40.0))
+                .fixed_size(settings_size)
+                .fixed_pos(ctx.content_rect().center()-settings_size*0.5)
+                .resizable(false)
                 .show(ctx, |ui| {
                     ui.horizontal_top(|ui| {
                     ui.allocate_ui_with_layout(egui::vec2(200.0,ui.available_height()),egui::Layout::top_down(egui::Align::Min),|ui| {
@@ -293,6 +298,7 @@ pub fn draw_active_modal(
                     });
                     ui.separator();
                     ui.vertical(|ui| {
+                        ui.set_width((settings_size.x-240.0).max(240.0));
 
                     egui::ScrollArea::vertical()
                         .id_salt("grok_settings_pane_scroll")

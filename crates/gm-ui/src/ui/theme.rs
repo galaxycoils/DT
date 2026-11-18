@@ -194,8 +194,8 @@ impl GrokPalette {
         style.visuals.widgets.hovered.weak_bg_fill = self.bg_hover;
         style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, self.accent);
         style.visuals.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
-        style.visuals.widgets.active.bg_fill = self.accent;
-        style.visuals.widgets.active.weak_bg_fill = self.accent;
+        style.visuals.widgets.active.bg_fill = self.bg_hover;
+        style.visuals.widgets.active.weak_bg_fill = self.bg_hover;
         style.visuals.widgets.active.fg_stroke = Stroke::new(1.0_f32, self.text_primary);
         style.visuals.selection.bg_fill = self.accent.gamma_multiply(0.28);
         style.visuals.selection.stroke = Stroke::new(1.0_f32, self.accent);
