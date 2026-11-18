@@ -1332,7 +1332,7 @@ async fn run_bench_rss() -> Result<(f64, f64), Box<dyn std::error::Error>> {
     }
     let config_path = folder.join("config.json");
     config.save(&config_path)?;
-    let bin_dir = cargo_profile_dir(true);
+    let bin_dir = cargo_profile_dir(true, None);
     let mut children = vec![
         Owned(
             Command::new(bin_dir.join("gm-cu-helper"))
