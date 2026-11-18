@@ -10,6 +10,9 @@ pub enum Icon {
     Settings,
     More,
     Pages,
+    Close,
+    Trash,
+    Refresh,
 }
 
 pub fn button(ui: &mut egui::Ui, icon: Icon, label: &str, color: Color32) -> egui::Response {
@@ -22,6 +25,37 @@ pub fn button(ui: &mut egui::Ui, icon: Icon, label: &str, color: Color32) -> egu
             .rect_filled(rect, 8, ui.visuals().widgets.hovered.weak_bg_fill);
     }
     paint(ui.painter(), rect.shrink(7.0), icon, color);
+    response.on_hover_text(label)
+}
+
+pub fn labeled_button(
+    ui: &mut egui::Ui,
+    icon: Icon,
+    label: &str,
+    color: Color32,
+) -> egui::Response {
+    let galley =
+        ui.painter()
+            .layout_no_wrap(label.to_string(), egui::FontId::proportional(14.0), color);
+    let width = 16.0 + 6.0 + galley.size().x + 16.0;
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 30.0), Sense::click());
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter()
+            .rect_filled(rect, 8, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 14.0, rect.center().y),
+        Vec2::splat(14.0),
+    );
+    paint(ui.painter(), icon_rect, icon, color);
+    ui.painter().galley(
+        egui::pos2(rect.left() + 26.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        color,
+    );
     response.on_hover_text(label)
 }
 
@@ -79,6 +113,27 @@ pub fn paint(p: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
             );
             line(xy(0.35, 0.4), xy(0.65, 0.4));
             line(xy(0.35, 0.65), xy(0.65, 0.65));
+        }
+        Icon::Close => {
+            line(xy(0.2, 0.2), xy(0.8, 0.8));
+            line(xy(0.8, 0.2), xy(0.2, 0.8));
+        }
+        Icon::Trash => {
+            line(xy(0.2, 0.25), xy(0.8, 0.25));
+            line(xy(0.38, 0.15), xy(0.62, 0.15));
+            p.rect_stroke(
+                egui::Rect::from_min_max(xy(0.25, 0.28), xy(0.75, 0.88)),
+                2,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            line(xy(0.42, 0.4), xy(0.42, 0.76));
+            line(xy(0.58, 0.4), xy(0.58, 0.76));
+        }
+        Icon::Refresh => {
+            p.circle_stroke(rect.center(), rect.width() * 0.36, stroke);
+            line(xy(0.72, 0.15), xy(0.9, 0.35));
+            line(xy(0.62, 0.38), xy(0.9, 0.35));
         }
     }
 }

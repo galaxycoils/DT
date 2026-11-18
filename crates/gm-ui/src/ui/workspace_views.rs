@@ -38,10 +38,16 @@ pub fn draw_workspace_section_view(
         WorkspaceSection::Feed => {
             ui.horizontal(|ui| {
                 ui.heading(
-                    RichText::new("⚡ Proactive Activity & Digest Feed")
-                        .color(palette.text_primary),
+                    RichText::new("Proactive Activity & Digest Feed").color(palette.text_primary),
                 );
-                if ui.button("↻ Refresh").clicked() {
+                if crate::ui::icons::labeled_button(
+                    ui,
+                    crate::ui::icons::Icon::Refresh,
+                    "Refresh",
+                    palette.text_secondary,
+                )
+                .clicked()
+                {
                     send(DaemonRequest::ListActivity);
                 }
                 if !activity_notice.is_empty() {
@@ -90,25 +96,35 @@ pub fn draw_workspace_section_view(
                                         format!("{category} · {kicker}")
                                     });
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if !id.is_empty() && ui.small_button("🗑").clicked() {
+                                        if !id.is_empty()
+                                            && crate::ui::icons::button(
+                                                ui,
+                                                crate::ui::icons::Icon::Trash,
+                                                "Delete",
+                                                palette.status_danger,
+                                            )
+                                            .clicked()
+                                        {
                                             send(DaemonRequest::ManageFeed {
                                                 op: "delete".into(),
                                                 payload: serde_json::json!({ "id": id }),
                                             });
                                         }
-                                        if !id.is_empty() && ui.small_button("👎").clicked() {
+                                        if !id.is_empty()
+                                            && ui.small_button("Not helpful").clicked()
+                                        {
                                             send(DaemonRequest::RateActivity {
                                                 id: id.clone(),
                                                 rating: -1,
                                             });
                                         }
-                                        if !id.is_empty() && ui.small_button("👍").clicked() {
+                                        if !id.is_empty() && ui.small_button("Helpful").clicked() {
                                             send(DaemonRequest::RateActivity {
                                                 id: id.clone(),
                                                 rating: 5,
                                             });
                                         }
-                                        if ui.small_button("💬 Discuss in Chat").clicked() {
+                                        if ui.small_button("Discuss in Chat").clicked() {
                                             *draft = format!("Regarding Feed update \"{title}\": ");
                                             ui_state.section = WorkspaceSection::Bots;
                                         }
@@ -126,9 +142,9 @@ pub fn draw_workspace_section_view(
         WorkspaceSection::Goals => {
             ui.horizontal(|ui| {
                 ui.heading(
-                    RichText::new("🎯 Hierarchical Goals Workspace").color(palette.text_primary),
+                    RichText::new("Hierarchical Goals Workspace").color(palette.text_primary),
                 );
-                if ui.button("↻ Refresh").clicked() {
+                if ui.button("Refresh").clicked() {
                     send(DaemonRequest::ListGoals);
                 }
                 if !goal_notice.is_empty() {
@@ -166,7 +182,7 @@ pub fn draw_workspace_section_view(
                         .hint_text("Goal description & acceptance criteria…"),
                 );
                 if ui
-                    .add_enabled(!goal_title.trim().is_empty(), egui::Button::new("＋ Create Goal"))
+                    .add_enabled(!goal_title.trim().is_empty(), egui::Button::new("+ Create Goal"))
                     .clicked()
                 {
                     let req = if !goal_parent.trim().is_empty() {
@@ -219,7 +235,7 @@ pub fn draw_workspace_section_view(
                                     ));
                                     ui.small(format!("({slug}) · {status}"));
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if ui.small_button("🗑 Delete").clicked() {
+                                        if ui.small_button("Delete").clicked() {
                                             send(DaemonRequest::SaveGoal {
                                                 op: "delete".into(),
                                                 slug: Some(slug.clone()),
@@ -227,14 +243,14 @@ pub fn draw_workspace_section_view(
                                             });
                                         }
                                         if status == "Active" {
-                                            if ui.small_button("✓ Complete").clicked() {
+                                            if ui.small_button("Complete").clicked() {
                                                 send(DaemonRequest::SaveGoal {
                                                     op: "complete".into(),
                                                     slug: Some(slug.clone()),
                                                     payload: serde_json::json!({ "verified": true }),
                                                 });
                                             }
-                                            if !is_sub && ui.small_button("＋ Subgoal").clicked() {
+                                            if !is_sub && ui.small_button("+ Subgoal").clicked() {
                                                 *goal_parent = slug.clone();
                                             }
                                         }
@@ -252,8 +268,8 @@ pub fn draw_workspace_section_view(
 
         WorkspaceSection::Spaces => {
             ui.horizontal(|ui| {
-                ui.heading(RichText::new("🧩 Pages Library").color(palette.text_primary));
-                if ui.button("↻ Refresh").clicked() {
+                ui.heading(RichText::new("Pages Library").color(palette.text_primary));
+                if ui.button("Refresh").clicked() {
                     send(DaemonRequest::ListSpaces);
                 }
                 if !spaces_notice.is_empty() {
@@ -288,7 +304,7 @@ pub fn draw_workspace_section_view(
                     if ui
                         .add_enabled(
                             enabled && !space_slug.trim().is_empty(),
-                            egui::Button::new("＋ Create Space"),
+                            egui::Button::new("+ Create Space"),
                         )
                         .clicked()
                     {
@@ -333,7 +349,7 @@ pub fn draw_workspace_section_view(
                                     ui.strong(format!("{title} ({slug})"));
                                     ui.small(if published { "published" } else { "local" });
                                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        if ui.small_button("🗑 Delete").clicked() {
+                                        if ui.small_button("Delete").clicked() {
                                             send(DaemonRequest::ManageSpace {
                                                 op: "delete".into(),
                                                 slug: slug.clone(),
@@ -347,7 +363,7 @@ pub fn draw_workspace_section_view(
                                                 payload: Value::Null,
                                             });
                                         }
-                                        if ui.small_button("Open Split Page ◧").clicked() {
+                                        if ui.small_button("Open Split Page").clicked() {
                                             ui_state.split_page =
                                                 Some(SplitPageTarget::StaticSpace {
                                                     slug: slug.clone(),
@@ -358,7 +374,7 @@ pub fn draw_workspace_section_view(
                                             ui_state.section = WorkspaceSection::Bots;
                                         }
                                         if let Some(ref u) = cap_url {
-                                            ui.hyperlink_to("Browser ↗", u);
+                                            ui.hyperlink_to("Browser", u);
                                             if ui.small_button("Copy URL").clicked() {
                                                 ctx.copy_text(u.clone());
                                             }
@@ -390,10 +406,10 @@ pub fn draw_workspace_section_view(
             });
             ui.horizontal(|ui| {
                 ui.heading(
-                    RichText::new("🛡 Durable Task Queue & Governance Audit")
+                    RichText::new("Durable Task Queue & Governance Audit")
                         .color(palette.text_primary),
                 );
-                if ui.button("↻ Refresh Queue").clicked() {
+                if ui.button("Refresh Queue").clicked() {
                     send(DaemonRequest::ListQueue { bot_id: None });
                 }
             });

@@ -51,7 +51,7 @@ pub fn draw_active_modal(
 
     match modal {
         ActiveModal::CommandPalette => {
-            egui::Window::new("⌘ Command Palette")
+            egui::Window::new("Command Palette")
                 .open(&mut keep_open)
                 .collapsible(false)
                 .resizable(false)
@@ -72,7 +72,7 @@ pub fn draw_active_modal(
                     for b in bots {
                         if let Some(id) = b["id"].as_str() {
                             let name = b["display_name"].as_str().unwrap_or(id);
-                            let label = format!("🤖 Switch to Bot: {name} (@{id})");
+                            let label = format!("Switch to Bot: {name} (@{id})");
                             let bid = id.to_string();
                             actions.push((
                                 label,
@@ -92,7 +92,7 @@ pub fn draw_active_modal(
                     }
 
                     actions.push((
-                        "⚡ Open Activity Feed".into(),
+                        "Open Activity Feed".into(),
                         "Workspace".into(),
                         Box::new(|st, _, s| {
                             st.section = WorkspaceSection::Feed;
@@ -100,7 +100,7 @@ pub fn draw_active_modal(
                         }),
                     ));
                     actions.push((
-                        "🎯 Open Hierarchical Goals".into(),
+                        "Open Hierarchical Goals".into(),
                         "Workspace".into(),
                         Box::new(|st, _, s| {
                             st.section = WorkspaceSection::Goals;
@@ -108,7 +108,7 @@ pub fn draw_active_modal(
                         }),
                     ));
                     actions.push((
-                        "🧩 Open Pages Library".into(),
+                        "Open Pages Library".into(),
                         "Workspace".into(),
                         Box::new(|st, _, s| {
                             st.section = WorkspaceSection::Spaces;
@@ -116,7 +116,7 @@ pub fn draw_active_modal(
                         }),
                     ));
                     actions.push((
-                        "🛡 Open Queue & Governance Audit".into(),
+                        "Open Queue & Governance Audit".into(),
                         "Workspace".into(),
                         Box::new(|st, _, s| {
                             st.section = WorkspaceSection::Audit;
@@ -124,21 +124,21 @@ pub fn draw_active_modal(
                         }),
                     ));
                     actions.push((
-                        "⚙ Open Settings (Cmd/Ctrl+,)".into(),
+                        "Open Settings (Cmd/Ctrl+,)".into(),
                         "Modal".into(),
                         Box::new(|st, _, _| {
                             st.active_modal = Some(ActiveModal::Settings);
                         }),
                     ));
                     actions.push((
-                        "✦ Open Studio — Templates, Skills & Routines (Cmd/Ctrl+Shift+M)".into(),
+                        "Open Studio — Templates, Skills & Routines (Cmd/Ctrl+Shift+M)".into(),
                         "Modal".into(),
                         Box::new(|st, _, _| {
                             st.active_modal = Some(ActiveModal::Studio);
                         }),
                     ));
                     actions.push((
-                        "🔌 Connect Apps & Custom MCP/Webhook Connectors".into(),
+                        "Connect Apps & Custom MCP/Webhook Connectors".into(),
                         "Modal".into(),
                         Box::new(|st, _, s| {
                             s(DaemonRequest::ListCustomConnectors);
@@ -146,14 +146,14 @@ pub fn draw_active_modal(
                         }),
                     ));
                     actions.push((
-                        "◧ Toggle Bot Details Drawer (Cmd/Ctrl+Alt+B)".into(),
+                        "Toggle Bot Details Drawer (Cmd/Ctrl+Alt+B)".into(),
                         "Drawer".into(),
                         Box::new(|st, _, _| {
                             st.details_drawer_open = !st.details_drawer_open;
                         }),
                     ));
                     actions.push((
-                        "⛔ Emergency Kill — Stop All Tasks".into(),
+                        "Emergency Kill — Stop All Tasks".into(),
                         "Safety".into(),
                         Box::new(|_, _, s| {
                             s(DaemonRequest::EmergencyKill);
@@ -224,7 +224,7 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::Shortcuts => {
-            egui::Window::new("⌨ Keyboard Shortcuts")
+            egui::Window::new("Keyboard Shortcuts")
                 .open(&mut keep_open)
                 .collapsible(false)
                 .default_width(440.0)
@@ -444,7 +444,7 @@ pub fn draw_active_modal(
                                     if ui
                                         .add_enabled(
                                             !ui_state.rule_pattern_draft.trim().is_empty(),
-                                            egui::Button::new("＋ Add Rule"),
+                                            egui::Button::new("+ Add Rule"),
                                         )
                                         .clicked()
                                     {
@@ -468,7 +468,7 @@ pub fn draw_active_modal(
                                     let pat = r["pattern"].as_str().unwrap_or("");
                                     ui.horizontal(|ui| {
                                         ui.monospace(format!("[{mode}] {pat}"));
-                                        if ui.small_button("🗑").clicked() {
+                                        if ui.small_button("Delete").clicked() {
                                             send(DaemonRequest::ManageCustomRule {
                                                 op: "delete".into(),
                                                 id: Some(rid.to_string()),
@@ -522,7 +522,7 @@ pub fn draw_active_modal(
                                     if ui
                                         .add_enabled(
                                             !ui_state.vault_label_draft.trim().is_empty(),
-                                            egui::Button::new("＋ Save"),
+                                            egui::Button::new("+ Save"),
                                         )
                                         .clicked()
                                     {
@@ -556,7 +556,7 @@ pub fn draw_active_modal(
                                     ui.horizontal(|ui| {
                                         ui.strong(format!(
                                             "[{kind}] {label}{}",
-                                            if is_def { " ★ Default" } else { "" }
+                                            if is_def { " (Default)" } else { "" }
                                         ));
                                         if matches!(kind, "card" | "payment_method")
                                             && !is_def
@@ -814,7 +814,7 @@ pub fn draw_active_modal(
                                     ui.horizontal(|ui| {
                                         ui.strong(name);
                                         ui.small(if bundled { "bundled" } else { "custom" });
-                                        if !bundled && ui.small_button("🗑").clicked() {
+                                        if !bundled && ui.small_button("Delete").clicked() {
                                             send(DaemonRequest::ManageSkill {
                                                 op: "delete".into(),
                                                 name: Some(name.to_string()),
@@ -869,7 +869,7 @@ pub fn draw_active_modal(
 
                             "routines" => {
                                 ui.strong(format!("Scheduled Routines ({})", routines.len()));
-                                if ui.button("＋ New Routine").clicked() {
+                                if ui.button("+ New Routine").clicked() {
                                     ui_state.routine_draft = serde_json::json!({
                                         "id": uuid::Uuid::new_v4().to_string(), "name": "New Routine",
                                         "bot_id": active_bot, "channel_id": null, "instruction": "",
@@ -890,12 +890,12 @@ pub fn draw_active_modal(
                                                 ui_state.routine_draft = r.clone();
                                                 ui_state.active_modal = Some(ActiveModal::RoutineEditor);
                                             }
-                                            if ui.small_button("▶ Test Now").clicked() {
+                                            if ui.small_button("Test Now").clicked() {
                                                 send(DaemonRequest::TriggerRoutineTest {
                                                     routine_id: rid.to_string(),
                                                 });
                                             }
-                                            if ui.small_button("🗑").clicked() {
+                                            if ui.small_button("Delete").clicked() {
                                                 send(DaemonRequest::DeleteRoutine {
                                                     routine_id: rid.to_string(),
                                                 });
@@ -916,7 +916,7 @@ pub fn draw_active_modal(
                                     if ui
                                         .add_enabled(
                                             !ui_state.new_section_name.trim().is_empty(),
-                                            egui::Button::new("＋ Create Section"),
+                                            egui::Button::new("+ Create Section"),
                                         )
                                         .clicked()
                                     {
@@ -935,7 +935,7 @@ pub fn draw_active_modal(
                                     let sname = sec["name"].as_str().unwrap_or("");
                                     ui.horizontal(|ui| {
                                         ui.label(sname);
-                                        if ui.small_button("🗑").clicked() {
+                                        if ui.small_button("Delete").clicked() {
                                             send(DaemonRequest::ManageBotSection {
                                                 op: "delete".into(),
                                                 id: Some(sid.to_string()),
@@ -953,7 +953,7 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::ConnectApps => {
-            egui::Window::new("🔌 Connect Apps & Custom MCP/Webhook Connectors")
+            egui::Window::new("Connect Apps & Custom MCP/Webhook Connectors")
                 .open(&mut keep_open)
                 .default_width(580.0)
                 .show(ctx, |ui| {
@@ -999,7 +999,7 @@ pub fn draw_active_modal(
                             .add_enabled(
                                 args.is_ok() && !ui_state.connector_name_draft.trim().is_empty()
                                     && !ui_state.connector_endpoint_draft.trim().is_empty(),
-                                egui::Button::new("＋ Add"),
+                                egui::Button::new("+ Add"),
                             )
                             .clicked()
                         {
@@ -1043,7 +1043,7 @@ pub fn draw_active_modal(
                                     id: Some(cid.to_string()),
                                 });
                             }
-                            if ui.small_button("🗑").clicked() {
+                            if ui.small_button("Delete").clicked() {
                                 send(DaemonRequest::SaveCustomConnector {
                                     op: "delete".into(),
                                     connector: None,
@@ -1056,7 +1056,7 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::AvatarPicker { bot_id } => {
-            egui::Window::new(format!("🎨 Customize @{bot_id} Shape & Color"))
+            egui::Window::new(format!("Customize @{bot_id} Shape & Color"))
                 .open(&mut keep_open)
                 .collapsible(false)
                 .default_width(420.0)
@@ -1154,7 +1154,7 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::CreateBot => {
-            egui::Window::new("🤖 Create Specialist Bot")
+            egui::Window::new("Create Specialist Bot")
                 .open(&mut keep_open)
                 .collapsible(false)
                 .default_width(440.0)
@@ -1362,7 +1362,7 @@ pub fn draw_active_modal(
         }
 
         ActiveModal::Lightbox { title, uri, mime } => {
-            egui::Window::new(format!("🖼 {title}"))
+            egui::Window::new(title.to_string())
                 .open(&mut keep_open)
                 .default_width(640.0)
                 .show(ctx, |ui| {
@@ -1406,7 +1406,7 @@ pub fn draw_active_modal(
             rows,
             raw_markdown,
         } => {
-            egui::Window::new(format!("📊 {title}"))
+            egui::Window::new(title.to_string())
                 .open(&mut keep_open)
                 .default_width(720.0)
                 .max_height(580.0)

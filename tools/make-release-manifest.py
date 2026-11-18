@@ -28,9 +28,14 @@ def find_openssl() -> str:
     for candidate in candidates:
         if not candidate:
             continue
+        if os.path.isabs(candidate) and not os.path.exists(candidate):
+            continue
         with tempfile.TemporaryDirectory() as folder:
             probe = pathlib.Path(folder) / 'probe.pem'
-            res = subprocess.run([candidate, 'genpkey', '-algorithm', 'ED25519', '-out', str(probe)], capture_output=True)
+            try:
+                res = subprocess.run([candidate, 'genpkey', '-algorithm', 'ED25519', '-out', str(probe)], capture_output=True)
+            except OSError:
+                continue
             if res.returncode == 0:
                 return candidate
     raise RuntimeError('OpenSSL with Ed25519 support is required (set DT_OPENSSL or install OpenSSL 3)')

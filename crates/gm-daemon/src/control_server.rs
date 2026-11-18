@@ -2196,6 +2196,7 @@ impl DaemonControlServerState {
                     content,
                     reply_to_id,
                     thread_id,
+                    client_msg_id,
                 } => {
                     let cfg_snap = self.shared_config.read().clone();
                     let result = if let Some(ref sup) = self.openbot {
@@ -2204,6 +2205,7 @@ impl DaemonControlServerState {
                             &content,
                             reply_to_id.as_deref(),
                             thread_id.as_deref(),
+                            client_msg_id.as_deref(),
                             &self.llm_client,
                             &current_router,
                             Some(&self.budget),

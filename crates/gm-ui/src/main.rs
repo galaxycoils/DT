@@ -113,7 +113,7 @@ extern "C" fn hotkey_callback(hotkey_id: std::os::raw::c_int) {
         eprintln!("[HOTKEY] EMERGENCY KILL SWITCH ACTIVATED (Cmd+Alt+Escape)");
 
         // Update HUD to Stopped immediately (<1ms)
-        let status = CString::new("🛑 DT: Stopped").unwrap();
+        let status = CString::new("DT: Stopped").unwrap();
         let detail = CString::new("Stopped (Emergency Kill)").unwrap();
         unsafe {
             gm_ui_set_hud_state(3, status.as_ptr(), detail.as_ptr());
@@ -219,7 +219,7 @@ fn handle_daemon_event(ev: DaemonEvent) {
             action_summary,
             ..
         } => {
-            let c_status = CString::new("⚡️ DT: Acting").unwrap_or_default();
+            let c_status = CString::new("DT: Acting").unwrap_or_default();
             let c_detail =
                 CString::new(format!("Step {step}: {}", action_summary.replace('\0', "")))
                     .unwrap_or_default();
@@ -261,20 +261,19 @@ fn handle_daemon_event(ev: DaemonEvent) {
             blocker,
             instructions,
         } => {
-            let c_status = CString::new("🛞 Take the Wheel").unwrap_or_default();
+            let c_status = CString::new("Take the Wheel").unwrap_or_default();
             let c_detail =
                 CString::new(format!("@{bot_id} [{blocker}]: {instructions}").replace('\0', ""))
                     .unwrap_or_default();
             let c_req = CString::new(format!("wheel:{task_id}")).unwrap_or_default();
-            let c_title =
-                CString::new(format!("🛞 Take the Wheel (@{bot_id})")).unwrap_or_default();
+            let c_title = CString::new(format!("Take the Wheel (@{bot_id})")).unwrap_or_default();
             unsafe {
                 gm_ui_set_hud_state(2, c_status.as_ptr(), c_detail.as_ptr());
                 gm_ui_present_approval_sheet(c_req.as_ptr(), c_title.as_ptr(), c_detail.as_ptr());
             }
         }
         DaemonEvent::WheelHandoffResumed { task_id, bot_id } => {
-            let c_status = CString::new("⚡️ DT: Resumed").unwrap_or_default();
+            let c_status = CString::new("DT: Resumed").unwrap_or_default();
             let c_detail =
                 CString::new(format!("Resumed @{bot_id} task {task_id}")).unwrap_or_default();
             unsafe {
@@ -317,7 +316,7 @@ fn handle_daemon_event(ev: DaemonEvent) {
     }
 }
 
-async fn ensure_daemon_running(config: &GmConfig, config_path: Option<&Path>) {
+pub(crate) async fn ensure_daemon_running(config: &GmConfig, config_path: Option<&Path>) {
     {
         if native::is_running(config).await {
             return;
@@ -514,12 +513,12 @@ async fn main() -> Result<()> {
 
     let config = GmConfig::load(cli.config.as_deref())?;
     if matches!(cmd, Commands::Native) {
-        ensure_daemon_running(&config, cli.config.as_deref()).await;
         return native::run(
             config,
             cli.config
                 .clone()
                 .unwrap_or_else(gm_core::config::default_config_path),
+            cli.config,
         );
     }
     let _ = CONFIG.set(config.clone());
@@ -536,7 +535,7 @@ async fn main() -> Result<()> {
         unsafe {
             gm_ui_set_hud_state(
                 3,
-                CString::new("🛑 DT: Stopped").unwrap().as_ptr(),
+                CString::new("DT: Stopped").unwrap().as_ptr(),
                 CString::new("CLI Kill Signal").unwrap().as_ptr(),
             );
         }

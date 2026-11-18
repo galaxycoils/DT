@@ -286,7 +286,68 @@ fn cargo_profile_dir(release: bool, target: Option<&str>) -> PathBuf {
     base.join(if release { "release" } else { "debug" })
 }
 
-fn create_app_bundles(
+fn expected_macos_arch(target: Option<&str>) -> Option<&'static str> {
+    match target {
+        Some(t) if t.starts_with("aarch64") => Some("arm64"),
+        Some(t) if t.starts_with("x86_64") => Some("x86_64"),
+        _ => None,
+    }
+}
+
+fn verify_macos_bundle_arch(
+    executable: &Path,
+    expected_arch: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(expected) = expected_arch else {
+        return Ok(());
+    };
+    let out = Command::new("lipo")
+        .args(["-archs", executable.to_str().unwrap_or_default()])
+        .output()?;
+    if !out.status.success() {
+        return Err(format!(
+            "Could not inspect architectures of {}",
+            executable.display()
+        )
+        .into());
+    }
+    let archs = String::from_utf8_lossy(&out.stdout);
+    if !archs.split_whitespace().any(|a| a == expected) {
+        return Err(format!(
+            "{} has arch '{}', expected '{}'",
+            executable.display(),
+            archs.trim(),
+            expected
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn detect_installer_identity() -> Option<String> {
+    if let Ok(id) = std::env::var("DT_INSTALLER_IDENTITY") {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let out = Command::new("security")
+        .args(["find-identity", "-p", "basic", "-v"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some(start) = line.find("\"Developer ID Installer:")
+            && let Some(end) = line[start + 1..].find('"')
+        {
+            return Some(line[start + 1..start + 1 + end].to_string());
+        }
+    }
+    None
+}
+
+fn create_app_bundles_in_dir(
+    bundle_root: &Path,
     release: bool,
     target: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -319,16 +380,24 @@ fn create_app_bundles(
         return Err("Failed to build binaries for bundling".into());
     }
 
+    // Fresh staging prevents stale binaries or signatures from a prior build/arch.
+    if bundle_root.exists() {
+        fs::remove_dir_all(bundle_root)?;
+    }
     let bin_dir = cargo_profile_dir(release, target);
-    println!("==> Bundling DT applications from {}...", bin_dir.display());
-    let helper_app_dir = Path::new("target/bundle/DTCUHelper.app/Contents/MacOS");
-    fs::create_dir_all(helper_app_dir)?;
+    let expected_arch = expected_macos_arch(target);
+    println!(
+        "==> Bundling DT applications in fresh staging {} from {}...",
+        bundle_root.display(),
+        bin_dir.display()
+    );
+    let helper_app_dir = bundle_root.join("DTCUHelper.app/Contents/MacOS");
+    fs::create_dir_all(&helper_app_dir)?;
 
     // Copy helper binary
-    fs::copy(
-        bin_dir.join("gm-cu-helper"),
-        helper_app_dir.join("gm-cu-helper"),
-    )?;
+    let helper_bin = helper_app_dir.join("gm-cu-helper");
+    fs::copy(bin_dir.join("gm-cu-helper"), &helper_bin)?;
+    verify_macos_bundle_arch(&helper_bin, expected_arch)?;
 
     let pkg_version = env!("CARGO_PKG_VERSION");
 
@@ -367,18 +436,24 @@ fn create_app_bundles(
 "#
     );
     fs::write(
-        "target/bundle/DTCUHelper.app/Contents/Info.plist",
+        bundle_root.join("DTCUHelper.app/Contents/Info.plist"),
         helper_plist,
     )?;
 
     // Bundle main DT.app (includes dt, dt-doctor, gm compatibility alias, gm-daemon, gm-ui)
-    let app_macos_dir = Path::new("target/bundle/DT.app/Contents/MacOS");
-    fs::create_dir_all(app_macos_dir)?;
-    fs::copy(bin_dir.join("gm-ui"), app_macos_dir.join("gm-ui"))?;
-    fs::copy(bin_dir.join("gm-daemon"), app_macos_dir.join("gm-daemon"))?;
-    fs::copy(bin_dir.join("gm"), app_macos_dir.join("gm"))?;
-    fs::copy(bin_dir.join("dt"), app_macos_dir.join("dt"))?;
-    fs::copy(bin_dir.join("dt-doctor"), app_macos_dir.join("dt-doctor"))?;
+    let app_macos_dir = bundle_root.join("DT.app/Contents/MacOS");
+    let app_res_dir = bundle_root.join("DT.app/Contents/Resources");
+    fs::create_dir_all(&app_macos_dir)?;
+    fs::create_dir_all(&app_res_dir)?;
+    for bin_name in ["gm-ui", "gm-daemon", "gm", "dt", "dt-doctor"] {
+        let dest = app_macos_dir.join(bin_name);
+        fs::copy(bin_dir.join(bin_name), &dest)?;
+        verify_macos_bundle_arch(&dest, expected_arch)?;
+    }
+    let license_src = Path::new("crates/gm-ui/assets/fonts/LICENSE.md");
+    if license_src.exists() {
+        fs::copy(license_src, app_res_dir.join("SourceSans3-LICENSE.md"))?;
+    }
 
     let app_plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -411,12 +486,41 @@ fn create_app_bundles(
 </plist>
 "#
     );
-    fs::write("target/bundle/DT.app/Contents/Info.plist", app_plist)?;
+    fs::write(bundle_root.join("DT.app/Contents/Info.plist"), app_plist)?;
 
-    println!("==> Successfully created app bundles:");
-    println!("    target/bundle/DTCUHelper.app");
-    println!("    target/bundle/DT.app");
+    // Strip symbols BEFORE signing so no bundle mutation occurs after codesign.
+    #[cfg(target_os = "macos")]
+    for rel in [
+        "DTCUHelper.app/Contents/MacOS/gm-cu-helper",
+        "DT.app/Contents/MacOS/gm-ui",
+        "DT.app/Contents/MacOS/gm-daemon",
+        "DT.app/Contents/MacOS/gm",
+        "DT.app/Contents/MacOS/dt",
+        "DT.app/Contents/MacOS/dt-doctor",
+    ] {
+        let exe = bundle_root.join(rel);
+        let status = Command::new("strip")
+            .args(["-S", exe.to_str().unwrap_or_default()])
+            .status()?;
+        if !status.success() {
+            return Err(format!("Could not strip packaging symbols from {}", exe.display()).into());
+        }
+    }
+
+    println!(
+        "==> Successfully created app bundles in {}:",
+        bundle_root.display()
+    );
+    println!("    {}/DTCUHelper.app", bundle_root.display());
+    println!("    {}/DT.app", bundle_root.display());
     Ok(())
+}
+
+fn create_app_bundles(
+    release: bool,
+    target: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    create_app_bundles_in_dir(Path::new("target/bundle"), release, target)
 }
 
 fn sign_bundle(
@@ -460,55 +564,58 @@ fn assemble_dmg(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("==> Assembling distributable macOS DMG with identity: {id}");
 
-    // 1. Compile & assemble bundles
+    // 1. Compile & assemble bundles in isolated fresh per-architecture staging
+    let arch_tag = target.unwrap_or("native");
+    let work_root = PathBuf::from("target/bundle-staging").join(arch_tag);
     println!(
-        "==> Packaging profile={} target={target:?} output={output}",
-        if release { "release" } else { "debug" }
+        "==> Packaging profile={} target={target:?} output={output} staging={}",
+        if release { "release" } else { "debug" },
+        work_root.display()
     );
-    create_app_bundles(release, target)?;
+    create_app_bundles_in_dir(&work_root, release, target)?;
+    let helper_app = work_root.join("DTCUHelper.app");
+    let main_app = work_root.join("DT.app");
 
-    // Packaging debug builds should not duplicate their symbol tables in the image.
-    for executable in [
-        "target/bundle/DTCUHelper.app/Contents/MacOS/gm-cu-helper",
-        "target/bundle/DT.app/Contents/MacOS/gm-ui",
-        "target/bundle/DT.app/Contents/MacOS/gm-daemon",
-        "target/bundle/DT.app/Contents/MacOS/gm",
-        "target/bundle/DT.app/Contents/MacOS/dt",
-        "target/bundle/DT.app/Contents/MacOS/dt-doctor",
-    ] {
-        let status = Command::new("strip").args(["-S", executable]).status()?;
-        if !status.success() {
-            return Err(format!("Could not strip packaging symbols from {executable}").into());
-        }
-    }
-    // 2. Sign both bundles with hardened runtime & entitlements
+    // 2. Sign both bundles AFTER all file changes with hardened runtime & entitlements
     println!(
         "==> Signing bundles with hardened runtime (--options runtime) & entitlements.plist..."
     );
     sign_bundle(
-        "target/bundle/DTCUHelper.app",
+        helper_app.to_str().unwrap_or_default(),
         id,
         Some("entitlements.plist"),
     )?;
-    sign_bundle("target/bundle/DT.app", id, Some("entitlements.plist"))?;
+    sign_bundle(
+        main_app.to_str().unwrap_or_default(),
+        id,
+        Some("entitlements.plist"),
+    )?;
 
     // 3. Staging directory setup
-    let staging = Path::new("target/dmg-staging");
+    let staging = Path::new("target/dmg-staging").join(arch_tag);
     if staging.exists() {
-        let _ = fs::remove_dir_all(staging);
+        let _ = fs::remove_dir_all(&staging);
     }
-    fs::create_dir_all(staging)?;
+    fs::create_dir_all(&staging)?;
 
     println!("==> Copying signed app bundles into staging directory...");
     let cp_helper = Command::new("cp")
-        .args(["-cR", "target/bundle/DTCUHelper.app", "target/dmg-staging/"])
+        .args([
+            "-cR",
+            helper_app.to_str().unwrap_or_default(),
+            staging.to_str().unwrap_or_default(),
+        ])
         .status()?;
     if !cp_helper.success() {
         return Err("Failed to copy DTCUHelper.app to staging".into());
     }
 
     let cp_ui = Command::new("cp")
-        .args(["-cR", "target/bundle/DT.app", "target/dmg-staging/"])
+        .args([
+            "-cR",
+            main_app.to_str().unwrap_or_default(),
+            staging.to_str().unwrap_or_default(),
+        ])
         .status()?;
     if !cp_ui.success() {
         return Err("Failed to copy DT.app to staging".into());
@@ -517,51 +624,75 @@ fn assemble_dmg(
     // Create /Applications symlink for drag-and-drop install UX
     println!("==> Creating /Applications symlink in staging...");
     let _ = Command::new("ln")
-        .args(["-s", "/Applications", "target/dmg-staging/Applications"])
+        .args([
+            "-s",
+            "/Applications",
+            staging.join("Applications").to_str().unwrap_or_default(),
+        ])
         .status();
 
     // Build Install DT.pkg alongside bundles inside the DMG when pkgbuild/productbuild are present.
     #[cfg(target_os = "macos")]
     {
-        let pkg_root = Path::new("target/dmg-pkg-root");
-        let _ = fs::remove_dir_all(pkg_root);
+        let pkg_root = Path::new("target/dmg-pkg-root").join(arch_tag);
+        let _ = fs::remove_dir_all(&pkg_root);
         let _ = fs::create_dir_all(pkg_root.join("Applications"));
         let _ = Command::new("cp")
             .args([
                 "-cR",
-                "target/bundle/DT.app",
-                "target/dmg-pkg-root/Applications/DT.app",
+                main_app.to_str().unwrap_or_default(),
+                pkg_root
+                    .join("Applications/DT.app")
+                    .to_str()
+                    .unwrap_or_default(),
             ])
             .status();
         let _ = Command::new("cp")
             .args([
                 "-cR",
-                "target/bundle/DTCUHelper.app",
-                "target/dmg-pkg-root/Applications/DTCUHelper.app",
+                helper_app.to_str().unwrap_or_default(),
+                pkg_root
+                    .join("Applications/DTCUHelper.app")
+                    .to_str()
+                    .unwrap_or_default(),
             ])
             .status();
-        let comp_pkg = "target/dmg-component.pkg";
+        let comp_pkg = format!("target/dmg-component-{arch_tag}.pkg");
         let pkg_ok = Command::new("pkgbuild")
             .args([
                 "--root",
-                "target/dmg-pkg-root",
+                pkg_root.to_str().unwrap_or_default(),
                 "--identifier",
                 "co.anysphere.grok-muse.pkg",
                 "--version",
                 env!("CARGO_PKG_VERSION"),
                 "--install-location",
                 "/",
-                comp_pkg,
+                &comp_pkg,
             ])
             .status()
             .is_ok_and(|s| s.success());
         if pkg_ok {
-            let _ = Command::new("productbuild")
-                .args(["--package", comp_pkg, "target/dmg-staging/Install DT.pkg"])
-                .status();
+            let installer_out = staging.join("Install DT.pkg");
+            let mut pb_args = vec![
+                "--package",
+                &comp_pkg,
+                installer_out.to_str().unwrap_or_default(),
+            ];
+            let installer_id = detect_installer_identity();
+            if let Some(ref inst) = installer_id {
+                pb_args.push("--sign");
+                pb_args.push(inst);
+                println!("==> Signing Install DT.pkg with '{inst}'...");
+            } else {
+                println!(
+                    "==> Install DT.pkg built unsigned (preview mode; Developer ID Installer certificate required for signed .pkg)"
+                );
+            }
+            let _ = Command::new("productbuild").args(&pb_args).status();
         }
-        let _ = fs::remove_dir_all(pkg_root);
-        let _ = fs::remove_file(comp_pkg);
+        let _ = fs::remove_dir_all(&pkg_root);
+        let _ = fs::remove_file(&comp_pkg);
     }
 
     // 4. Create DMG
@@ -580,7 +711,7 @@ fn assemble_dmg(
             "-volname",
             "DT",
             "-srcfolder",
-            "target/dmg-staging",
+            staging.to_str().unwrap_or_default(),
             "-ov",
             "-format",
             "UDZO",
@@ -759,6 +890,40 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
             return Err("codesign --verify failed for DTCUHelper.app".into());
         }
         println!("    ✔ DTCUHelper.app signature: VALID (--verify --deep --strict)");
+
+        let expected_arch = if dmg_path_str.contains("macos-aarch64") {
+            Some("arm64")
+        } else if dmg_path_str.contains("macos-x86_64") {
+            Some("x86_64")
+        } else {
+            None
+        };
+        for exe in [
+            ui_app.join("Contents/MacOS/gm-ui"),
+            ui_app.join("Contents/MacOS/gm-daemon"),
+            helper_app.join("Contents/MacOS/gm-cu-helper"),
+        ] {
+            verify_macos_bundle_arch(&exe, expected_arch)?;
+        }
+        if let Some(arch) = expected_arch {
+            println!("    ✔ Binary architecture verified: {arch}");
+        }
+        let pkg_sig = Command::new("pkgutil")
+            .args([
+                "--check-signature",
+                install_pkg.to_str().unwrap_or_default(),
+            ])
+            .output();
+        match pkg_sig {
+            Ok(out) if out.status.success() => {
+                println!("    ✔ Install DT.pkg signature: SIGNED");
+            }
+            _ => {
+                println!(
+                    "    • Install DT.pkg signature: unsigned preview (requires Developer ID Installer certificate)"
+                );
+            }
+        }
 
         // Verify G1 Native compliance (no Chromium or Electron frameworks)
         let electron_fw = ui_app.join("Contents/Frameworks/Electron Framework.framework");
@@ -1000,6 +1165,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Bundle { release } => {
             create_app_bundles(release, None)?;
+            #[cfg(target_os = "macos")]
+            {
+                let id = detect_identity();
+                println!("==> Signing local bundles with identity '{id}' and verifying...");
+                sign_bundle(
+                    "target/bundle/DTCUHelper.app",
+                    &id,
+                    Some("entitlements.plist"),
+                )?;
+                sign_bundle("target/bundle/DT.app", &id, Some("entitlements.plist"))?;
+                println!(
+                    "==> Local bundles signed and strictly verified (--verify --deep --strict)."
+                );
+            }
         }
 
         Commands::Sign { identity, release } => {

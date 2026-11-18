@@ -2979,6 +2979,7 @@ struct PostDmBody {
     content: String,
     reply_to_id: Option<String>,
     thread_id: Option<String>,
+    client_msg_id: Option<String>,
 }
 
 async fn post_dm_message_route(
@@ -2997,6 +2998,7 @@ async fn post_dm_message_route(
                 &body.content,
                 body.reply_to_id.as_deref(),
                 body.thread_id.as_deref(),
+                body.client_msg_id.as_deref(),
                 llm,
                 router,
                 state.budget.as_deref(),

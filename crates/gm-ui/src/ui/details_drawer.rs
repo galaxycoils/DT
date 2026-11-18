@@ -47,90 +47,85 @@ pub fn draw_bot_details_drawer(
         return;
     }
 
-    let response=egui::SidePanel::right("grok_bot_details_drawer")
-        .default_width(ui_state.details_width)
-        .width_range(320.0..=600.0)
-        .resizable(true)
-        .frame(
-            egui::Frame::NONE
-                .fill(palette.bg_sidebar)
-                .stroke(Stroke::new(1.0_f32, palette.border_subtle))
-                .inner_margin(egui::Margin::symmetric(12, 10)),
-        )
-        .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong(RichText::new(format!("@{active_bot} Details")).color(palette.text_primary));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui
-                        .small_button("✕")
-                        .on_hover_text("Close Bot Details (Esc / Cmd+Alt+B)")
-                        .clicked()
-                    {
-                        ui_state.details_drawer_open = false;
-                        if !ui_state.live_computer_open && !ui_state.live_computer_fullscreen {
-                            textures.evict_prefix("live_computer:");
-                        }
+    let viewport = ctx.content_rect();
+    let details_default_width = ui_state.details_width;
+    let use_overlay =
+        ui_state.should_overlay_right_panel(viewport.width(), details_default_width, 0.0);
+    let mut draw_inner = |ui: &mut egui::Ui| {
+        ui.horizontal(|ui| {
+            ui.strong(RichText::new(format!("@{active_bot} Details")).color(palette.text_primary));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("Close")
+                    .on_hover_text("Close Bot Details (Esc / Cmd+Alt+B)")
+                    .clicked()
+                {
+                    ui_state.details_drawer_open = false;
+                    if !ui_state.live_computer_open && !ui_state.live_computer_fullscreen {
+                        textures.evict_prefix("live_computer:");
                     }
-                });
+                }
             });
-            ui.add_space(6.0);
+        });
+        ui.add_space(6.0);
 
-            // 4-Tab Selector
-            ui.horizontal(|ui| {
-                for tab in BotDetailsTab::ALL {
-                    let active = ui_state.details_tab == tab;
-                    let btn = egui::Button::new(RichText::new(tab.label()).size(12.0).color(
-                        if active {
-                            palette.accent_text
-                        } else {
-                            palette.text_secondary
-                        },
-                    ))
+        // 4-Tab Selector
+        ui.horizontal(|ui| {
+            for tab in BotDetailsTab::ALL {
+                let active = ui_state.details_tab == tab;
+                let btn =
+                    egui::Button::new(RichText::new(tab.label()).size(13.0).color(if active {
+                        palette.accent_text
+                    } else {
+                        palette.text_secondary
+                    }))
                     .fill(if active {
                         palette.accent
                     } else {
                         palette.bg_elevated
                     })
                     .corner_radius(CornerRadius::same(6));
-                    if ui.add(btn).clicked() {
-                        let prev_tab = ui_state.details_tab;
-                        ui_state.details_tab = tab;
-                        if prev_tab == BotDetailsTab::Computer
-                            && tab != BotDetailsTab::Computer
-                            && !ui_state.live_computer_open
-                        {
-                            textures.evict_prefix("live_computer:");
+                if ui.add(btn).clicked() {
+                    let prev_tab = ui_state.details_tab;
+                    ui_state.details_tab = tab;
+                    if prev_tab == BotDetailsTab::Computer
+                        && tab != BotDetailsTab::Computer
+                        && !ui_state.live_computer_open
+                    {
+                        textures.evict_prefix("live_computer:");
+                    }
+                    match tab {
+                        BotDetailsTab::Routines => {
+                            send(DaemonRequest::ListRoutines);
                         }
-                        match tab {
-                            BotDetailsTab::Routines => {send(DaemonRequest::ListRoutines);}
-                    BotDetailsTab::Computer => {
-                                send(DaemonRequest::CaptureComputerPreview {
-                                    max_long_edge: Some(1280),
-                                    quality: Some(75),
-                                });
-                            }
-                            BotDetailsTab::Memory => {
-                                send(DaemonRequest::ReadRuntimeFile {
-                                    bot_id: Some(active_bot.to_string()),
-                                    file: identity_file.clone(),
-                                });
-                            }
-                            BotDetailsTab::Library => {
-                                send(DaemonRequest::ListLibraryPage {
-                                    bot_id: active_bot.to_string(),
-                                    filter: ui_state.library_filter.clone(),
-                                    cursor: Some(ui_state.library_cursor),
-                                    limit: Some(5),
-                                });
-                            }
-                            BotDetailsTab::Settings => {}
+                        BotDetailsTab::Computer => {
+                            send(DaemonRequest::CaptureComputerPreview {
+                                max_long_edge: Some(1280),
+                                quality: Some(75),
+                            });
                         }
+                        BotDetailsTab::Memory => {
+                            send(DaemonRequest::ReadRuntimeFile {
+                                bot_id: Some(active_bot.to_string()),
+                                file: identity_file.clone(),
+                            });
+                        }
+                        BotDetailsTab::Library => {
+                            send(DaemonRequest::ListLibraryPage {
+                                bot_id: active_bot.to_string(),
+                                filter: ui_state.library_filter.clone(),
+                                cursor: Some(ui_state.library_cursor),
+                                limit: Some(5),
+                            });
+                        }
+                        BotDetailsTab::Settings => {}
                     }
                 }
-            });
-            ui.separator();
+            }
+        });
+        ui.separator();
 
-            egui::ScrollArea::vertical()
+        egui::ScrollArea::vertical()
                 .id_salt("grok_details_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| match ui_state.details_tab {
@@ -205,14 +200,14 @@ pub fn draw_bot_details_drawer(
                             }
                             if ui.button("Discard Changes").clicked() { *draft_profile = bot.clone(); }
                             ui.add_space(6.0);
-                            if ui.button("🎨 Customize Avatar, Shape & Color…").clicked() {
+                            if ui.button("Customize Avatar, Shape & Color…").clicked() {
                                 ui_state.open_avatar_picker(active_bot, bot);
                             }
                         }
                     }
 
                             BotDetailsTab::Routines => {
-                        if ui.button("＋ New Routine").clicked() {
+                        if ui.button("+ New Routine").clicked() {
                             ui_state.routine_draft = serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "name":"New Routine", "bot_id":active_bot, "instruction":"", "timezone":"UTC", "hour":9, "minute":0, "weekdays":[], "enabled":true});
                             ui_state.active_modal = Some(ActiveModal::RoutineEditor);
                         }
@@ -229,7 +224,7 @@ pub fn draw_bot_details_drawer(
                                 }
                                 ui.small(format!("Next: {}", entry["next_run_utc"].as_str().unwrap_or("manual")));
                                 ui.horizontal_wrapped(|ui| {
-                                    if ui.small_button("Test ▶").clicked() { send(DaemonRequest::TriggerRoutineTest { routine_id:id.clone() }); }
+                                    if ui.small_button("Test").clicked() { send(DaemonRequest::TriggerRoutineTest { routine_id:id.clone() }); }
                                     if ui.small_button("Edit / Webhook").clicked() { ui_state.routine_draft=routine.clone(); ui_state.active_modal=Some(ActiveModal::RoutineEditor); }
                                     if ui.small_button("Last 20 runs").clicked() { send(DaemonRequest::ListRoutineRuns { routine_id:id.clone(), limit:Some(20) }); }
                                     if ui.small_button("Delete").clicked() { send(DaemonRequest::DeleteRoutine { routine_id:id.clone() }); }
@@ -242,7 +237,7 @@ pub fn draw_bot_details_drawer(
                     BotDetailsTab::Computer => {
                         ui.horizontal(|ui| {
                             ui.strong("Live Computer Preview");
-                            if ui.small_button("↻ Capture Frame").clicked() {
+                            if ui.small_button("Capture Frame").clicked() {
                                 send(DaemonRequest::CaptureComputerPreview {
                                     max_long_edge: Some(1280),
                                     quality: Some(75),
@@ -267,12 +262,12 @@ pub fn draw_bot_details_drawer(
                         }
 
                         ui.separator();
-                        ui.strong("🎓 Teach a Task");
+                        ui.strong("Teach a Task");
                         ui.small(
                             "Demonstrate steps to compile a reusable SKILL.md (all steps pass through SecretScrubber).",
                         );
                         if !ui_state.teach_active {
-                            if ui.button("▶ Start Demonstration").clicked() {
+                            if ui.button("Start Demonstration").clicked() {
                                 ui_state.teach_active = true;
                                 ui_state.teach_steps_recorded.clear();
                                 send(DaemonRequest::StartTeachTask {
@@ -296,7 +291,7 @@ pub fn draw_bot_details_drawer(
                                 if ui
                                     .add_enabled(
                                         !ui_state.teach_step_draft.trim().is_empty(),
-                                        egui::Button::new("＋ Step"),
+                                        egui::Button::new("+ Step"),
                                     )
                                     .clicked()
                                 {
@@ -314,7 +309,7 @@ pub fn draw_bot_details_drawer(
                                     .desired_width(ui.available_width())
                                     .hint_text("Skill slug (e.g. weekly-report)"),
                             );
-                            if ui.button("⏹ Stop & Compile SKILL.md").clicked() {
+                            if ui.button("Stop & Compile SKILL.md").clicked() {
                                 ui_state.teach_active = false;
                                 let skill_name = if ui_state.teach_skill_name_draft.trim().is_empty()
                                 {
@@ -345,7 +340,7 @@ pub fn draw_bot_details_drawer(
                                     file: identity_file.clone(),
                                 });
                             }
-                            if ui.small_button("Open Split ◧").clicked() {
+                            if ui.small_button("Open Split").clicked() {
                                 ui_state.split_page = Some(SplitPageTarget::MarkdownFile {
                                     bot_id: active_bot.to_string(),
                                     file: identity_file.clone(),
@@ -506,7 +501,7 @@ pub fn draw_bot_details_drawer(
                             ui.group(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.small(if pinned {
-                                        format!("📌 {title}")
+                                        format!("Pinned · {title}")
                                     } else {
                                         title.to_string()
                                     });
@@ -524,7 +519,7 @@ pub fn draw_bot_details_drawer(
                                     }
                                     if !path.is_empty()
                                         && matches!(kind, "file" | "upload" | "output" | "shared_file" | "")
-                                        && ui.small_button("Open ◧").clicked()
+                                        && ui.small_button("Open Split").clicked()
                                     {
                                         send(DaemonRequest::PreviewBotFile {
                                             bot_id: active_bot.to_string(),
@@ -565,15 +560,46 @@ pub fn draw_bot_details_drawer(
                         });
                     }
                 });
-        });
-    ui_state.details_width = response.response.rect.width();
-    if ctx.input(|i| i.pointer.any_released())
-        && (ui_state.details_width - ui_state.details_saved_width).abs() > 0.5
-    {
-        ui_state.details_saved_width = ui_state.details_width;
-        send(DaemonRequest::SaveUiSettings {
-            ui: serde_json::json!({"details_width":ui_state.details_width.round() as u16}),
-        });
+    };
+
+    if use_overlay {
+        let overlay_w = (viewport.width() - 32.0).clamp(260.0, 400.0);
+        let max_h = (viewport.height() - 80.0).max(240.0);
+        egui::Area::new(egui::Id::new("grok_bot_details_overlay"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, Vec2::new(-12.0, 56.0))
+            .show(ctx, |ui| {
+                egui::Frame::window(&ctx.style())
+                    .fill(palette.bg_sidebar)
+                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                    .inner_margin(egui::Margin::symmetric(14, 12))
+                    .show(ui, |ui| {
+                        ui.set_width(overlay_w);
+                        ui.set_max_height(max_h);
+                        draw_inner(ui);
+                    });
+            });
+    } else {
+        let response = egui::SidePanel::right("grok_bot_details_drawer")
+            .default_width(details_default_width)
+            .width_range(320.0..=600.0)
+            .resizable(true)
+            .frame(
+                egui::Frame::NONE
+                    .fill(palette.bg_sidebar)
+                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                    .inner_margin(egui::Margin::symmetric(12, 10)),
+            )
+            .show(ctx, draw_inner);
+        ui_state.details_width = response.response.rect.width();
+        if ctx.input(|i| i.pointer.any_released())
+            && (ui_state.details_width - ui_state.details_saved_width).abs() > 0.5
+        {
+            ui_state.details_saved_width = ui_state.details_width;
+            send(DaemonRequest::SaveUiSettings {
+                ui: serde_json::json!({"details_width":ui_state.details_width.round() as u16}),
+            });
+        }
     }
 }
 

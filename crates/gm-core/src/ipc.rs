@@ -331,6 +331,8 @@ pub enum DaemonRequest {
         reply_to_id: Option<String>,
         #[serde(default)]
         thread_id: Option<String>,
+        #[serde(default)]
+        client_msg_id: Option<String>,
     },
     SearchMessages {
         query: String,
@@ -1183,6 +1185,7 @@ mod tests {
                 content: "Hello Grok Bot".into(),
                 reply_to_id: Some("dm-1".into()),
                 thread_id: Some("thr-1".into()),
+                client_msg_id: Some("client-uuid-1".into()),
             },
             DaemonRequest::SearchMessages {
                 query: "invoice".into(),

@@ -98,49 +98,93 @@ pub fn draw_adaptive_sidebar(
                 ui.add_space(10.0);
             }
             ui.horizontal(|ui| {
-                let activity =
-                    icons::button(ui, Icon::Activity, "Activity", palette.text_secondary);
-                egui::Popup::menu(&activity).show(|ui| {
-                    for section in [
-                        WorkspaceSection::Feed,
-                        WorkspaceSection::Goals,
-                        WorkspaceSection::Audit,
-                    ] {
+                if mini {
+                    let activity =
+                        icons::button(ui, Icon::Activity, "Activity", palette.text_secondary);
+                    egui::Popup::menu(&activity).show(|ui| {
+                        for section in [
+                            WorkspaceSection::Feed,
+                            WorkspaceSection::Goals,
+                            WorkspaceSection::Audit,
+                        ] {
+                            if ui
+                                .selectable_label(ui_state.section == section, section.label())
+                                .clicked()
+                            {
+                                select_section(ui_state, section, &mut send);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        let paused = ui_state.server_snapshot["status"]["paused"]
+                            .as_bool()
+                            .unwrap_or(false);
                         if ui
-                            .selectable_label(ui_state.section == section, section.label())
+                            .button(if paused {
+                                "Resume tasks"
+                            } else {
+                                "Pause tasks"
+                            })
                             .clicked()
                         {
-                            select_section(ui_state, section, &mut send);
+                            send(DaemonRequest::SetPaused { paused: !paused });
                             ui.close();
                         }
-                    }
-                    ui.separator();
-                    let paused = ui_state.server_snapshot["status"]["paused"]
-                        .as_bool()
-                        .unwrap_or(false);
-                    if ui
-                        .button(if paused {
-                            "Resume tasks"
-                        } else {
-                            "Pause tasks"
-                        })
-                        .clicked()
-                    {
-                        send(DaemonRequest::SetPaused { paused: !paused });
-                        ui.close();
-                    }
-                    if ui
-                        .button(RichText::new("Stop all tasks").color(palette.status_danger))
-                        .clicked()
-                    {
-                        send(DaemonRequest::EmergencyKill);
-                        ui.close();
-                    }
-                });
-                if !mini {
-                    ui.label(RichText::new("Activity").color(palette.text_secondary));
+                        if ui
+                            .button(RichText::new("Stop all tasks").color(palette.status_danger))
+                            .clicked()
+                        {
+                            send(DaemonRequest::EmergencyKill);
+                            ui.close();
+                        }
+                    });
+                } else {
+                    let activity = icons::labeled_button(
+                        ui,
+                        Icon::Activity,
+                        "Activity",
+                        palette.text_secondary,
+                    );
+                    egui::Popup::menu(&activity).show(|ui| {
+                        for section in [
+                            WorkspaceSection::Feed,
+                            WorkspaceSection::Goals,
+                            WorkspaceSection::Audit,
+                        ] {
+                            if ui
+                                .selectable_label(ui_state.section == section, section.label())
+                                .clicked()
+                            {
+                                select_section(ui_state, section, &mut send);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        let paused = ui_state.server_snapshot["status"]["paused"]
+                            .as_bool()
+                            .unwrap_or(false);
+                        if ui
+                            .button(if paused {
+                                "Resume tasks"
+                            } else {
+                                "Pause tasks"
+                            })
+                            .clicked()
+                        {
+                            send(DaemonRequest::SetPaused { paused: !paused });
+                            ui.close();
+                        }
+                        if ui
+                            .button(RichText::new("Stop all tasks").color(palette.status_danger))
+                            .clicked()
+                        {
+                            send(DaemonRequest::EmergencyKill);
+                            ui.close();
+                        }
+                    });
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if icons::button(ui, Icon::Pages, "Pages", palette.text_secondary).clicked()
+                        if icons::labeled_button(ui, Icon::Pages, "Pages", palette.text_secondary)
+                            .clicked()
                         {
                             select_section(ui_state, WorkspaceSection::Spaces, &mut send);
                         }
@@ -166,13 +210,21 @@ pub fn draw_adaptive_sidebar(
                         ui_state.active_modal = Some(ActiveModal::ConnectApps);
                     }
                     ui.horizontal(|ui| {
-                        if icons::button(ui, Icon::Settings, "Settings", palette.text_secondary)
-                            .clicked()
-                        {
+                        let settings_resp = if mini {
+                            icons::button(ui, Icon::Settings, "Settings", palette.text_secondary)
+                        } else {
+                            icons::labeled_button(
+                                ui,
+                                Icon::Settings,
+                                "Settings",
+                                palette.text_secondary,
+                            )
+                        };
+                        if settings_resp.clicked() {
                             ui_state.active_modal = Some(ActiveModal::Settings);
                         }
                         if !mini {
-                            ui.menu_button("Your workspace", |ui| {
+                            ui.menu_button("Workspace", |ui| {
                                 if ui.button("Providers & models").clicked() {
                                     ui_state.settings_pane = SettingsPane::Providers;
                                     ui_state.active_modal = Some(ActiveModal::Settings);
@@ -628,7 +680,7 @@ fn draw_bot_row(
     resp.context_menu(|ui| {
         ui.strong(format!("@{id}"));
         ui.separator();
-        if ui.button("★ Set as Primary Bot").clicked() {
+        if ui.button("Set as Primary Bot").clicked() {
             send(DaemonRequest::SetBotUiPrefs {
                 bot_id: id.clone(),
                 prefs: serde_json::json!({ "is_primary": true }),
@@ -655,7 +707,7 @@ fn draw_bot_row(
             });
             ui.close();
         }
-        if ui.button("🎨 Customize Shape & Color…").clicked() {
+        if ui.button("Customize Shape & Color…").clicked() {
             ui_state.avatar_shape_draft =
                 bot["avatar_shape"].as_str().unwrap_or("Circle").to_string();
             ui_state.avatar_color_draft = bot["avatar_color"]
@@ -666,7 +718,7 @@ fn draw_bot_row(
             ui_state.active_modal = Some(ActiveModal::AvatarPicker { bot_id: id.clone() });
             ui.close();
         }
-        if ui.button("⎘ Duplicate Bot").clicked() {
+        if ui.button("Duplicate Bot").clicked() {
             send(DaemonRequest::ManageSystem {
                 op: "duplicate_bot".into(),
                 payload: serde_json::json!({ "source_bot_id": id }),
@@ -698,7 +750,7 @@ fn draw_bot_row(
         if !is_primary && id != "muse" {
             ui.separator();
             if ui
-                .button(RichText::new("🗑 Delete Bot").color(palette.status_danger))
+                .button(RichText::new("Delete Bot").color(palette.status_danger))
                 .clicked()
             {
                 send(DaemonRequest::ManageSystem {
