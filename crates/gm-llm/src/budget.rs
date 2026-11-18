@@ -700,3 +700,340 @@ mod persistence_tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 }
+
+/// Release-wide US$100 inference budget ledger (PLAN §1.5).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseAllocation {
+    pub allocated_usd: f64,
+    pub reserved_usd: f64,
+    pub spent_usd: f64,
+    pub uncertain_reserved_usd: f64,
+}
+
+impl ReleaseAllocation {
+    pub fn remaining_usd(&self) -> f64 {
+        (self.allocated_usd - self.reserved_usd - self.spent_usd - self.uncertain_reserved_usd)
+            .max(0.0)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseBudgetTransfer {
+    pub id: String,
+    pub from_bucket: String,
+    pub to_bucket: String,
+    pub amount_usd: f64,
+    pub reason: String,
+    pub recorded_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseLedgerStatus {
+    Reserved,
+    Reconciled,
+    UncertainRetained,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseLedgerEntry {
+    pub id: String,
+    pub bucket: String,
+    pub actor: String,
+    pub max_bound_usd: f64,
+    pub reconciled_usd: Option<f64>,
+    pub status: ReleaseLedgerStatus,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReleaseBudgetLedger {
+    pub schema: u32,
+    pub release_version: String,
+    pub total_cap_usd: f64,
+    pub currency: String,
+    pub allocations: BTreeMap<String, ReleaseAllocation>,
+    pub transfers: Vec<ReleaseBudgetTransfer>,
+    pub entries: Vec<ReleaseLedgerEntry>,
+    pub notes: String,
+}
+
+impl Default for ReleaseBudgetLedger {
+    fn default() -> Self {
+        let mut allocations = BTreeMap::new();
+        for target in [
+            "macos-aarch64",
+            "macos-x86_64",
+            "windows-x86_64",
+            "linux-x86_64",
+        ] {
+            allocations.insert(
+                target.to_string(),
+                ReleaseAllocation {
+                    allocated_usd: 15.0,
+                    reserved_usd: 0.0,
+                    spent_usd: 0.0,
+                    uncertain_reserved_usd: 0.0,
+                },
+            );
+        }
+        allocations.insert(
+            "shared-tests".to_string(),
+            ReleaseAllocation {
+                allocated_usd: 25.0,
+                reserved_usd: 0.0,
+                spent_usd: 0.0,
+                uncertain_reserved_usd: 0.0,
+            },
+        );
+        allocations.insert(
+            "unallocated-reserve".to_string(),
+            ReleaseAllocation {
+                allocated_usd: 15.0,
+                reserved_usd: 0.0,
+                spent_usd: 0.0,
+                uncertain_reserved_usd: 0.0,
+            },
+        );
+        Self {
+            schema: 1,
+            release_version: "1.0.0".to_string(),
+            total_cap_usd: 100.0,
+            currency: "USD".to_string(),
+            allocations,
+            transfers: Vec::new(),
+            entries: Vec::new(),
+            notes: "US$100 release-wide inference cap: US$15 per desktop target + US$25 shared tests + US$15 reserve."
+                .to_string(),
+        }
+    }
+}
+
+impl ReleaseBudgetLedger {
+    pub fn load_or_default(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let ledger: Self = serde_json::from_str(&raw)
+            .map_err(|e| GmError::Config(format!("Invalid release budget ledger: {e}")))?;
+        ledger.validate_invariants()?;
+        Ok(ledger)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        self.validate_invariants()?;
+        let data = serde_json::to_vec_pretty(self)?;
+        gm_core::storage::atomic_write_private(path, &data)?;
+        Ok(())
+    }
+
+    pub fn validate_invariants(&self) -> Result<()> {
+        if !self.total_cap_usd.is_finite()
+            || self.total_cap_usd <= 0.0
+            || self.total_cap_usd > 100.0
+        {
+            return Err(GmError::BudgetExceeded(
+                "Release inference cap cannot exceed US$100.00".into(),
+            ));
+        }
+        let total_allocated: f64 = self.allocations.values().map(|a| a.allocated_usd).sum();
+        if total_allocated - self.total_cap_usd > 1e-6 {
+            return Err(GmError::BudgetExceeded(format!(
+                "Release allocations ({total_allocated:.2}) exceed cap ({:.2})",
+                self.total_cap_usd
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn total_exposure(&self) -> f64 {
+        self.allocations
+            .values()
+            .map(|a| a.reserved_usd + a.spent_usd + a.uncertain_reserved_usd)
+            .sum()
+    }
+
+    /// Reserve bounded upper-bound inference cost before dispatching a paid test or CLI-agent run.
+    pub fn reserve_bounded(
+        &mut self,
+        bucket: &str,
+        actor: &str,
+        max_bound_usd: Option<f64>,
+    ) -> Result<String> {
+        let bound = max_bound_usd.ok_or_else(|| {
+            GmError::BudgetExceeded("Paid test blocked: unknown upper inference cost bound".into())
+        })?;
+        if !bound.is_finite() || bound <= 0.0 {
+            return Err(GmError::BudgetExceeded(
+                "Paid test blocked: upper inference cost bound must be finite and positive".into(),
+            ));
+        }
+        let total_after = self.total_exposure() + bound;
+        if total_after - self.total_cap_usd > 1e-6 {
+            return Err(GmError::BudgetExceeded(format!(
+                "Release inference cap US${:.2} exceeded (projected US${total_after:.2})",
+                self.total_cap_usd
+            )));
+        }
+        let alloc = self
+            .allocations
+            .get_mut(bucket)
+            .ok_or_else(|| GmError::Config(format!("Unknown release budget bucket '{bucket}'")))?;
+        if alloc.remaining_usd() + 1e-9 < bound {
+            return Err(GmError::BudgetExceeded(format!(
+                "Insufficient balance in '{bucket}': remaining US${:.2}, required US${bound:.2}",
+                alloc.remaining_usd()
+            )));
+        }
+        alloc.reserved_usd += bound;
+        let id = format!("rbl-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]);
+        let now = chrono::Utc::now().to_rfc3339();
+        self.entries.push(ReleaseLedgerEntry {
+            id: id.clone(),
+            bucket: bucket.to_string(),
+            actor: actor.to_string(),
+            max_bound_usd: bound,
+            reconciled_usd: None,
+            status: ReleaseLedgerStatus::Reserved,
+            created_at: now.clone(),
+            updated_at: now,
+        });
+        Ok(id)
+    }
+
+    /// Reconcile a reservation against observed provider usage, or keep uncertain exposure reserved.
+    pub fn reconcile(&mut self, entry_id: &str, actual_usd: Option<f64>) -> Result<()> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|e| e.id == entry_id)
+            .ok_or_else(|| GmError::Config(format!("Unknown release ledger entry '{entry_id}'")))?;
+        if entry.status != ReleaseLedgerStatus::Reserved {
+            return Err(GmError::Config(format!(
+                "Release ledger entry '{entry_id}' is already finalized"
+            )));
+        }
+        let alloc = self.allocations.get_mut(&entry.bucket).ok_or_else(|| {
+            GmError::Config(format!(
+                "Missing bucket '{}' for ledger entry",
+                entry.bucket
+            ))
+        })?;
+        alloc.reserved_usd = (alloc.reserved_usd - entry.max_bound_usd).max(0.0);
+        entry.updated_at = chrono::Utc::now().to_rfc3339();
+        match actual_usd {
+            Some(actual) => {
+                if !actual.is_finite() || actual < 0.0 {
+                    alloc.uncertain_reserved_usd += entry.max_bound_usd;
+                    entry.status = ReleaseLedgerStatus::UncertainRetained;
+                    return Err(GmError::BudgetExceeded(
+                        "Invalid reconciled provider cost; retaining bound as uncertain".into(),
+                    ));
+                }
+                alloc.spent_usd += actual;
+                entry.reconciled_usd = Some(actual);
+                entry.status = ReleaseLedgerStatus::Reconciled;
+            }
+            None => {
+                // Keep uncertain charges reserved so release cap can never be exceeded.
+                alloc.uncertain_reserved_usd += entry.max_bound_usd;
+                entry.status = ReleaseLedgerStatus::UncertainRetained;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn transfer(
+        &mut self,
+        from_bucket: &str,
+        to_bucket: &str,
+        amount_usd: f64,
+        reason: &str,
+    ) -> Result<()> {
+        if !amount_usd.is_finite() || amount_usd <= 0.0 || from_bucket == to_bucket {
+            return Err(GmError::Config("Invalid release budget transfer".into()));
+        }
+        if reason.trim().is_empty() {
+            return Err(GmError::Config(
+                "Release budget transfer requires an explicit reason".into(),
+            ));
+        }
+        let remaining = self
+            .allocations
+            .get(from_bucket)
+            .ok_or_else(|| GmError::Config(format!("Unknown source bucket '{from_bucket}'")))?
+            .remaining_usd();
+        if remaining + 1e-9 < amount_usd {
+            return Err(GmError::BudgetExceeded(format!(
+                "Cannot transfer US${amount_usd:.2} from '{from_bucket}' (only US${remaining:.2} available)"
+            )));
+        }
+        if !self.allocations.contains_key(to_bucket) {
+            return Err(GmError::Config(format!(
+                "Unknown destination bucket '{to_bucket}'"
+            )));
+        }
+        self.allocations.get_mut(from_bucket).unwrap().allocated_usd -= amount_usd;
+        self.allocations.get_mut(to_bucket).unwrap().allocated_usd += amount_usd;
+        self.transfers.push(ReleaseBudgetTransfer {
+            id: format!("rbt-{}", &uuid::Uuid::new_v4().simple().to_string()[..10]),
+            from_bucket: from_bucket.to_string(),
+            to_bucket: to_bucket.to_string(),
+            amount_usd,
+            reason: reason.to_string(),
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+        });
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod release_ledger_tests {
+    use super::*;
+
+    #[test]
+    fn release_ledger_enforces_cap_unknown_bounds_uncertain_retention_and_transfers() {
+        let mut ledger = ReleaseBudgetLedger::default();
+        assert_eq!(ledger.total_cap_usd, 100.0);
+        // Unknown upper cost is blocked.
+        assert!(
+            ledger
+                .reserve_bounded("shared-tests", "cli-codex", None)
+                .is_err()
+        );
+        // Bounded reserve succeeds and reduces remaining balance.
+        let r1 = ledger
+            .reserve_bounded("macos-aarch64", "cli-claude", Some(10.0))
+            .unwrap();
+        assert!(
+            ledger
+                .reserve_bounded("macos-aarch64", "cli-grok", Some(6.0))
+                .is_err()
+        );
+        // Uncertain charge remains reserved when provider usage is unavailable.
+        ledger.reconcile(&r1, None).unwrap();
+        assert_eq!(
+            ledger.allocations["macos-aarch64"].uncertain_reserved_usd,
+            10.0
+        );
+        assert_eq!(ledger.allocations["macos-aarch64"].remaining_usd(), 5.0);
+
+        // Record transfer from unallocated-reserve to macos-aarch64.
+        ledger
+            .transfer(
+                "unallocated-reserve",
+                "macos-aarch64",
+                5.0,
+                "Additional ARM64 certification run",
+            )
+            .unwrap();
+        let r2 = ledger
+            .reserve_bounded("macos-aarch64", "provider-chatgpt", Some(8.0))
+            .unwrap();
+        ledger.reconcile(&r2, Some(2.5)).unwrap();
+        assert!((ledger.allocations["macos-aarch64"].spent_usd - 2.5).abs() < 1e-9);
+        assert!((ledger.allocations["macos-aarch64"].remaining_usd() - 7.5).abs() < 1e-9);
+    }
+}

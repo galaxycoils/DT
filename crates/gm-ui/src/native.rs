@@ -1909,7 +1909,7 @@ fn conversation_context(messages: &[(String, String)]) -> Vec<ChatTurn> {
 pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
     eframe::run_native(
-        "Grok Muse",
+        "DT",
         eframe::NativeOptions {
             #[cfg(feature = "hardware-wgpu")]
             renderer: if config.ui.hardware_acceleration {

@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: postgres:16.6-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: dt_hosted
+      POSTGRES_USER: dt
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    volumes:
+      - dt_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dt -d dt_hosted"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  dt-server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      DATABASE_URL: postgres://dt@postgres:5432/dt_hosted?sslmode=require
+      DT_HOSTED_MASTER_KEY_FILE: /run/secrets/master_key
+      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret
+      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe_webhook_secret
+    volumes:
+      - dt_workers_data:/var/lib/dt/workers
+    logging:
+      driver: json-file
+      options:
+        max-size: "25m"
+        max-file: "5"
+
+  tls-proxy:
+    image: caddy:2.9-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    restart: unless-stopped
+    depends_on:
+      - dt-server
+    ports:
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - dt_caddy_data:/data
+
+volumes:
+  dt_pg_data:
+  dt_workers_data:
+  dt_caddy_data:

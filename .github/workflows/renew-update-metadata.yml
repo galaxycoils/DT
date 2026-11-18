@@ -1,0 +1,30 @@
+name: Renew signed update metadata
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version whose immutable assets remain on GitHub Releases
+        required: true
+        type: string
+      sequence:
+        description: Monotonically increasing metadata sequence number
+        required: true
+        type: string
+      commit:
+        description: Frozen 40-char commit SHA for the release
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate inputs and emit signed metadata candidate
+        env:
+          GM_RELEASE_PUBLIC_KEY_HEX: ${{ vars.GM_RELEASE_PUBLIC_KEY_HEX }}
+          GM_RELEASE_SIGNING_KEY_PEM: ${{ secrets.GM_RELEASE_SIGNING_KEY_PEM }}
+        run: |
+          echo "Download immutable release assets, verify SHA-256, then run tools/make-release-manifest.py --sequence ${{ inputs.sequence }} --commit ${{ inputs.commit }} and push to protected update-metadata branch."

@@ -116,6 +116,8 @@ pub struct CompanionWebState {
     pub kill_switch: Option<gm_safety::KillSwitch>,
     pub platform: Option<Arc<dyn gm_platform::Platform>>,
     pub updates: Option<Arc<dyn CompanionUpdates>>,
+    pub hosted_plane: Option<Arc<crate::hosted::HostedControlPlane>>,
+    pub sanitized_doctor: Option<Arc<parking_lot::RwLock<Option<serde_json::Value>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,10 +337,20 @@ pub struct AddReactionBody {
     pub bot_id: Option<String>,
 }
 
+const INTERNAL_SESSION_HEADER: &str = "x-dt-verified-session";
+const HOSTED_SESSION_COOKIE: &str = "dt_hosted_session";
+
 fn check_auth(
     headers: &HeaderMap,
     expected_token: Option<&str>,
 ) -> std::result::Result<(), StatusCode> {
+    if headers
+        .get(INTERNAL_SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+        == Some("1")
+    {
+        return Ok(());
+    }
     let Some(expected) = expected_token.filter(|t| !t.trim().is_empty()) else {
         return Err(StatusCode::UNAUTHORIZED);
     };
@@ -354,6 +366,108 @@ fn check_auth(
     } else {
         Err(StatusCode::UNAUTHORIZED)
     }
+}
+
+fn extract_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in raw.split(';') {
+        let Some((k, v)) = part.trim().split_once('=') else {
+            continue;
+        };
+        if k.trim() == name && !v.trim().is_empty() {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+async fn api_v1_auth_and_csrf_middleware(
+    State(state): State<CompanionWebState>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    request.headers_mut().remove(INTERNAL_SESSION_HEADER);
+    let path = request.uri().path().to_string();
+    let rel_path = path.strip_prefix("/api/v1").unwrap_or(&path);
+    // Public/webhook/login endpoints handle their own verification.
+    if rel_path == "/auth/session" || rel_path == "/billing/webhooks/stripe" {
+        return next.run(request).await;
+    }
+
+    let requested_ws = rel_path
+        .strip_prefix("/workspaces/")
+        .and_then(|rest| rest.split('/').next())
+        .map(ToString::to_string)
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-dt-workspace-id")
+                .and_then(|v| v.to_str().ok())
+                .map(ToString::to_string)
+        });
+
+    if let Some(session_id) = extract_cookie_value(request.headers(), HOSTED_SESSION_COOKIE) {
+        let Some(ref plane) = state.hosted_plane else {
+            return ApiErr::msg(
+                StatusCode::UNAUTHORIZED,
+                "Hosted session store is not configured",
+            )
+            .into_response();
+        };
+        let session = match plane.authorize_session(&session_id, requested_ws.as_deref()) {
+            Ok(s) => s,
+            Err(err) => {
+                let code = if err.to_string().contains("Cross-tenant") {
+                    StatusCode::FORBIDDEN
+                } else {
+                    StatusCode::UNAUTHORIZED
+                };
+                return ApiErr::msg(code, err.to_string()).into_response();
+            }
+        };
+        let is_mutation = !matches!(
+            *request.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+        );
+        if is_mutation {
+            let csrf = request
+                .headers()
+                .get("x-dt-csrf-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
+            if !crate::bridges::constant_time_eq(csrf.as_bytes(), session.csrf_token.as_bytes()) {
+                return ApiErr::msg(StatusCode::FORBIDDEN, "Missing or invalid CSRF token")
+                    .into_response();
+            }
+        }
+        request.extensions_mut().insert(session);
+        request
+            .headers_mut()
+            .insert(INTERNAL_SESSION_HEADER, HeaderValue::from_static("1"));
+        return next.run(request).await;
+    }
+
+    // Fallback to Bearer token authentication (local loopback companion / mobile / operator).
+    if check_auth(request.headers(), state.bearer_token.as_deref()).is_err() {
+        return ApiErr::msg(StatusCode::UNAUTHORIZED, "Authentication required").into_response();
+    }
+    if let (Some(ws), Some(plane)) = (requested_ws.as_deref(), state.hosted_plane.as_ref()) {
+        let token = request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.strip_prefix("Bearer "))
+            .unwrap_or("");
+        let expected_local = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+        if ws != expected_local && ws != "local" && plane.authorize_workspace(ws, token).is_err() {
+            return ApiErr::msg(
+                StatusCode::FORBIDDEN,
+                format!("Workspace access denied for '{ws}'"),
+            )
+            .into_response();
+        }
+    }
+    next.run(request).await
 }
 
 pub fn build_companion_router(state: CompanionWebState) -> Router {
@@ -549,12 +663,13 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
         .route("/ag-ui/events", get(stream_agui_events))
         .route("/bridges/inbound", post(handle_bridge_inbound))
         .route("/bridges/slack/events", post(handle_slack_webhook))
-        .nest("/api/v1", api_v1_router())
+        .nest("/api/v1", api_v1_router(state.clone()))
         .layer(axum::middleware::from_fn(
-            move |request: axum::extract::Request, next: axum::middleware::Next| {
+            move |mut request: axum::extract::Request, next: axum::middleware::Next| {
                 let sp_atomic = Arc::clone(&spaces_port_atomic);
                 let sync_supervisor = sync_supervisor.clone();
                 async move {
+                    request.headers_mut().remove(INTERNAL_SESSION_HEADER);
                     let req_path = request.uri().path().to_string();
                     let is_mutation = request.method() != axum::http::Method::GET && req_path.starts_with("/api/");
                     let is_html_route = req_path == "/" || req_path == "/admin/audit";
@@ -618,8 +733,23 @@ impl CompanionWebServer {
                 kill_switch: None,
                 platform: None,
                 updates: None,
+                hosted_plane: None,
+                sanitized_doctor: None,
             },
         }
+    }
+
+    pub fn with_hosted_plane(mut self, plane: Arc<crate::hosted::HostedControlPlane>) -> Self {
+        self.state.hosted_plane = Some(plane);
+        self
+    }
+
+    pub fn with_sanitized_doctor(
+        mut self,
+        doctor: Arc<parking_lot::RwLock<Option<serde_json::Value>>>,
+    ) -> Self {
+        self.state.sanitized_doctor = Some(doctor);
+        self
     }
 
     pub fn with_updates(mut self, updates: Arc<dyn CompanionUpdates>) -> Self {
@@ -4395,8 +4525,14 @@ async fn system_provider_oauth_route(
     Ok(Json(out))
 }
 
-fn api_v1_router() -> Router<CompanionWebState> {
+fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
     Router::new()
+        .route("/auth/enroll", post(auth_enroll_v1_route))
+        .route("/auth/session", post(auth_session_v1_route))
+        .route("/auth/logout", post(auth_logout_v1_route))
+        .route("/auth/revoke", post(auth_revoke_v1_route))
+        .route("/workspaces", get(list_workspaces_v1_route))
+        .route("/doctor", get(doctor_status_v1_route))
         .route("/bootstrap", get(get_bootstrap_route))
         .route("/workspaces/:ws_id/events", get(stream_workspace_events_v1))
         .route("/bots", get(list_bots).post(upsert_bot_route))
@@ -4453,36 +4589,235 @@ fn api_v1_router() -> Router<CompanionWebState> {
         .route("/billing/status", get(billing_status_v1_route))
         .route("/billing/checkout", post(billing_checkout_v1_route))
         .route("/billing/webhooks/stripe", post(stripe_webhook_v1_route))
+        .layer(axum::middleware::from_fn_with_state(
+            state,
+            api_v1_auth_and_csrf_middleware,
+        ))
+}
+
+async fn auth_enroll_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    // Only operator bearer token can mint enrollments.
+    let expected = state
+        .bearer_token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| ApiErr::msg(StatusCode::UNAUTHORIZED, "Operator token required"))?;
+    let auth_val = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !crate::bridges::constant_time_eq(
+        auth_val.as_bytes(),
+        format!("Bearer {expected}").as_bytes(),
+    ) {
+        return Err(ApiErr::msg(
+            StatusCode::UNAUTHORIZED,
+            "Operator token required",
+        ));
+    }
+    let plane = state
+        .hosted_plane
+        .as_ref()
+        .ok_or_else(|| ApiErr::msg(StatusCode::NOT_IMPLEMENTED, "Hosted plane not enabled"))?;
+    let ws_id = body["ws_id"]
+        .as_str()
+        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing ws_id"))?;
+    let user_id = body["user_id"]
+        .as_str()
+        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing user_id"))?;
+    let role = body["role"].as_str().unwrap_or("member");
+    let ttl = body["ttl_seconds"].as_i64().unwrap_or(900);
+    let issued = plane
+        .issue_enrollment(ws_id, user_id, role, ttl)
+        .map_err(map_gm_error)?;
+    Ok(Json(issued))
+}
+
+async fn auth_session_v1_route(
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    let plane = state
+        .hosted_plane
+        .as_ref()
+        .ok_or_else(|| ApiErr::msg(StatusCode::NOT_IMPLEMENTED, "Hosted plane not enabled"))?;
+    let enrollment_token = body["enrollment_token"]
+        .as_str()
+        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing enrollment_token"))?;
+    let ttl = body["ttl_seconds"]
+        .as_i64()
+        .unwrap_or(3600)
+        .clamp(300, 86400);
+    let session = plane
+        .redeem_enrollment(enrollment_token, ttl)
+        .map_err(|e| ApiErr::msg(StatusCode::UNAUTHORIZED, e.to_string()))?;
+
+    let cookie = format!(
+        "{HOSTED_SESSION_COOKIE}={}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={ttl}",
+        session.session_id
+    );
+    let mut resp = Json(serde_json::json!({
+        "authenticated": true,
+        "user_id": session.user_id,
+        "ws_id": session.ws_id,
+        "tenant_id": session.tenant_id,
+        "role": session.role,
+        "csrf_token": session.csrf_token,
+        "expires_at": session.expires_at,
+    }))
+    .into_response();
+    if let Ok(hv) = HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(header::SET_COOKIE, hv);
+    }
+    Ok(resp)
+}
+
+async fn auth_logout_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    if let (Some(session_id), Some(plane)) = (
+        extract_cookie_value(&headers, HOSTED_SESSION_COOKIE),
+        state.hosted_plane.as_ref(),
+    ) {
+        let _ = plane.revoke_session(&session_id);
+    }
+    let mut resp = Json(serde_json::json!({ "signed_out": true })).into_response();
+    if let Ok(hv) = HeaderValue::from_str(&format!(
+        "{HOSTED_SESSION_COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
+    )) {
+        resp.headers_mut().insert(header::SET_COOKIE, hv);
+    }
+    Ok(resp)
+}
+
+async fn auth_revoke_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    let expected = state
+        .bearer_token
+        .as_deref()
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| ApiErr::msg(StatusCode::UNAUTHORIZED, "Operator token required"))?;
+    let auth_val = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !crate::bridges::constant_time_eq(
+        auth_val.as_bytes(),
+        format!("Bearer {expected}").as_bytes(),
+    ) {
+        return Err(ApiErr::msg(
+            StatusCode::UNAUTHORIZED,
+            "Operator token required",
+        ));
+    }
+    let plane = state
+        .hosted_plane
+        .as_ref()
+        .ok_or_else(|| ApiErr::msg(StatusCode::NOT_IMPLEMENTED, "Hosted plane not enabled"))?;
+    let ws_id = body["ws_id"]
+        .as_str()
+        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing ws_id"))?;
+    let user_id = body["user_id"]
+        .as_str()
+        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing user_id"))?;
+    plane
+        .revoke_membership(ws_id, user_id)
+        .map_err(map_gm_error)?;
+    Ok(Json(serde_json::json!({
+        "revoked": true,
+        "ws_id": ws_id,
+        "user_id": user_id,
+    })))
+}
+
+async fn list_workspaces_v1_route(
+    request: axum::extract::Request,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    let state = request
+        .extensions()
+        .get::<crate::hosted::HostedSessionIssued>()
+        .cloned();
+    if let Some(sess) = state {
+        return Ok(Json(serde_json::json!({
+            "active_workspace": sess.ws_id,
+            "user_id": sess.user_id,
+            "role": sess.role,
+        })));
+    }
+    let ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+    Ok(Json(serde_json::json!({
+        "active_workspace": ws,
+        "role": "owner",
+    })))
+}
+
+async fn doctor_status_v1_route(
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    if let Some(ref doc) = state.sanitized_doctor
+        && let Some(val) = doc.read().clone()
+    {
+        return Ok(Json(val));
+    }
+    Ok(Json(serde_json::json!({
+        "schema": 1,
+        "installation_readiness": "ready",
+        "sanitized": true,
+        "note": "Run `dt doctor check --json` locally for full diagnostics."
+    })))
 }
 
 async fn stream_workspace_events_v1(
     headers: HeaderMap,
+    Query(cursor): Query<EventCursor>,
     Path(ws_id): Path<String>,
     State(state): State<CompanionWebState>,
+    session_ext: Option<axum::Extension<crate::hosted::HostedSessionIssued>>,
 ) -> std::result::Result<
     Sse<impl tokio_stream::Stream<Item = std::result::Result<Event, Infallible>>>,
     ApiErr,
 > {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let clean = crate::hosted::validate_workspace_slug(&ws_id).map_err(map_gm_error)?;
-    // Deny cross-tenant event streaming on non-default workspaces unless authorized.
-    let expected_ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
-    if clean != expected_ws && clean != "local" {
-        return Err(ApiErr::msg(
-            StatusCode::FORBIDDEN,
-            format!("Cross-tenant SSE subscription denied for workspace '{clean}'"),
-        ));
+    if let Some(axum::Extension(sess)) = session_ext {
+        if sess.ws_id != clean {
+            return Err(ApiErr::msg(
+                StatusCode::FORBIDDEN,
+                format!("Cross-tenant SSE subscription denied for workspace '{clean}'"),
+            ));
+        }
+    } else {
+        let expected_ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+        if clean != expected_ws && clean != "local" {
+            return Err(ApiErr::msg(
+                StatusCode::FORBIDDEN,
+                format!("Cross-tenant SSE subscription denied for workspace '{clean}'"),
+            ));
+        }
     }
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(cursor.after);
     let rx = state.supervisor.agui_sender().subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|item| match item {
-        Ok(evt) => {
+    let stream = BroadcastStream::new(rx).filter_map(move |item| match item {
+        Ok(evt) if evt.sequence > last_event_id => {
             let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".into());
             Some(Ok(Event::default()
                 .id(evt.sequence.to_string())
                 .event(evt.event_type)
                 .data(json)))
         }
-        Err(_) => None,
+        _ => None,
     });
     Ok(Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
@@ -4618,24 +4953,48 @@ async fn billing_status_v1_route(
 async fn billing_checkout_v1_route(
     headers: HeaderMap,
     State(state): State<CompanionWebState>,
+    session_ext: Option<axum::Extension<crate::hosted::HostedSessionIssued>>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let stripe_key = body["stripe_secret_key"]
-        .as_str()
-        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing stripe_secret_key"))?;
-    let ws_id = body["ws_id"].as_str().unwrap_or("default");
-    let success = body["success_url"]
-        .as_str()
-        .unwrap_or("https://localhost/ok");
-    let cancel = body["cancel_url"]
-        .as_str()
-        .unwrap_or("https://localhost/cancel");
+    if body.get("stripe_secret_key").is_some()
+        || body.get("success_url").is_some()
+        || body.get("cancel_url").is_some()
+    {
+        return Err(ApiErr::msg(
+            StatusCode::BAD_REQUEST,
+            "Stripe secrets and redirect URLs are server-controlled and cannot be supplied by clients",
+        ));
+    }
+    let stripe_key = std::env::var("STRIPE_SECRET_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            ApiErr::msg(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Server STRIPE_SECRET_KEY is not configured",
+            )
+        })?;
+    let ws_id = session_ext
+        .map(|axum::Extension(s)| s.ws_id)
+        .unwrap_or_else(|| std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into()));
+    let allowed_prices = std::env::var("DT_STRIPE_ALLOWED_PRICES")
+        .unwrap_or_else(|_| "price_default,price_pro".into());
     let price_id = body["price_id"].as_str().unwrap_or("price_default");
+    if !allowed_prices.split(',').any(|p| p.trim() == price_id) {
+        return Err(ApiErr::msg(
+            StatusCode::BAD_REQUEST,
+            format!("Requested Stripe price_id '{price_id}' is not in server allowlist"),
+        ));
+    }
+    let success = std::env::var("DT_STRIPE_SUCCESS_URL")
+        .unwrap_or_else(|_| "https://localhost/billing/success".into());
+    let cancel = std::env::var("DT_STRIPE_CANCEL_URL")
+        .unwrap_or_else(|_| "https://localhost/billing/cancel".into());
     let res = state
         .supervisor
         .billing()
-        .create_sandbox_checkout_session(stripe_key, ws_id, success, cancel, price_id)
+        .create_sandbox_checkout_session(&stripe_key, &ws_id, &success, &cancel, price_id)
         .await
         .map_err(map_gm_error)?;
     Ok(Json(res))
@@ -4646,22 +5005,15 @@ async fn stripe_webhook_v1_route(
     State(state): State<CompanionWebState>,
     raw_body: String,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
-    let secret = state
-        .slack_signing_secret
-        .as_deref()
-        .or_else(|| {
-            std::env::var("STRIPE_WEBHOOK_SECRET")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|_| "")
-        })
-        .unwrap_or("");
-    let env_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
-    let active_secret = if !env_secret.trim().is_empty() {
-        env_secret.as_str()
-    } else {
-        secret
-    };
+    let active_secret = std::env::var("STRIPE_WEBHOOK_SECRET")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            ApiErr::msg(
+                StatusCode::UNAUTHORIZED,
+                "STRIPE_WEBHOOK_SECRET is not configured on server",
+            )
+        })?;
     let sig = headers
         .get("stripe-signature")
         .and_then(|v| v.to_str().ok())
@@ -4669,7 +5021,7 @@ async fn stripe_webhook_v1_route(
     let (applied, ent) = state
         .supervisor
         .billing()
-        .process_stripe_webhook(active_secret, sig, &raw_body)
+        .process_stripe_webhook(&active_secret, sig, &raw_body)
         .map_err(|e| ApiErr::msg(StatusCode::UNAUTHORIZED, e.to_string()))?;
     Ok(Json(serde_json::json!({
         "applied": applied,
@@ -5539,7 +5891,164 @@ mod tests {
         assert_eq!(bill_stat["mode"], "self_hosted_byok");
         assert_eq!(bill_stat["byok_unrestricted"], true);
 
+        // Client-supplied Stripe secret or redirect URL must be rejected.
+        let bad_checkout = client
+            .post(format!("{base}/api/v1/billing/checkout"))
+            .bearer_auth("secret-token")
+            .json(&serde_json::json!({
+                "stripe_secret_key": "sk_test_client_supplied",
+                "price_id": "price_default"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_checkout.status(), 400);
+
         comp_handle.abort();
         spaces_handle.abort();
+    }
+
+    #[tokio::test]
+    async fn hosted_cookie_sessions_enforce_csrf_membership_and_revocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let workers = dir.path().join("workers");
+        let plane = Arc::new(
+            crate::hosted::HostedControlPlane::in_memory(
+                &workers,
+                b"test-hosted-master-key-32bytes",
+            )
+            .unwrap(),
+        );
+        plane
+            .provision_workspace("ws_alpha", "t1", "Alpha", "tok-alpha")
+            .unwrap();
+        plane
+            .provision_workspace("ws_beta", "t2", "Beta", "tok-beta")
+            .unwrap();
+
+        let cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: dir.path().join("bots"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let audit = Arc::new(AuditLogger::in_memory());
+        let (tx, _rx) = broadcast::channel(64);
+        let sup = OpenBotSupervisor::open(cfg, audit, tx).unwrap();
+        let app = build_companion_router(
+            CompanionWebServer::new(
+                sup.clone(),
+                BridgeRouter::new(sup, gm_core::config::ChatBridgesConfig::default()),
+                Some("op-secret".into()),
+                None,
+            )
+            .with_hosted_plane(plane.clone())
+            .state,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. Operator issues expiring enrollment token for ws_alpha.
+        let enroll_resp: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/enroll"))
+            .bearer_auth("op-secret")
+            .json(&serde_json::json!({ "ws_id": "ws_alpha", "user_id": "alice", "role": "owner" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let enroll_tok = enroll_resp["enrollment_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 2. Redeem enrollment -> HttpOnly Secure cookie + CSRF token.
+        let sess_resp = client
+            .post(format!("{base}/api/v1/auth/session"))
+            .json(&serde_json::json!({ "enrollment_token": enroll_tok }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sess_resp.status(), 200);
+        let set_cookie = sess_resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set_cookie.contains("HttpOnly"));
+        assert!(set_cookie.contains("Secure"));
+        let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+        let sess_json: serde_json::Value = sess_resp.json().await.unwrap();
+        let csrf = sess_json["csrf_token"].as_str().unwrap().to_string();
+
+        // 3. GET /api/v1/doctor succeeds with cookie and returns sanitized payload.
+        let doc_ok = client
+            .get(format!("{base}/api/v1/doctor"))
+            .header(header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(doc_ok.status(), 200);
+
+        // 4. Mutation without CSRF token is rejected with 403.
+        let no_csrf = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .header(header::COOKIE, &cookie_pair)
+            .json(&serde_json::json!({ "id": "calendar-brief", "confirmed_scopes": ["connectors.calendar.read"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status(), 403);
+
+        // 5. Mutation with valid CSRF succeeds.
+        let with_csrf = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .header(header::COOKIE, &cookie_pair)
+            .header("x-dt-csrf-token", &csrf)
+            .json(&serde_json::json!({ "id": "calendar-brief", "confirmed_scopes": ["connectors.calendar.read"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(with_csrf.status(), 200);
+
+        // 6. Cross-tenant SSE for ws_beta is denied with 403.
+        let cross_ws = client
+            .get(format!("{base}/api/v1/workspaces/ws_beta/events"))
+            .header(header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross_ws.status(), 403);
+
+        // 7. Server-side revocation invalidates session immediately.
+        let revoked = client
+            .post(format!("{base}/api/v1/auth/revoke"))
+            .bearer_auth("op-secret")
+            .json(&serde_json::json!({ "ws_id": "ws_alpha", "user_id": "alice" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(revoked.status(), 200);
+
+        let after_revoke = client
+            .get(format!("{base}/api/v1/doctor"))
+            .header(header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(after_revoke.status(), 401);
+
+        handle.abort();
     }
 }

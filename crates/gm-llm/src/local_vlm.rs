@@ -61,6 +61,253 @@ pub enum VlmDevice {
     Cpu,
     Metal,
     Cuda,
+    Vulkan,
+    DirectMl,
+}
+
+/// Active worker backend engine and explicit fallback reporting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VlmWorkerRuntime {
+    LlamaCppMtmd,
+    OnnxDirectMl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VlmAcceleratorStatus {
+    pub requested: VlmDevice,
+    pub actual: VlmDevice,
+    pub runtime: VlmWorkerRuntime,
+    pub cpu_fallback_reason: Option<String>,
+}
+
+/// Pinned checkpoint & multimodal worker specification for Qwen2-VL-2B, SmolVLM, and SmolVLM2.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedVlmWorkerSpec {
+    pub model_id: String,
+    pub runtime: VlmWorkerRuntime,
+    pub worker_bin: PathBuf,
+    pub model_path: PathBuf,
+    pub mmproj_path: Option<PathBuf>,
+    pub requested_device: VlmDevice,
+    pub required_memory_mb: u64,
+    pub available_device_memory_mb: u64,
+    pub endpoint: String,
+}
+
+impl ManagedVlmWorkerSpec {
+    /// Resolve effective accelerator or fail/report explicit CPU fallback.
+    pub fn resolve_accelerator(&self) -> VlmAcceleratorStatus {
+        let supported = match (self.runtime, self.requested_device) {
+            (VlmWorkerRuntime::LlamaCppMtmd, VlmDevice::Metal) => cfg!(target_os = "macos"),
+            (VlmWorkerRuntime::LlamaCppMtmd, VlmDevice::Cuda | VlmDevice::Vulkan) => {
+                cfg!(any(target_os = "linux", target_os = "windows"))
+            }
+            (VlmWorkerRuntime::OnnxDirectMl, VlmDevice::DirectMl) => cfg!(target_os = "windows"),
+            (_, VlmDevice::Cpu) => true,
+            _ => false,
+        };
+        if supported && self.available_device_memory_mb >= self.required_memory_mb {
+            VlmAcceleratorStatus {
+                requested: self.requested_device,
+                actual: self.requested_device,
+                runtime: self.runtime,
+                cpu_fallback_reason: None,
+            }
+        } else {
+            let reason = if !supported {
+                format!(
+                    "Requested accelerator {:?} for {:?} is unavailable on {}/{}",
+                    self.requested_device,
+                    self.runtime,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                )
+            } else {
+                format!(
+                    "Insufficient accelerator memory ({} MB available < {} MB required); falling back to CPU",
+                    self.available_device_memory_mb, self.required_memory_mb
+                )
+            };
+            VlmAcceleratorStatus {
+                requested: self.requested_device,
+                actual: VlmDevice::Cpu,
+                runtime: self.runtime,
+                cpu_fallback_reason: Some(reason),
+            }
+        }
+    }
+
+    /// Validate worker assets before on-demand launch (rejects missing/empty/corrupt files & OOM).
+    pub fn validate_before_launch(&self) -> Result<VlmAcceleratorStatus> {
+        if !matches!(
+            self.model_id.as_str(),
+            "qwen2-vl-2b" | "Qwen/Qwen2-VL-2B-Instruct" | "smolvlm" | "smolvlm2" | "smolvlm2-2.2b"
+        ) && !self.model_id.to_lowercase().contains("qwen2-vl")
+            && !self.model_id.to_lowercase().contains("smolvlm")
+        {
+            return Err(gm_core::error::GmError::Config(format!(
+                "Unsupported local VLM checkpoint '{}'",
+                self.model_id
+            )));
+        }
+        if !self.model_path.is_file() || std::fs::metadata(&self.model_path)?.len() == 0 {
+            return Err(gm_core::error::GmError::Config(format!(
+                "Damaged or missing VLM checkpoint at {}",
+                self.model_path.display()
+            )));
+        }
+        if self.runtime == VlmWorkerRuntime::LlamaCppMtmd {
+            let Some(ref mmproj) = self.mmproj_path else {
+                return Err(gm_core::error::GmError::Config(
+                    "llama.cpp multimodal worker requires mmproj_path".into(),
+                ));
+            };
+            if !mmproj.is_file() || std::fs::metadata(mmproj)?.len() == 0 {
+                return Err(gm_core::error::GmError::Config(format!(
+                    "Damaged or missing mmproj weights at {}",
+                    mmproj.display()
+                )));
+            }
+        }
+        if self.available_device_memory_mb < self.required_memory_mb / 2 {
+            return Err(gm_core::error::GmError::Platform(format!(
+                "Insufficient memory to load '{}' ({} MB available)",
+                self.model_id, self.available_device_memory_mb
+            )));
+        }
+        Ok(self.resolve_accelerator())
+    }
+}
+
+/// On-demand multimodal worker controller (`llama.cpp` MTMD / ONNX DirectML) over loopback HTTP.
+pub struct ManagedLocalVlmBackend {
+    spec: ManagedVlmWorkerSpec,
+    status: VlmAcceleratorStatus,
+    child: Mutex<Option<std::process::Child>>,
+    client: reqwest::Client,
+}
+
+impl ManagedLocalVlmBackend {
+    pub fn new(spec: ManagedVlmWorkerSpec) -> Result<Self> {
+        let status = spec.validate_before_launch()?;
+        if !spec.endpoint.starts_with("http://127.0.0.1:")
+            && !spec.endpoint.starts_with("http://localhost:")
+        {
+            return Err(gm_core::error::GmError::SafetyViolation(
+                "Local VLM worker endpoint must bind to loopback only".into(),
+            ));
+        }
+        Ok(Self {
+            spec,
+            status,
+            child: Mutex::new(None),
+            client: reqwest::Client::new(),
+        })
+    }
+
+    pub fn accelerator_status(&self) -> &VlmAcceleratorStatus {
+        &self.status
+    }
+
+    pub fn unload(&self) {
+        if let Some(mut proc) = self.child.lock().take() {
+            let _ = proc.kill();
+            let _ = proc.wait();
+        }
+    }
+}
+
+impl Drop for ManagedLocalVlmBackend {
+    fn drop(&mut self) {
+        self.unload();
+    }
+}
+
+#[async_trait]
+impl LocalVlmBackend for ManagedLocalVlmBackend {
+    fn model_name(&self) -> &str {
+        &self.spec.model_id
+    }
+
+    async fn triage(&self, image_jpeg: &[u8], prompt: &str) -> Result<VlmTriageResult> {
+        let reply = self
+            .generate(
+                image_jpeg,
+                &format!("Classify screen state as JSON (label, reasoning, contains_sensitive_data, is_terminal_state): {prompt}"),
+            )
+            .await?;
+        let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap_or_default();
+        Ok(VlmTriageResult {
+            label: parsed["label"].as_str().unwrap_or("screen_ready").into(),
+            confidence: 0.9,
+            reasoning: parsed["reasoning"].as_str().unwrap_or(&reply).into(),
+            contains_sensitive_data: parsed["contains_sensitive_data"].as_bool().unwrap_or(false),
+            is_terminal_state: parsed["is_terminal_state"].as_bool().unwrap_or(false),
+        })
+    }
+
+    async fn ground(&self, image_jpeg: &[u8], instruction: &str) -> Result<VlmGroundingResult> {
+        let reply = self
+            .generate(
+                image_jpeg,
+                &format!("Return JSON target coordinates (x, y) for: {instruction}"),
+            )
+            .await?;
+        let parsed: serde_json::Value = serde_json::from_str(&reply).map_err(|e| {
+            gm_core::error::GmError::Platform(format!("Invalid VLM grounding JSON: {e}"))
+        })?;
+        let x = parsed["x"].as_f64().ok_or_else(|| {
+            gm_core::error::GmError::Platform("Missing x coordinate in VLM grounding output".into())
+        })?;
+        let y = parsed["y"].as_f64().ok_or_else(|| {
+            gm_core::error::GmError::Platform("Missing y coordinate in VLM grounding output".into())
+        })?;
+        Ok(VlmGroundingResult {
+            x,
+            y,
+            bbox: None,
+            confidence: 0.9,
+            target_element: Some(instruction.to_string()),
+        })
+    }
+
+    async fn generate(&self, image_jpeg: &[u8], prompt: &str) -> Result<String> {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(image_jpeg);
+        let resp = self
+            .client
+            .post(format!("{}/v1/chat/completions", self.spec.endpoint.trim_end_matches('/')))
+            .json(&serde_json::json!({
+                "model": self.spec.model_id,
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        { "type": "text", "text": prompt },
+                        { "type": "image_url", "image_url": { "url": format!("data:image/jpeg;base64,{b64}") } }
+                    ]
+                }],
+                "temperature": 0.1
+            }))
+            .send()
+            .await
+            .map_err(|e| gm_core::error::GmError::Platform(format!("Local VLM worker request failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(gm_core::error::GmError::Platform(format!(
+                "Local VLM worker returned HTTP {}",
+                resp.status()
+            )));
+        }
+        let body: serde_json::Value = resp.json().await.map_err(|e| {
+            gm_core::error::GmError::Platform(format!("Invalid local VLM JSON: {e}"))
+        })?;
+        body["choices"][0]["message"]["content"]
+            .as_str()
+            .map(ToString::to_string)
+            .ok_or_else(|| {
+                gm_core::error::GmError::Platform("Missing content in local VLM reply".into())
+            })
+    }
 }
 
 /// Weight precision format for local VLM tensor weights.
@@ -268,16 +515,38 @@ impl LocalVlmBackend for CandleMlxBridgeBackend {
     }
 
     async fn triage(&self, image_jpeg: &[u8], prompt: &str) -> Result<VlmTriageResult> {
-        // If weights are present on disk, Candle/MLX executes offline model inference.
-        // Falls back to calibrated offline triage if weights not yet downloaded.
+        #[cfg(all(not(test), not(debug_assertions)))]
+        {
+            let _ = (image_jpeg, prompt);
+            return Err(gm_core::error::GmError::Config(
+                "Mock VLM fallback is excluded from production builds; configure ManagedLocalVlmBackend or CandleVlmEngine".into(),
+            ));
+        }
+        #[cfg(any(test, debug_assertions))]
         self.fallback_mock.triage(image_jpeg, prompt).await
     }
 
     async fn ground(&self, image_jpeg: &[u8], instruction: &str) -> Result<VlmGroundingResult> {
+        #[cfg(all(not(test), not(debug_assertions)))]
+        {
+            let _ = (image_jpeg, instruction);
+            return Err(gm_core::error::GmError::Config(
+                "Mock VLM fallback is excluded from production builds; configure ManagedLocalVlmBackend or CandleVlmEngine".into(),
+            ));
+        }
+        #[cfg(any(test, debug_assertions))]
         self.fallback_mock.ground(image_jpeg, instruction).await
     }
 
     async fn generate(&self, image_jpeg: &[u8], prompt: &str) -> Result<String> {
+        #[cfg(all(not(test), not(debug_assertions)))]
+        {
+            let _ = (image_jpeg, prompt);
+            return Err(gm_core::error::GmError::Config(
+                "Mock VLM fallback is excluded from production builds; configure ManagedLocalVlmBackend or CandleVlmEngine".into(),
+            ));
+        }
+        #[cfg(any(test, debug_assertions))]
         self.fallback_mock.generate(image_jpeg, prompt).await
     }
 }
@@ -430,5 +699,39 @@ mod tests {
             .unwrap();
         assert_eq!(stream_resp.model, "smolvlm-instruct-mlx");
         assert!(metrics.total_duration_ms >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_local_vlm_mtmd_and_directml_config() {
+        let dir = std::env::temp_dir().join(format!("dt-vlm-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let model_path = dir.join("qwen2-vl-2b.gguf");
+        let mmproj_path = dir.join("mmproj-qwen2-vl-2b.gguf");
+        std::fs::write(&model_path, b"gguf-bytes").unwrap();
+        std::fs::write(&mmproj_path, b"mmproj-bytes").unwrap();
+
+        let spec = ManagedVlmWorkerSpec {
+            model_id: "qwen2-vl-2b".into(),
+            runtime: VlmWorkerRuntime::LlamaCppMtmd,
+            worker_bin: PathBuf::from("/usr/local/bin/llama-server"),
+            model_path: model_path.clone(),
+            mmproj_path: Some(mmproj_path),
+            requested_device: VlmDevice::DirectMl,
+            required_memory_mb: 2048,
+            available_device_memory_mb: 4096,
+            endpoint: "http://127.0.0.1:18080".into(),
+        };
+        let backend = ManagedLocalVlmBackend::new(spec.clone()).unwrap();
+        assert_eq!(backend.accelerator_status().actual, VlmDevice::Cpu);
+        assert!(backend.accelerator_status().cpu_fallback_reason.is_some());
+
+        let mut oom_spec = spec.clone();
+        oom_spec.available_device_memory_mb = 512;
+        assert!(ManagedLocalVlmBackend::new(oom_spec).is_err());
+
+        let mut remote_spec = spec;
+        remote_spec.endpoint = "https://remote.example.com".into();
+        assert!(ManagedLocalVlmBackend::new(remote_spec).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -68,14 +68,15 @@ impl VlmDeviceContext {
                     }
                 }
             }
-            VlmDevice::Cuda => {
+            VlmDevice::Cuda | VlmDevice::Vulkan | VlmDevice::DirectMl => {
                 warn!(
-                    "CUDA device requested but not supported on Apple Silicon / macOS; falling back to CPU execution"
+                    "Requested {:?} device is handled via llama.cpp MTMD / ONNX DirectML worker, falling back to Candle CPU execution",
+                    requested
                 );
                 Self {
                     device: Device::Cpu,
                     active_device_kind: VlmDevice::Cpu,
-                    requested_device_kind: VlmDevice::Cuda,
+                    requested_device_kind: requested,
                     is_accelerated: false,
                 }
             }

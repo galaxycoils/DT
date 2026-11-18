@@ -1,9 +1,9 @@
-# Grok-Muse Hybrid Agent (`v0.7.0` — Apple Silicon Preview)
+# DT Hybrid Agent (`v1.0.0` — Release Candidate Preparation)
 
-> **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native macOS, React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
-> Built in Rust with native Rust desktop rendering, macOS ScreenCaptureKit/Accessibility integration, scoped workspace file access, Candle model support, and multi-provider hybrid LLM routing (`ChatGPT OAuth`, `Kilo Gateway`, `OpenRouter`, `Nous Portal`, `Meta Muse`, `xAI Grok`, `Custom Responses/ChatCompletions`, and `Local VLM`).
+> **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native desktop (macOS, Windows, Ubuntu), React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
+> Built in Rust with native desktop rendering, macOS ScreenCaptureKit/Accessibility, Windows UIA/WGC, Linux X11/AT-SPI & Wayland Portal/PipeWire, local `llama.cpp` MTMD / DirectML VLM & managed Whisper/TTS runtimes, and multi-provider hybrid LLM routing (`ChatGPT OAuth`, `OpenAI API`, `Kilo Gateway`, `OpenRouter`, `Nous Portal`, `Meta Muse`, `xAI Grok`, `Custom Responses/ChatCompletions`, and `Local VLM`).
 
-The current branch adds a durable task dispatcher, native desktop client, persistent conversations, bot/channel editing, attachments, scheduled routines, durable usage accounting and authenticated update staging. Windows UI Automation/GDI/input and Linux X11/AT-SPI plus Wayland portal/PipeWire backends are implemented; native Windows/macOS and real Wayland certification remain outstanding. The VM transport requires a separately provisioned signed image. See [implementation status](docs/implementation-status.md) for implemented behavior, setup, and remaining public-release work. Performance/quality numbers below are targets, not certified results.
+Target repository: `galaxycoils/DT` (preserving compatibility with `gm` CLI alias, crate names, Keychain namespaces, bundle IDs, OAuth client registration, and legacy `GrokMuse`/`grok-muse` user data via `dt doctor` migration). Full v1.0.0 certification remains gated on platform signing identities, multi-OS native hardware execution, live provider/connector accounts, and the 7-day proactive soak as recorded in [coverage inventory](docs/release/coverage-inventory.md) and [release readiness](docs/release-readiness.md).
 
 ---
 

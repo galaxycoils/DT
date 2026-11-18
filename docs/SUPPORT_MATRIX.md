@@ -1,6 +1,6 @@
-# Grok Muse Platform Support Matrix
+# DT Platform Support Matrix
 
-This matrix describes implementation targets for the v0.7.0 preview. CI runs on macOS, Ubuntu and Windows. Native certification remains outstanding. The distributed installer covers Apple Silicon only. See [release readiness](release-readiness.md).
+This matrix describes target coverage for **DT v1.0.0** (`galaxycoils/DT`). Source builds and unit/contract tests pass locally on Apple Silicon; full 5-target native certification (`DT-1.0.0-macos-aarch64.dmg`, `DT-1.0.0-macos-x86_64.dmg`, `DT-1.0.0-windows-x86_64-setup.exe`, `dt_1.0.0_amd64.deb`) remains pending platform signing and multi-OS hardware execution. See [coverage inventory](release/coverage-inventory.md) and [release readiness](release-readiness.md).
 
 ---
 

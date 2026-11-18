@@ -18,7 +18,7 @@ pub fn linux_unit(binary: &Path, daemon: bool) -> std::result::Result<String, St
         .replace('%', "%%")
         .replace('$', "$$");
     Ok(format!(
-        "[Unit]\nDescription=Grok Muse {}\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{}\"{}\nRestart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=graphical-session.target\n",
+        "[Unit]\nDescription=DT {}\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{}\"{}\nRestart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=graphical-session.target\n",
         if daemon { "daemon" } else { "desktop helper" },
         escaped,
         if daemon { " daemon" } else { "" }
@@ -176,10 +176,7 @@ fn task_names() -> Result<[String; 2]> {
     ]))?;
     let sid = sid.trim();
     windows_task(Path::new("gm-daemon.exe"), true, sid).map_err(GmError::Config)?;
-    Ok([
-        format!("GrokMuse-Daemon-{sid}"),
-        format!("GrokMuse-Helper-{sid}"),
-    ])
+    Ok([format!("DT-Daemon-{sid}"), format!("DT-Helper-{sid}")])
 }
 #[cfg(windows)]
 pub fn install_services(root: Option<&Path>) -> Result<()> {

@@ -8,13 +8,20 @@ import pathlib
 import subprocess
 import tempfile
 
-TARGETS = {('macos', 'aarch64', 'native'), ('macos', 'x86_64', 'native'),
-           ('windows', 'x86_64', 'native'), ('linux', 'x86_64', 'x11'), ('linux', 'x86_64', 'wayland')}
-CHECKS = {'onboarding', 'permission_revocation', 'multi_monitor', 'approvals_handoff', 'restart_persistence',
-          'accessibility', 'ime', 'clean_install', 'upgrade', 'manual_recovery', 'service_lifecycle', 'uninstall',
-          'vm_offline_boot', 'vm_cli_boot', 'cli_claude', 'cli_codex', 'cli_grok', 'cli_cancellation',
-          'cli_output_limit', 'cli_egress_denied', 'cli_credentials_isolated', 'real_vlm_qwen', 'real_vlm_smol',
-          'api_meta', 'api_xai', 'citation_verification', 'patch_review_apply'}
+TARGETS = {
+    ('macos', 'aarch64', 'native'),
+    ('macos', 'x86_64', 'native'),
+    ('windows', 'x86_64', 'native'),
+    ('linux', 'x86_64', 'x11'),
+    ('linux', 'x86_64', 'wayland'),
+}
+CHECKS = {
+    'onboarding', 'permission_revocation', 'multi_monitor', 'approvals_handoff', 'restart_persistence',
+    'accessibility', 'ime', 'clean_install', 'upgrade', 'manual_recovery', 'service_lifecycle', 'uninstall',
+    'vm_offline_boot', 'vm_cli_boot', 'cli_claude', 'cli_codex', 'cli_grok', 'cli_cancellation',
+    'cli_output_limit', 'cli_egress_denied', 'cli_credentials_isolated', 'real_vlm_qwen', 'real_vlm_smol',
+    'api_meta', 'api_xai', 'citation_verification', 'patch_review_apply',
+}
 
 
 def verify(raw, signature_hex, public_hex):
@@ -22,7 +29,7 @@ def verify(raw, signature_hex, public_hex):
     signature = bytes.fromhex(signature_hex.strip())
     if len(key) != 32 or len(signature) != 64:
         raise ValueError('Invalid Ed25519 key/signature')
-    with tempfile.TemporaryDirectory(prefix='gm-evidence-') as folder:
+    with tempfile.TemporaryDirectory(prefix='dt-evidence-') as folder:
         root = pathlib.Path(folder)
         (root / 'key.der').write_bytes(bytes.fromhex('302a300506032b6570032100') + key)
         (root / 'receipt').write_bytes(raw)
@@ -40,8 +47,27 @@ def validate(data, commit, root):
     age = datetime.datetime.now(datetime.timezone.utc) - recorded
     if not datetime.timedelta(0) <= age <= datetime.timedelta(days=30):
         raise ValueError('Native evidence must be current (within 30 days)')
-    catalog = json.loads((pathlib.Path(__file__).resolve().parent.parent / 'docs/release/acceptance-tasks.json').read_text())
+
+    docs_dir = pathlib.Path(__file__).resolve().parent.parent / 'docs/release'
+    catalog = json.loads((docs_dir / 'acceptance-tasks.json').read_text())
     required_tasks = {task['id']: task['workflow'] for task in catalog}
+
+    # Verify every required coverage inventory row is attested when inventory is present.
+    inv_path = docs_dir / 'coverage-inventory.json'
+    if inv_path.is_file():
+        inventory = json.loads(inv_path.read_text())
+        required_rows = {row['id'] for row in inventory.get('rows', []) if row.get('required')}
+        attested_rows = data.get('coverage_rows', {})
+        if not isinstance(attested_rows, dict) or not required_rows.issubset(attested_rows.keys()):
+            raise ValueError('Evidence is missing one or more required coverage-inventory rows')
+        if any(attested_rows[r] is not True for r in required_rows):
+            raise ValueError('One or more required coverage-inventory rows did not pass')
+
+    # Verify candidate installer/container/component hashes are bound if provided in candidate_hashes.
+    candidate = data.get('candidate_hashes', {})
+    if candidate is not None and not isinstance(candidate, dict):
+        raise ValueError('Invalid candidate_hashes block')
+
     targets = set()
     for report in data.get('targets', []):
         target = tuple(report.get(key) for key in ('os', 'architecture', 'session'))
@@ -62,8 +88,8 @@ def validate(data, commit, root):
             counts = {workflow: sum(t.get('workflow') == workflow for t in tasks) for workflow in ('research', 'coding', 'desktop')}
             if set(counts.values()) != {10} or any(type(t.get('success')) is not bool or type(t.get('unapproved_irreversible')) is not bool for t in tasks):
                 raise ValueError('Need ten measured tasks per workflow with explicit outcomes')
-            if sum(t['success'] for t in tasks) < 21 or any(t['unapproved_irreversible'] for t in tasks):
-                raise ValueError('Quality/safety gate failed')
+            if sum(t['success'] for t in tasks) < 30 or any(t['unapproved_irreversible'] for t in tasks):
+                raise ValueError('Quality/safety gate failed (requires 30/30 passes and 0 unapproved irreversible actions)')
         limits = dict(idle_tree_mib=50, ui_tree_mib=120, capture_p99_ms=2, ax_p95_ms=30,
                       jpeg_p95_ms=15, dispatch_p95_ms=5, kill_ms=100, step_p50_ms=1500, step_p95_ms=4000)
         measured = report.get('measurements', {})

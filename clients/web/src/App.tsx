@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { MuseV1Client } from "./api";
+import { DtV1Client } from "./api";
 
 interface PendingApproval {
   request_id: string;
@@ -7,17 +7,59 @@ interface PendingApproval {
   details: string;
 }
 
-export function App({ client }: { client: MuseV1Client }) {
-  const [view, setView] = useState<"chats" | "activity" | "spaces" | "providers">("chats");
+type ViewTab = "chats" | "activity" | "spaces" | "providers" | "doctor" | "settings";
+
+const DRAFT_STORAGE_KEY = "dt-web-drafts-v1";
+
+export function App({ client }: { client: DtV1Client }) {
+  const [view, setView] = useState<ViewTab>("chats");
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth] = useState(316);
   const [bots, setBots] = useState<Array<{ id: string; display_name?: string }>>([]);
   const [selectedBot, setSelectedBot] = useState("muse");
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+      return saved ? (JSON.parse(saved)["muse"] ?? "") : "";
+    } catch {
+      return "";
+    }
+  });
   const [messages, setMessages] = useState<Array<{ id: string; sender?: string; content: string }>>([]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [providers, setProviders] = useState<Array<{ id: string; display_name: string; connection_state: string }>>([]);
+  const [spaces, setSpaces] = useState<Array<{ slug: string; title?: string }>>([]);
+  const [doctor, setDoctor] = useState<Record<string, unknown> | null>(null);
+  const [workspaceId, setWorkspaceId] = useState(client.getWorkspaceId());
+  const [enrollmentInput, setEnrollmentInput] = useState("");
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    void client.bootstrap().then((snap) => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(DRAFT_STORAGE_KEY);
+      const map = raw ? (JSON.parse(raw) as Record<string, string>) : {};
+      map[selectedBot] = draft;
+      window.localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(map));
+    } catch {
+      // Ignore storage quota errors in restricted environments
+    }
+  }, [selectedBot, draft]);
+
+  async function refreshAll() {
+    setLoading(true);
+    setStatusError(null);
+    try {
+      const [snap, prov, doc] = await Promise.all([
+        client.bootstrap(),
+        client.getProviders(),
+        client.getDoctorStatus().catch(() => null),
+      ]);
       if (Array.isArray(snap.bots)) {
         setBots(snap.bots as Array<{ id: string; display_name?: string }>);
       }
@@ -27,50 +69,137 @@ export function App({ client }: { client: MuseV1Client }) {
       if (Array.isArray(snap.pending_approvals)) {
         setApprovals(snap.pending_approvals as PendingApproval[]);
       }
-    });
-    void client.getProviders().then((p) => {
-      if (Array.isArray(p.profiles)) {
-        setProviders(p.profiles as Array<{ id: string; display_name: string; connection_state: string }>);
+      if (Array.isArray(prov.profiles)) {
+        setProviders(prov.profiles as Array<{ id: string; display_name: string; connection_state: string }>);
       }
-    });
-  }, [client]);
+      if (doc) setDoctor(doc);
+      const sp = await client.listSpaces().catch(() => []);
+      if (Array.isArray(sp)) setSpaces(sp as Array<{ slug: string; title?: string }>);
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : "Failed to load DT workspace");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void refreshAll();
+  }, [client, workspaceId]);
 
   async function send() {
     if (!draft.trim()) return;
-    await client.postDirectMessage(selectedBot, draft.trim());
-    setDraft("");
+    setStatusError(null);
+    try {
+      await client.postDirectMessage(selectedBot, draft.trim());
+      setDraft("");
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : "Failed to send message; draft preserved.");
+    }
+  }
+
+  async function handleEnrollSignIn(e: React.FormEvent) {
+    e.preventDefault();
+    if (!enrollmentInput.trim()) return;
+    setStatusError(null);
+    try {
+      const sess = await client.redeemEnrollment(enrollmentInput.trim());
+      setEnrollmentInput("");
+      setWorkspaceId(sess.ws_id);
+      await refreshAll();
+    } catch (err) {
+      setStatusError(err instanceof Error ? err.message : "Enrollment token rejected");
+    }
   }
 
   return (
-    <div style={{ display: "flex", height: "100dvh", background: "var(--background)", color: "var(--foreground)" }}>
-      <aside style={{ width: 240, borderRight: "1px solid var(--sidebar-border)", background: "var(--sidebar)", padding: 12 }}>
-        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
-          <button type="button" onClick={() => setView("chats")}>Chats</button>
-          <button type="button" onClick={() => setView("activity")}>Activity</button>
-          <button type="button" onClick={() => setView("spaces")}>Spaces</button>
-          <button type="button" onClick={() => setView("providers")}>Providers</button>
+    <div style={{ display: "flex", minHeight: "100dvh", background: "var(--background)", color: "var(--foreground)" }}>
+      <aside
+        style={{
+          width: sidebarCollapsed ? 72 : sidebarWidth,
+          minWidth: sidebarCollapsed ? 72 : 240,
+          maxWidth: 480,
+          borderRight: "1px solid var(--sidebar-border)",
+          background: "var(--sidebar)",
+          padding: 12,
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <strong>{sidebarCollapsed ? "DT" : "DT · Workspace"}</strong>
+          <button type="button" aria-label="Toggle sidebar" onClick={() => setSidebarCollapsed((c) => !c)}>
+            {sidebarCollapsed ? "→" : "←"}
+          </button>
         </div>
-        {view !== "activity" &&
+        <nav aria-label="Sections" style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {(["chats", "activity", "spaces", "providers", "doctor", "settings"] as ViewTab[]).map((tab) => (
+            <button key={tab} type="button" onClick={() => setView(tab)}>
+              {tab[0].toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </nav>
+        {!sidebarCollapsed &&
           bots.map((b) => (
             <button
               key={b.id}
               type="button"
               onClick={() => setSelectedBot(b.id)}
-              style={{ display: "block", width: "100%", textAlign: "left", padding: "8px", marginBottom: 4 }}
+              style={{ display: "block", width: "100%", textAlign: "left", padding: "8px", background: b.id === selectedBot ? "var(--card)" : "transparent", color: "var(--foreground)", border: "1px solid var(--border)", borderRadius: 8 }}
             >
               {b.display_name || b.id}
             </button>
           ))}
       </aside>
-      <main style={{ flex: 1, display: "flex", flexDirection: "column", padding: 16 }}>
+      <main style={{ flex: 1, display: "flex", flexDirection: "column", padding: 16, maxWidth: 960, margin: "0 auto", width: "100%" }}>
+        {statusError && (
+          <div role="alert" style={{ padding: 10, marginBottom: 10, background: "var(--card)", border: "1px solid var(--destructive)", borderRadius: 8 }}>
+            {statusError} · Sign in with an operator enrollment token or check daemon connectivity.
+          </div>
+        )}
+        {loading && <div style={{ padding: 8, color: "var(--muted-foreground)" }}>Loading DT workspace…</div>}
         {view === "providers" ? (
           <div>
             <h2>Providers & OAuth</h2>
+            {providers.length === 0 ? <p>No providers configured. Add credentials in Settings or `dt onboard`.</p> : null}
             {providers.map((p) => (
               <div key={p.id} style={{ padding: 12, marginBottom: 8, background: "var(--card)", borderRadius: 8 }}>
                 <strong>{p.display_name}</strong> · <span>{p.connection_state}</span>
               </div>
             ))}
+          </div>
+        ) : view === "spaces" ? (
+          <div>
+            <h2>Pages & Spaces</h2>
+            {spaces.length === 0 ? <p>No published Pages yet.</p> : spaces.map((s) => <div key={s.slug}>{s.title || s.slug}</div>)}
+          </div>
+        ) : view === "doctor" ? (
+          <div>
+            <h2>DT Doctor Status (Sanitized)</h2>
+            <pre style={{ background: "var(--card)", padding: 12, borderRadius: 8, overflow: "auto" }}>
+              {JSON.stringify(doctor ?? { status: "unavailable" }, null, 2)}
+            </pre>
+          </div>
+        ) : view === "settings" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <h2>Settings & Hosted Session</h2>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
+                Switch to {theme === "dark" ? "Light" : "Dark"} Theme
+              </button>
+              <button type="button" onClick={() => void client.signOut().then(() => setStatusError("Signed out cleanly."))}>
+                Sign out
+              </button>
+            </div>
+            <form onSubmit={(e) => void handleEnrollSignIn(e)} style={{ display: "flex", gap: 8 }}>
+              <input
+                value={enrollmentInput}
+                onChange={(e) => setEnrollmentInput(e.target.value)}
+                placeholder="Operator enrollment token (stored in HttpOnly cookie only)"
+                style={{ flex: 1, padding: 8, background: "var(--card)", color: "var(--foreground)", border: "1px solid var(--border)" }}
+              />
+              <button type="submit">Connect Workspace</button>
+            </form>
           </div>
         ) : (
           <>
@@ -87,6 +216,7 @@ export function App({ client }: { client: MuseV1Client }) {
                   </button>
                 </div>
               ))}
+              {messages.length === 0 ? <p style={{ color: "var(--muted-foreground)" }}>Start a thread with @{selectedBot}.</p> : null}
               {messages.map((m) => (
                 <div key={m.id} style={{ padding: 10, marginBottom: 6, background: "var(--card)", borderRadius: 8 }}>
                   <small>{m.sender || selectedBot}</small>
@@ -98,8 +228,8 @@ export function App({ client }: { client: MuseV1Client }) {
               <input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder={`Message @${selectedBot} (non-blocking)...`}
-                style={{ flex: 1, padding: 10, background: "var(--card)", color: "var(--foreground)", border: "1px solid var(--border)" }}
+                placeholder={`Message @${selectedBot} (draft persisted locally)...`}
+                style={{ flex: 1, padding: 10, background: "var(--card)", color: "var(--foreground)", border: "1px solid var(--border)", borderRadius: 26 }}
               />
               <button type="button" onClick={() => void send()}>Send</button>
             </div>

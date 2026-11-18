@@ -139,6 +139,11 @@ pub fn resolve_binaries(custom_bin_dir: Option<&Path>) -> (PathBuf, PathBuf) {
     {
         return pair;
     }
+    let dt_daemon = PathBuf::from("/Applications/DT.app/Contents/MacOS/gm-daemon");
+    let dt_helper = PathBuf::from("/Applications/DTCUHelper.app/Contents/MacOS/gm-cu-helper");
+    if dt_daemon.exists() && dt_helper.exists() {
+        return (dt_daemon, dt_helper);
+    }
     let app_daemon = PathBuf::from("/Applications/GrokMuse.app/Contents/MacOS/gm-daemon");
     let app_helper =
         PathBuf::from("/Applications/GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper");
@@ -187,6 +192,13 @@ fn binaries_near(executable: &Path) -> Option<(PathBuf, PathBuf)> {
     let helper = parent.join(format!("gm-cu-helper{}", std::env::consts::EXE_SUFFIX));
     if helper.exists() {
         return Some((daemon, helper));
+    }
+    let dt_helper = parent
+        .ancestors()
+        .nth(3)?
+        .join("DTCUHelper.app/Contents/MacOS/gm-cu-helper");
+    if dt_helper.exists() {
+        return Some((daemon, dt_helper));
     }
     let helper = parent
         .ancestors()

@@ -2,10 +2,10 @@ use clap::Parser;
 use gm_core::error::Result;
 use gm_daemon::{
     Cli, Commands, run_audit, run_bots, run_channels, run_chat, run_daemon, run_diagnostics,
-    run_do, run_dogfood, run_dream, run_feed, run_forget, run_goals, run_ideas, run_import_memory,
-    run_kill, run_models, run_onboard, run_permissions, run_queue, run_review, run_routines,
-    run_serve, run_service, run_skills, run_spaces, run_stats, run_status, run_team, run_update,
-    run_upkeep,
+    run_do, run_doctor_cli, run_dogfood, run_dream, run_feed, run_forget, run_goals, run_ideas,
+    run_import_memory, run_kill, run_models, run_onboard, run_permissions, run_queue, run_review,
+    run_routines, run_serve, run_service, run_skills, run_spaces, run_stats, run_status, run_team,
+    run_update, run_upkeep,
 };
 
 #[tokio::main]
@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
         Some(Commands::Channels { action, json }) => run_channels(action, json, cli.config).await,
         Some(Commands::Team { action, json }) => run_team(action, json, cli.config).await,
         Some(Commands::Routines { action, json }) => run_routines(action, json, cli.config).await,
+        Some(Commands::Doctor { action, json }) => run_doctor_cli(action, json, cli.config).await,
         Some(Commands::Diagnostics { action, json }) => {
             run_diagnostics(action, json, cli.config).await
         }

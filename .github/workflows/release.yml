@@ -1,4 +1,4 @@
-name: Signed release candidate
+name: Signed DT release candidate
 on:
   workflow_dispatch:
     inputs:
@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
-      - name: Download and verify native release evidence
+      - name: Download and verify native release evidence & coverage inventory
         env:
           GH_TOKEN: ${{ github.token }}
           EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
@@ -43,16 +43,16 @@ jobs:
         include:
           - os: macos
             arch: aarch64
-            runner: [self-hosted, macOS, ARM64, grok-muse-release]
+            runner: [self-hosted, macOS, ARM64, dt-release]
           - os: macos
             arch: x86_64
-            runner: [self-hosted, macOS, X64, grok-muse-release]
+            runner: [self-hosted, macOS, X64, dt-release]
           - os: linux
             arch: x86_64
-            runner: [self-hosted, Linux, X64, grok-muse-release]
+            runner: [self-hosted, Linux, X64, dt-release]
           - os: windows
             arch: x86_64
-            runner: [self-hosted, Windows, X64, grok-muse-release]
+            runner: [self-hosted, Windows, X64, dt-release]
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -84,9 +84,10 @@ jobs:
           python3 -c 'import os; assert len(bytes.fromhex(os.environ["GM_RELEASE_PUBLIC_KEY_HEX"]))==32'
           cargo build --release --locked --workspace --bins
           cargo test --locked --workspace
-      - name: Package and verify platform signatures
+      - name: Package and verify platform signatures & installers
         env:
           GM_APPLE_SIGNING_IDENTITY: ${{ vars.GM_APPLE_SIGNING_IDENTITY }}
+          DT_APPLE_INSTALLER_IDENTITY: ${{ vars.DT_APPLE_INSTALLER_IDENTITY }}
           GM_APPLE_NOTARY_PROFILE: ${{ vars.GM_APPLE_NOTARY_PROFILE }}
           GM_WINDOWS_CERT_THUMBPRINT: ${{ vars.GM_WINDOWS_CERT_THUMBPRINT }}
         run: |
@@ -114,7 +115,7 @@ jobs:
         with:
           name: verified-native-evidence
           path: release-candidate/evidence
-      - name: Sign packages using pinned publisher identity
+      - name: Sign packages, release manifest, and renewable update metadata
         env:
           GM_RELEASE_PUBLIC_KEY_HEX: ${{ vars.GM_RELEASE_PUBLIC_KEY_HEX }}
           GM_RELEASE_SIGNING_KEY_PEM: ${{ secrets.GM_RELEASE_SIGNING_KEY_PEM }}

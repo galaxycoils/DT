@@ -3,10 +3,21 @@ export type ApprovalAction = {
   approved: boolean;
 };
 
-export interface MuseV1ClientOptions {
+export interface DtV1ClientOptions {
   baseUrl?: string;
-  token: string;
   workspaceId?: string;
+  /** Optional memory-only token for native/loopback embed; never persisted in browser storage. */
+  memoryToken?: string;
+}
+
+export interface HostedSessionInfo {
+  authenticated: boolean;
+  user_id: string;
+  ws_id: string;
+  tenant_id: string;
+  role: string;
+  csrf_token: string;
+  expires_at: string;
 }
 
 export function buildV1Path(suffix: string): string {
@@ -14,35 +25,81 @@ export function buildV1Path(suffix: string): string {
   return `/api/v1${clean}`;
 }
 
-export function workspaceEventsPath(workspaceId: string): string {
-  return buildV1Path(`/workspaces/${encodeURIComponent(workspaceId)}/events`);
+export function workspaceEventsPath(workspaceId: string, afterSeq?: number): string {
+  const base = buildV1Path(`/workspaces/${encodeURIComponent(workspaceId)}/events`);
+  return typeof afterSeq === "number" && afterSeq > 0 ? `${base}?after=${afterSeq}` : base;
 }
 
-export class MuseV1Client {
+export class DtV1Client {
   private readonly baseUrl: string;
-  private readonly token: string;
-  private readonly workspaceId: string;
+  private workspaceId: string;
+  private csrfToken = "";
+  private memoryToken = "";
 
-  constructor(opts: MuseV1ClientOptions) {
+  constructor(opts: DtV1ClientOptions = {}) {
     this.baseUrl = (opts.baseUrl ?? "").replace(/\/$/, "");
-    this.token = opts.token;
     this.workspaceId = opts.workspaceId ?? "default";
+    this.memoryToken = opts.memoryToken ?? "";
+  }
+
+  setWorkspaceId(wsId: string) {
+    this.workspaceId = wsId;
+  }
+
+  getWorkspaceId(): string {
+    return this.workspaceId;
   }
 
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const method = (init?.method ?? "GET").toUpperCase();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-DT-Workspace-Id": this.workspaceId,
+      ...(init?.headers as Record<string, string> | undefined),
+    };
+    if (this.memoryToken) {
+      headers.Authorization = `Bearer ${this.memoryToken}`;
+    }
+    if (this.csrfToken && method !== "GET" && method !== "HEAD") {
+      headers["X-DT-CSRF-Token"] = this.csrfToken;
+    }
     const resp = await fetch(`${this.baseUrl}${buildV1Path(path)}`, {
       ...init,
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        "Content-Type": "application/json",
-        ...(init?.headers ?? {}),
-      },
+      credentials: "include",
+      headers,
     });
     if (!resp.ok) {
       const msg = await resp.text();
       throw new Error(`HTTP ${resp.status}: ${msg}`);
     }
     return (await resp.json()) as T;
+  }
+
+  async redeemEnrollment(enrollmentToken: string): Promise<HostedSessionInfo> {
+    const session = await this.request<HostedSessionInfo>("/auth/session", {
+      method: "POST",
+      body: JSON.stringify({ enrollment_token: enrollmentToken }),
+    });
+    this.csrfToken = session.csrf_token;
+    this.workspaceId = session.ws_id;
+    return session;
+  }
+
+  async signOut() {
+    const res = await this.request<{ signed_out: boolean }>("/auth/logout", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    this.csrfToken = "";
+    return res;
+  }
+
+  listWorkspaces() {
+    return this.request<Record<string, unknown>>("/workspaces");
+  }
+
+  getDoctorStatus() {
+    return this.request<Record<string, unknown>>("/doctor");
   }
 
   bootstrap() {
@@ -63,7 +120,6 @@ export class MuseV1Client {
     );
   }
 
-  /** Inline approvals never block sending messages on the same thread. */
   respondApproval(action: ApprovalAction) {
     return this.request<Record<string, unknown>>(
       `/approvals/${encodeURIComponent(action.request_id)}`,
@@ -93,7 +149,9 @@ export class MuseV1Client {
     return this.request<Record<string, unknown>>("/billing/status");
   }
 
-  eventsUrl(): string {
-    return `${this.baseUrl}${workspaceEventsPath(this.workspaceId)}`;
+  eventsUrl(afterSeq?: number): string {
+    return `${this.baseUrl}${workspaceEventsPath(this.workspaceId, afterSeq)}`;
   }
 }
+
+export { DtV1Client as MuseV1Client };

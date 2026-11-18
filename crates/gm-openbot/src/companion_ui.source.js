@@ -355,7 +355,7 @@ function renderSidebar(){
     aside.style.width=expanded?Math.min(480,Math.max(240,state._data.ui?.sidebar_width||316))+"px":"72px";
     aside.replaceChildren();
     const create=()=>{const box=modal("Create");box.append(button("Create bot",()=>editBot()),button("New group chat",()=>editChannel()),button("New section",sectionEditor),button("Studio · templates, skills & routines",templates));};
-    aside.append(add(node("div",null,"sidebar-head"),node("strong","Grok Muse","name"),iconButton("search","Search conversations",()=>{const filter=aside.querySelector("input");filter.hidden=!filter.hidden;if(!filter.hidden)filter.focus();}),iconButton("plus","Create",create),iconButton("sidebar","Collapse sidebar",toggleSidebar)));
+    aside.append(add(node("div",null,"sidebar-head"),node("strong","DT","name"),iconButton("search","Search conversations",()=>{const filter=aside.querySelector("input");filter.hidden=!filter.hidden;if(!filter.hidden)filter.focus();}),iconButton("plus","Create",create),iconButton("sidebar","Collapse sidebar",toggleSidebar)));
     const filter=node("input",null,"filter");filter.placeholder="Search conversations…";filter.setAttribute("aria-label","Search conversations");filter.value=state._search;filter.hidden=!state._search;
     filter.oninput=()=>{state._search=filter.value;renderSidebar();const el=aside.querySelector("input");el.hidden=false;el.focus();el.setSelectionRange(state._search.length,state._search.length);};aside.append(filter);
     aside.append(add(node("div",null,"sidebar-nav"),button("Activity",activityMenu),button("Pages",()=>navigate("Spaces"))));
@@ -1690,7 +1690,7 @@ async function connectEvents() {
 }
 
 function login() {
-    const box = modal("Connect to Grok Muse");
+    const box = modal("Connect to DT");
     form(box, {
         token: ""
     }, [ [ "token", "Companion bearer token", "password" ] ], async v => {

@@ -611,6 +611,233 @@ pub fn is_peer_authorized(peer_uid: u32, expected_uid: u32) -> bool {
     peer_uid == expected_uid
 }
 
+/// Validate a Windows SID string (`S-1-...`) before embedding in pipe names, SDDL, or task XML.
+pub fn validate_windows_sid(sid: &str) -> Result<String> {
+    let trimmed = sid.trim();
+    if !trimmed.starts_with("S-1-")
+        || trimmed.len() > 128
+        || !trimmed
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b == b'S' || b == b'-')
+    {
+        return Err(GmError::SafetyViolation(format!(
+            "Invalid Windows SID '{trimmed}'"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Build an owner-only protected DACL SDDL string granting Generic All exclusively to `owner_sid`.
+pub fn owner_only_pipe_sddl(owner_sid: &str) -> Result<String> {
+    let clean = validate_windows_sid(owner_sid)?;
+    Ok(format!("D:P(A;;GA;;;{clean})"))
+}
+
+/// Constant-time-safe SID comparison for Windows named-pipe peer verification.
+pub fn is_windows_peer_sid_authorized(peer_sid: &str, expected_sid: &str) -> bool {
+    validate_windows_sid(peer_sid).is_ok()
+        && validate_windows_sid(expected_sid).is_ok()
+        && peer_sid.trim() == expected_sid.trim()
+}
+
+#[cfg(windows)]
+pub mod windows_pipe_security {
+    use super::*;
+    use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
+    use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+
+    const TOKEN_QUERY: u32 = 0x0008;
+    const TOKEN_USER_CLASS: u32 = 1;
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const SDDL_REVISION_1: u32 = 1;
+
+    #[repr(C)]
+    struct SecurityAttributes {
+        n_length: u32,
+        lp_security_descriptor: *mut c_void,
+        b_inherit_handle: i32,
+    }
+
+    #[repr(C)]
+    struct SidAndAttributes {
+        sid: *mut c_void,
+        attributes: u32,
+    }
+
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut c_void;
+        fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        fn OpenProcessToken(
+            process_handle: *mut c_void,
+            desired_access: u32,
+            token_handle: *mut *mut c_void,
+        ) -> i32;
+        fn GetTokenInformation(
+            token_handle: *mut c_void,
+            token_information_class: u32,
+            token_information: *mut c_void,
+            token_information_length: u32,
+            return_length: *mut u32,
+        ) -> i32;
+        fn CloseHandle(h_object: *mut c_void) -> i32;
+        fn LocalFree(h_mem: *mut c_void) -> *mut c_void;
+        fn ConvertSidToStringSidW(sid: *mut c_void, string_sid: *mut *mut u16) -> i32;
+        fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            string_security_descriptor: *const u16,
+            string_sd_revision: u32,
+            security_descriptor: *mut *mut c_void,
+            security_descriptor_size: *mut u32,
+        ) -> i32;
+        fn GetNamedPipeClientProcessId(pipe: *mut c_void, client_process_id: *mut u32) -> i32;
+    }
+
+    unsafe fn process_user_sid(process_handle: *mut c_void) -> Result<String> {
+        let mut token: *mut c_void = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(process_handle, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(GmError::Platform("OpenProcessToken failed".into()));
+        }
+        let result = (|| {
+            let mut needed = 0u32;
+            unsafe {
+                GetTokenInformation(
+                    token,
+                    TOKEN_USER_CLASS,
+                    std::ptr::null_mut(),
+                    0,
+                    &mut needed,
+                );
+            }
+            if needed == 0 {
+                return Err(GmError::Platform("GetTokenInformation size failed".into()));
+            }
+            let mut buf = vec![0u8; needed as usize];
+            if unsafe {
+                GetTokenInformation(
+                    token,
+                    TOKEN_USER_CLASS,
+                    buf.as_mut_ptr() as *mut c_void,
+                    needed,
+                    &mut needed,
+                )
+            } == 0
+            {
+                return Err(GmError::Platform("GetTokenInformation read failed".into()));
+            }
+            let user = unsafe { &*(buf.as_ptr() as *const SidAndAttributes) };
+            let mut wide_sid: *mut u16 = std::ptr::null_mut();
+            if unsafe { ConvertSidToStringSidW(user.sid, &mut wide_sid) } == 0 || wide_sid.is_null()
+            {
+                return Err(GmError::Platform("ConvertSidToStringSidW failed".into()));
+            }
+            let mut len = 0usize;
+            while unsafe { *wide_sid.add(len) } != 0 {
+                len += 1;
+            }
+            let slice = unsafe { std::slice::from_raw_parts(wide_sid, len) };
+            let sid = String::from_utf16_lossy(slice);
+            unsafe {
+                LocalFree(wide_sid as *mut c_void);
+            }
+            validate_windows_sid(&sid)
+        })();
+        unsafe {
+            CloseHandle(token);
+        }
+        result
+    }
+
+    pub fn current_user_sid() -> Result<String> {
+        unsafe { process_user_sid(GetCurrentProcess()) }
+    }
+
+    /// Create a Windows named pipe restricted to `owner_sid` and rejecting all remote clients.
+    pub fn create_sid_restricted_named_pipe(
+        path: &std::path::Path,
+        is_first: bool,
+        owner_sid: &str,
+    ) -> Result<NamedPipeServer> {
+        let sddl = owner_only_pipe_sddl(owner_sid)?;
+        let wide: Vec<u16> = std::ffi::OsStr::new(&sddl)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut sd: *mut c_void = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &mut sd,
+                std::ptr::null_mut(),
+            )
+        } == 0
+            || sd.is_null()
+        {
+            return Err(GmError::Platform(
+                "ConvertStringSecurityDescriptorToSecurityDescriptorW failed".into(),
+            ));
+        }
+
+        let mut sa = SecurityAttributes {
+            n_length: std::mem::size_of::<SecurityAttributes>() as u32,
+            lp_security_descriptor: sd,
+            b_inherit_handle: 0,
+        };
+        let mut options = ServerOptions::new();
+        options.reject_remote_clients(true);
+        if is_first {
+            options.first_pipe_instance(true);
+        }
+        let res = unsafe {
+            options.create_with_security_attributes_raw(
+                path.as_os_str(),
+                &mut sa as *mut SecurityAttributes as *mut c_void,
+            )
+        };
+        unsafe {
+            LocalFree(sd);
+        }
+        res.map_err(|e| {
+            GmError::Platform(format!(
+                "Failed to create SID-restricted named pipe {}: {e}",
+                path.display()
+            ))
+        })
+    }
+
+    /// Verify that the connected named-pipe client process runs under `expected_sid`.
+    pub fn verify_named_pipe_client_sid(
+        server: &NamedPipeServer,
+        expected_sid: &str,
+    ) -> Result<()> {
+        let mut client_pid = 0u32;
+        let handle = server.as_raw_handle() as *mut c_void;
+        if unsafe { GetNamedPipeClientProcessId(handle, &mut client_pid) } == 0 || client_pid == 0 {
+            return Err(GmError::SafetyViolation(
+                "Unable to verify local named-pipe client PID".into(),
+            ));
+        }
+        let proc_handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, client_pid) };
+        if proc_handle.is_null() {
+            return Err(GmError::SafetyViolation(format!(
+                "Cannot inspect named-pipe peer process {client_pid}"
+            )));
+        }
+        let peer_sid = unsafe { process_user_sid(proc_handle) };
+        unsafe {
+            CloseHandle(proc_handle);
+        }
+        let peer_sid = peer_sid?;
+        if !is_windows_peer_sid_authorized(&peer_sid, expected_sid) {
+            return Err(GmError::SafetyViolation(format!(
+                "Rejected named-pipe peer SID {peer_sid} (expected {expected_sid})"
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Length-prefixed serialization: 4-byte big-endian payload length + JSON bytes.
 pub async fn write_ipc_message<W, T>(writer: &mut W, message: &T) -> Result<()>
 where
@@ -1089,5 +1316,21 @@ mod tests {
             let decoded: IpcMessage<DaemonResponse> = read_ipc_message(&mut cur).await.unwrap();
             assert_eq!(serde_json::to_value(&decoded.payload).unwrap(), json_val);
         }
+    }
+
+    #[test]
+    fn test_windows_sid_pipe_sddl_and_peer_validation() {
+        let sddl = owner_only_pipe_sddl("S-1-5-21-1001-2002-3003-1001").unwrap();
+        assert_eq!(sddl, "D:P(A;;GA;;;S-1-5-21-1001-2002-3003-1001)");
+        assert!(owner_only_pipe_sddl("Everyone").is_err());
+        assert!(owner_only_pipe_sddl("S-1-5-21;bad").is_err());
+        assert!(is_windows_peer_sid_authorized(
+            "S-1-5-21-1001-2002-3003-1001",
+            "S-1-5-21-1001-2002-3003-1001"
+        ));
+        assert!(!is_windows_peer_sid_authorized(
+            "S-1-5-21-1001-2002-3003-1002",
+            "S-1-5-21-1001-2002-3003-1001"
+        ));
     }
 }

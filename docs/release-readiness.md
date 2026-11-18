@@ -1,8 +1,14 @@
-# Cross-platform release readiness
+# Cross-platform DT v1.0.0 release readiness
 
-Status: **full native certification remains blocked**. An ad-hoc Apple Silicon development preview can be published as a prerelease with its matching checksum; it does not satisfy the signed candidate gates below.
+Status: **code and tooling prepared on `codex/dt-stable-release`; full native certification remains blocked** until production signing identities, multi-OS native hardware (Intel Mac, Windows 11 25H2/26H2, Ubuntu 24.04 X11/Wayland, iOS/Android devices), live provider/connector accounts, and the ≥7-day proactive soak are executed.
 
-Release targets: macOS ARM64 and Intel, Windows 11 x64, Ubuntu 24.04 x64 with separate X11 and Wayland evidence. The selected release bar includes the advertised CLI-agent, VM and coding workflows. Updates remain manually installed after authenticated staging.
+Release targets and canonical assets:
+- `DT-1.0.0-macos-aarch64.dmg` (contains `Install DT.pkg`)
+- `DT-1.0.0-macos-x86_64.dmg` (contains `Install DT.pkg`)
+- `DT-1.0.0-windows-x86_64-setup.exe` (NSIS 3.13)
+- `dt_1.0.0_amd64.deb` (Ubuntu 24.04 X11 & Wayland)
+
+See [coverage inventory](release/coverage-inventory.md) and [inference budget ledger](release/inference-budget-ledger.json).
 
 ## Implemented in this change
 

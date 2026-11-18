@@ -1,10 +1,17 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "windows")]
+fn windows_pipe_for_current_user(prefix: &str) -> PathBuf {
+    let suffix = crate::ipc::windows_pipe_security::current_user_sid()
+        .unwrap_or_else(|_| std::env::var("USERNAME").unwrap_or_else(|_| "user".into()));
+    PathBuf::from(format!(r"\\.\pipe\{prefix}-{suffix}"))
+}
+
 pub fn default_daemon_socket_path() -> PathBuf {
     #[cfg(target_os = "windows")]
     {
-        PathBuf::from(r"\\.\pipe\grok-muse-daemon")
+        windows_pipe_for_current_user("dt-daemon")
     }
     #[cfg(target_os = "macos")]
     {
@@ -27,6 +34,33 @@ pub fn default_daemon_socket_path() -> PathBuf {
                 data.join("grok-muse")
             });
         base.join("grok-muse-daemon.sock")
+    }
+}
+
+pub fn legacy_storage_dir() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("HOME")
+            .ok()
+            .map(|h| PathBuf::from(h).join("Library/Application Support/GrokMuse"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("APPDATA")
+            .or_else(|_| std::env::var("LOCALAPPDATA"))
+            .ok()
+            .map(|a| PathBuf::from(a).join("GrokMuse"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        std::env::var("XDG_DATA_HOME")
+            .ok()
+            .map(|d| PathBuf::from(d).join("grok-muse"))
+            .or_else(|| {
+                std::env::var("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".local/share/grok-muse"))
+            })
     }
 }
 
@@ -192,7 +226,7 @@ impl Default for GmConfig {
                 .or_else(|_| std::env::var("USERPROFILE"))
                 .unwrap_or_else(|_| ".".into());
             let storage = PathBuf::from(app_data).join("GrokMuse");
-            let socket = PathBuf::from(r"\\.\pipe\grok-muse-cu-helper");
+            let socket = windows_pipe_for_current_user("dt-cu-helper");
             (socket, storage)
         };
 

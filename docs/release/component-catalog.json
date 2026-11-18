@@ -1,0 +1,57 @@
+{
+  "schema": 1,
+  "sequence": 1,
+  "published_at": "2026-11-17T00:00:00Z",
+  "expires_at": "2026-12-17T00:00:00Z",
+  "origin": "https://github.com/galaxycoils/DT",
+  "components": [
+    {
+      "id": "qwen2-vl-2b",
+      "kind": "vlm_model",
+      "version": "2.0.0",
+      "os": "any",
+      "architecture": "any",
+      "total_size_bytes": 0,
+      "sha256": "pending_pinned_catalog_hash",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct",
+      "parts": []
+    },
+    {
+      "id": "smolvlm",
+      "kind": "vlm_model",
+      "version": "1.0.0",
+      "os": "any",
+      "architecture": "any",
+      "total_size_bytes": 0,
+      "sha256": "pending_pinned_catalog_hash",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/HuggingFaceTB/SmolVLM-Instruct",
+      "parts": []
+    },
+    {
+      "id": "smolvlm2",
+      "kind": "vlm_model",
+      "version": "2.2.0",
+      "os": "any",
+      "architecture": "any",
+      "total_size_bytes": 0,
+      "sha256": "pending_pinned_catalog_hash",
+      "license": "Apache-2.0",
+      "source": "https://huggingface.co/HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+      "parts": []
+    },
+    {
+      "id": "whisper-stt-base-en",
+      "kind": "speech_stt",
+      "version": "1.7.4",
+      "os": "any",
+      "architecture": "any",
+      "total_size_bytes": 0,
+      "sha256": "pending_pinned_catalog_hash",
+      "license": "MIT",
+      "source": "https://huggingface.co/ggerganov/whisper.cpp",
+      "parts": []
+    }
+  ]
+}

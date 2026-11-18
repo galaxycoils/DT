@@ -49,6 +49,107 @@ impl OpenBotSupervisor {
         Ok(format!("inbox/{name}"))
     }
 }
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentPreviewKind {
+    Text,
+    Image,
+    Pdf,
+    Binary,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct BoundedAttachmentPreview {
+    pub kind: AttachmentPreviewKind,
+    pub mime_type: String,
+    pub byte_size: usize,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub pdf_pages_estimate: Option<usize>,
+    pub text_snippet: Option<String>,
+    pub truncated: bool,
+}
+
+pub const MAX_PREVIEW_INPUT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_PREVIEW_TEXT_CHARS: usize = 4096;
+
+/// Produce a bounded passive preview for text, image, or PDF attachments without executing embedded code.
+pub fn preview_attachment_bounded(
+    filename: &str,
+    bytes: &[u8],
+) -> Result<BoundedAttachmentPreview> {
+    if bytes.len() > MAX_PREVIEW_INPUT_BYTES {
+        return Err(GmError::SafetyViolation(
+            "Attachment preview exceeds 8 MiB passive cap".into(),
+        ));
+    }
+    let lower = filename.to_ascii_lowercase();
+    if bytes.starts_with(b"%PDF-") || lower.ends_with(".pdf") {
+        if !bytes.starts_with(b"%PDF-") {
+            return Err(GmError::Config("Invalid PDF header".into()));
+        }
+        let lossy = String::from_utf8_lossy(bytes);
+        let pages = lossy
+            .matches("/Type /Page")
+            .count()
+            .saturating_sub(lossy.matches("/Type /Pages").count())
+            .max(1);
+        let printable: String = lossy
+            .chars()
+            .filter(|c| c.is_ascii_graphic() || *c == ' ' || *c == '\n')
+            .take(MAX_PREVIEW_TEXT_CHARS)
+            .collect();
+        return Ok(BoundedAttachmentPreview {
+            kind: AttachmentPreviewKind::Pdf,
+            mime_type: "application/pdf".into(),
+            byte_size: bytes.len(),
+            width: None,
+            height: None,
+            pdf_pages_estimate: Some(pages),
+            text_snippet: Some(printable),
+            truncated: lossy.len() > MAX_PREVIEW_TEXT_CHARS,
+        });
+    }
+    if let Ok(format) = image::guess_format(bytes)
+        && let Ok((w, h)) =
+            image::ImageReader::with_format(std::io::Cursor::new(bytes), format).into_dimensions()
+    {
+        return Ok(BoundedAttachmentPreview {
+            kind: AttachmentPreviewKind::Image,
+            mime_type: format.to_mime_type().to_string(),
+            byte_size: bytes.len(),
+            width: Some(w),
+            height: Some(h),
+            pdf_pages_estimate: None,
+            text_snippet: None,
+            truncated: false,
+        });
+    }
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        let snippet: String = text.chars().take(MAX_PREVIEW_TEXT_CHARS).collect();
+        return Ok(BoundedAttachmentPreview {
+            kind: AttachmentPreviewKind::Text,
+            mime_type: "text/plain; charset=utf-8".into(),
+            byte_size: bytes.len(),
+            width: None,
+            height: None,
+            pdf_pages_estimate: None,
+            text_snippet: Some(snippet),
+            truncated: text.chars().count() > MAX_PREVIEW_TEXT_CHARS,
+        });
+    }
+    Ok(BoundedAttachmentPreview {
+        kind: AttachmentPreviewKind::Binary,
+        mime_type: "application/octet-stream".into(),
+        byte_size: bytes.len(),
+        width: None,
+        height: None,
+        pdf_pages_estimate: None,
+        text_snippet: None,
+        truncated: false,
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +191,28 @@ mod tests {
         drop(sandbox);
         drop(supervisor);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bounded_passive_image_and_pdf_previews() {
+        let pdf_bytes = b"%PDF-1.7\n1 0 obj << /Type /Catalog >> endobj\n2 0 obj << /Type /Page >> endobj\n(Quarterly Summary) Tj";
+        let pdf_prev = preview_attachment_bounded("report.pdf", pdf_bytes).unwrap();
+        assert_eq!(pdf_prev.kind, AttachmentPreviewKind::Pdf);
+        assert_eq!(pdf_prev.pdf_pages_estimate, Some(1));
+        assert!(pdf_prev.text_snippet.unwrap().contains("Quarterly Summary"));
+
+        let img = image::RgbaImage::new(32, 24);
+        let mut png_bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut png_bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+        let img_prev = preview_attachment_bounded("shot.png", &png_bytes).unwrap();
+        assert_eq!(img_prev.kind, AttachmentPreviewKind::Image);
+        assert_eq!((img_prev.width, img_prev.height), (Some(32), Some(24)));
+
+        let oversized = vec![b'a'; MAX_PREVIEW_INPUT_BYTES + 1];
+        assert!(preview_attachment_bounded("huge.txt", &oversized).is_err());
     }
 }

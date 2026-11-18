@@ -124,26 +124,31 @@ impl<P: Platform + 'static> HelperServer<P> {
         #[cfg(windows)]
         {
             let pipe_name = path.to_string_lossy();
-            info!("Helper server listening on named pipe {}", pipe_name);
+            let owner_sid = gm_core::ipc::windows_pipe_security::current_user_sid()?;
+            info!(
+                "Helper server listening on SID-restricted named pipe {} (SID: {})",
+                pipe_name, owner_sid
+            );
 
             let mut is_first = true;
             loop {
-                let mut options = tokio::net::windows::named_pipe::ServerOptions::new();
-                if is_first {
-                    options.first_pipe_instance(true);
-                    is_first = false;
-                }
-                let server = options.create(path.as_os_str()).map_err(|e| {
-                    gm_core::error::GmError::Platform(format!(
-                        "Failed to create named pipe {pipe_name}: {e}"
-                    ))
-                })?;
+                let server = gm_core::ipc::windows_pipe_security::create_sid_restricted_named_pipe(
+                    path, is_first, &owner_sid,
+                )?;
+                is_first = false;
 
                 server.connect().await.map_err(|e| {
                     gm_core::error::GmError::Platform(format!(
                         "Failed to connect client to named pipe: {e}"
                     ))
                 })?;
+
+                if let Err(e) = gm_core::ipc::windows_pipe_security::verify_named_pipe_client_sid(
+                    &server, &owner_sid,
+                ) {
+                    warn!("{e}");
+                    continue;
+                }
 
                 let platform = Arc::clone(&self.platform);
                 let shm_ring = Arc::clone(&self.shm_ring);

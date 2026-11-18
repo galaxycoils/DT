@@ -4,7 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::info;
 
-pub const DEFAULT_REPO: &str = "galaxycoils/grok-muse";
+pub const DEFAULT_REPO: &str = "galaxycoils/DT";
+pub const DEFAULT_METADATA_BRANCH: &str = "update-metadata";
 
 /// Result of checking for updates against GitHub Releases.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -155,19 +156,14 @@ pub fn release_asset_name(version: &str, os: &str, architecture: &str) -> Result
     {
         return Err(GmError::Config("Invalid release version".into()));
     }
-    let extension = match (os, architecture) {
-        ("macos", "aarch64" | "x86_64") => "dmg",
-        ("windows", "x86_64") => "zip",
-        ("linux", "x86_64") => "tar.gz",
-        _ => {
-            return Err(GmError::Config(
-                "Unsupported release OS/architecture".into(),
-            ));
-        }
-    };
-    Ok(format!(
-        "GrokMuse-{version}-{os}-{architecture}.{extension}"
-    ))
+    match (os, architecture) {
+        ("macos", "aarch64" | "x86_64") => Ok(format!("DT-{version}-macos-{architecture}.dmg")),
+        ("windows", "x86_64") => Ok(format!("DT-{version}-windows-x86_64-setup.exe")),
+        ("linux", "x86_64") => Ok(format!("dt_{version}_amd64.deb")),
+        _ => Err(GmError::Config(
+            "Unsupported release OS/architecture".into(),
+        )),
+    }
 }
 
 /// Parse GitHub release payload and compare with current version.
@@ -232,12 +228,12 @@ pub fn parse_github_release_json(
         manifest_download_url: release
             .assets
             .iter()
-            .find(|a| a.name == "grok-muse-release.json")
+            .find(|a| a.name == "dt-release.json" || a.name == "grok-muse-release.json")
             .map(|a| a.browser_download_url.clone()),
         signature_download_url: release
             .assets
             .iter()
-            .find(|a| a.name == "grok-muse-release.sig")
+            .find(|a| a.name == "dt-release.sig" || a.name == "grok-muse-release.sig")
             .map(|a| a.browser_download_url.clone()),
         current_version: current_version.to_string(),
         latest_version,
@@ -440,6 +436,118 @@ async fn download_with_trusted_key(
     Ok((target_path, true))
 }
 
+/// Renewable update metadata published on a protected metadata branch separate from immutable assets.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RenewableUpdateMetadata {
+    pub schema: u32,
+    pub sequence: u64,
+    pub repo: String,
+    pub version: String,
+    pub commit: String,
+    pub published_at: String,
+    pub expires_at: String,
+    #[serde(default)]
+    pub revoked_versions: Vec<String>,
+    pub assets: Vec<SignedReleaseAsset>,
+}
+
+/// Verify renewable update metadata against one or more pinned publisher public keys,
+/// rejecting expired, rolled-back, wrong-origin, or revoked releases.
+pub fn verify_renewable_metadata_with_keys(
+    raw: &[u8],
+    signature_hex: &[u8],
+    trusted_public_keys_hex: &[&str],
+    expected_repo: &str,
+    min_sequence: u64,
+) -> Result<RenewableUpdateMetadata> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    let failure = || GmError::SafetyViolation("Update metadata signature is not trusted".into());
+    if trusted_public_keys_hex.is_empty() {
+        return Err(failure());
+    }
+    let signature = hex::decode(
+        std::str::from_utf8(signature_hex)
+            .map_err(|_| failure())?
+            .trim(),
+    )
+    .map_err(|_| failure())?;
+    let signature = Signature::from_slice(&signature).map_err(|_| failure())?;
+
+    let mut verified_sig = false;
+    for key_hex in trusted_public_keys_hex {
+        let Ok(bytes) = hex::decode(key_hex.trim()) else {
+            continue;
+        };
+        let Ok(key_arr): std::result::Result<[u8; 32], _> = bytes.try_into() else {
+            continue;
+        };
+        if let Ok(vk) = VerifyingKey::from_bytes(&key_arr)
+            && vk.verify_strict(raw, &signature).is_ok()
+        {
+            verified_sig = true;
+            break;
+        }
+    }
+    if !verified_sig {
+        return Err(failure());
+    }
+
+    let meta: RenewableUpdateMetadata = serde_json::from_slice(raw)?;
+    if meta.schema != 1 || meta.assets.is_empty() || meta.assets.len() > 32 {
+        return Err(GmError::SafetyViolation(
+            "Unsupported or empty update metadata".into(),
+        ));
+    }
+    if meta.repo != expected_repo {
+        return Err(GmError::SafetyViolation(format!(
+            "Update metadata origin mismatch: expected '{expected_repo}', got '{}'",
+            meta.repo
+        )));
+    }
+    if meta.sequence < min_sequence {
+        return Err(GmError::SafetyViolation(format!(
+            "Rolled-back update metadata rejected (sequence {} < minimum {min_sequence})",
+            meta.sequence
+        )));
+    }
+    if meta.revoked_versions.iter().any(|v| v == &meta.version) {
+        return Err(GmError::SafetyViolation(format!(
+            "Release version {} has been revoked by publisher metadata",
+            meta.version
+        )));
+    }
+    let expires = chrono::DateTime::parse_from_rfc3339(&meta.expires_at).map_err(|_| failure())?;
+    if expires <= chrono::Utc::now() {
+        return Err(GmError::SafetyViolation(
+            "Update metadata has expired; renew before installing".into(),
+        ));
+    }
+    if meta.commit.len() != 40 || !meta.commit.bytes().all(|c| c.is_ascii_hexdigit()) {
+        return Err(GmError::SafetyViolation(
+            "Update metadata must bind a 40-char commit SHA".into(),
+        ));
+    }
+
+    let mut identities = std::collections::HashSet::new();
+    let mut names = std::collections::HashSet::new();
+    for asset in &meta.assets {
+        if !identities.insert((&asset.os, &asset.architecture))
+            || !names.insert(&asset.name)
+            || asset.size_bytes == 0
+            || asset.size_bytes > 2 * 1024 * 1024 * 1024
+            || asset.sha256.len() != 64
+            || !asset.sha256.bytes().all(|c| c.is_ascii_hexdigit())
+            || asset.name != release_asset_name(&meta.version, &asset.os, &asset.architecture)?
+        {
+            return Err(GmError::SafetyViolation(
+                "Update metadata contains an invalid or ambiguous target asset".into(),
+            ));
+        }
+    }
+    Ok(meta)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedReleaseManifest {
@@ -448,7 +556,7 @@ pub struct SignedReleaseManifest {
     pub expires_at: String,
     pub assets: Vec<SignedReleaseAsset>,
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SignedReleaseAsset {
     pub name: String,
@@ -886,7 +994,7 @@ mod signed_manifest_tests {
             version: "1.2.3".into(),
             expires_at: "2099-01-01T00:00:00Z".into(),
             assets: vec![SignedReleaseAsset {
-                name: "GrokMuse-1.2.3-macos-aarch64.dmg".into(),
+                name: "DT-1.2.3-macos-aarch64.dmg".into(),
                 os: "macos".into(),
                 architecture: "aarch64".into(),
                 size_bytes: 1,
@@ -919,6 +1027,85 @@ mod signed_manifest_tests {
             .into_bytes();
         let signature = hex::encode(key.sign(&expired).to_bytes());
         assert!(verify_release_manifest(&expired, signature.as_bytes(), &public).is_err());
+    }
+
+    #[test]
+    fn test_renewable_metadata_expiry_rollback_and_revocation() {
+        let old_key = SigningKey::from_bytes(&[11; 32]);
+        let new_key = SigningKey::from_bytes(&[12; 32]);
+        let old_pub = hex::encode(old_key.verifying_key().to_bytes());
+        let new_pub = hex::encode(new_key.verifying_key().to_bytes());
+
+        let meta = RenewableUpdateMetadata {
+            schema: 1,
+            sequence: 5,
+            repo: "galaxycoils/DT".into(),
+            version: "1.0.0".into(),
+            commit: "a".repeat(40),
+            published_at: "2026-11-17T00:00:00Z".into(),
+            expires_at: "2099-01-01T00:00:00Z".into(),
+            revoked_versions: vec!["0.9.0".into()],
+            assets: vec![SignedReleaseAsset {
+                name: "DT-1.0.0-macos-aarch64.dmg".into(),
+                os: "macos".into(),
+                architecture: "aarch64".into(),
+                size_bytes: 1024,
+                sha256: "ab".repeat(32),
+            }],
+        };
+        let raw = serde_json::to_vec(&meta).unwrap();
+        let sig_new = hex::encode(new_key.sign(&raw).to_bytes());
+
+        // Key transition: verifies when both old & new keys are pinned.
+        let verified = verify_renewable_metadata_with_keys(
+            &raw,
+            sig_new.as_bytes(),
+            &[&old_pub, &new_pub],
+            "galaxycoils/DT",
+            5,
+        )
+        .unwrap();
+        assert_eq!(verified.version, "1.0.0");
+
+        // Rejects rolled-back metadata sequence.
+        assert!(
+            verify_renewable_metadata_with_keys(
+                &raw,
+                sig_new.as_bytes(),
+                &[&new_pub],
+                "galaxycoils/DT",
+                6,
+            )
+            .is_err()
+        );
+
+        // Rejects wrong origin repo.
+        assert!(
+            verify_renewable_metadata_with_keys(
+                &raw,
+                sig_new.as_bytes(),
+                &[&new_pub],
+                "attacker/DT",
+                5,
+            )
+            .is_err()
+        );
+
+        // Rejects revoked version.
+        let mut revoked = meta.clone();
+        revoked.revoked_versions.push("1.0.0".into());
+        let revoked_raw = serde_json::to_vec(&revoked).unwrap();
+        let revoked_sig = hex::encode(new_key.sign(&revoked_raw).to_bytes());
+        assert!(
+            verify_renewable_metadata_with_keys(
+                &revoked_raw,
+                revoked_sig.as_bytes(),
+                &[&new_pub],
+                "galaxycoils/DT",
+                5,
+            )
+            .is_err()
+        );
     }
 }
 

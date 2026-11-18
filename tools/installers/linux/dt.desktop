@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=DT
+GenericName=Hybrid Desktop & Proactive Agent
+Comment=DT Hybrid Agent (X11 and Wayland)
+Exec=/usr/bin/gm-ui native
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=true
+X-GNOME-UsesNotifications=true

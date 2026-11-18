@@ -22,15 +22,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+pub mod components;
 pub mod control_server;
 pub mod diagnostics;
+pub mod doctor;
+pub mod migration;
 pub mod patch;
 pub mod service;
 pub mod updater;
 mod user_services;
 
+pub use components::*;
 pub use control_server::*;
 pub use diagnostics::*;
+pub use doctor::*;
+pub use migration::*;
 pub use service::*;
 pub use updater::*;
 
@@ -95,12 +101,17 @@ impl LlmBackend for ProviderLlmBackend {
 }
 
 pub fn build_llm_backend(secrets: &KeychainSecrets) -> Arc<dyn LlmBackend> {
+    #[cfg(any(test, debug_assertions))]
     if std::env::var("GM_FORCE_MOCK_LLM")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
     {
-        warn!("GM_FORCE_MOCK_LLM is set, forcing MockLlmBackend");
+        warn!("GM_FORCE_MOCK_LLM is set in debug/test build, forcing MockLlmBackend");
         return Arc::new(MockLlmBackend::new());
+    }
+    #[cfg(all(not(test), not(debug_assertions)))]
+    if std::env::var("GM_FORCE_MOCK_LLM").is_ok() {
+        warn!("Ignoring GM_FORCE_MOCK_LLM: mock inference is excluded from production builds");
     }
 
     let meta_key = secrets
@@ -182,14 +193,15 @@ pub async fn ensure_helper_running(config: &GmConfig) -> Result<()> {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "gm",
-    about = "Grok-Muse Hybrid Agent: fast computer-use + proactive personal agent"
+    name = "dt",
+    about = "DT Hybrid Agent: fast computer-use + proactive personal agent",
+    version
 )]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
-    /// Run a single agent task directly (shorthand for `gm do`)
+    /// Run a single agent task directly (shorthand for `dt do`)
     #[arg(long)]
     pub task: Option<String>,
 
@@ -355,6 +367,14 @@ pub enum Commands {
     Routines {
         #[command(subcommand)]
         action: Option<RoutinesSubcommand>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run unified DT Doctor checks, safe repairs, or resume an interrupted run
+    Doctor {
+        #[command(subcommand)]
+        action: Option<DoctorSubcommand>,
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -654,6 +674,29 @@ pub enum RoutinesSubcommand {
         id: String,
         #[arg(long, default_value = "20")]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum DoctorSubcommand {
+    /// Inspect health, readiness, and permissions without applying repairs
+    Check {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run serialized safe repairs and recheck readiness
+    Repair {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Resume a journaled Doctor run after interruption, OS prompt, or reboot
+    Resume {
+        run_id: String,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2640,6 +2683,105 @@ pub async fn run_routines(
                         run.task_id.as_deref().unwrap_or("none")
                     );
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_doctor_cli(
+    action: Option<DoctorSubcommand>,
+    top_json: bool,
+    config_path: Option<PathBuf>,
+) -> Result<()> {
+    let config = GmConfig::load(config_path.as_deref())?;
+    let (mode, run_id, sub_json) = match action {
+        Some(DoctorSubcommand::Check { json }) => (DoctorMode::Check, None, json),
+        Some(DoctorSubcommand::Repair { json }) => (DoctorMode::Repair, None, json),
+        Some(DoctorSubcommand::Resume { run_id, json }) => (DoctorMode::Resume, Some(run_id), json),
+        None => (DoctorMode::Check, None, false),
+    };
+    let report = run_doctor(&config, mode, run_id.as_deref()).await?;
+    if top_json || sub_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "DT Doctor [{}] ({}) -> {:?}",
+            report.run_id, report.target, report.installation_readiness
+        );
+        for check in &report.checks {
+            println!("  - [{}] {:?}: {}", check.id, check.outcome, check.summary);
+        }
+        if !report.pending_actions.is_empty() {
+            println!("Pending actions:");
+            for action in &report.pending_actions {
+                println!("  * {action}");
+            }
+        }
+    }
+    Ok(())
+}
+
+pub async fn run_cli_entrypoint() -> Result<()> {
+    tracing_subscriber::fmt::init();
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Chat { system }) => run_chat(system, cli.config).await?,
+        Some(Commands::Permissions {
+            open_missing,
+            open,
+            json,
+        }) => run_permissions(open_missing, open, json).await?,
+        Some(Commands::Onboard { check_only }) => run_onboard(check_only).await?,
+        Some(Commands::Do { instruction }) => run_do(&instruction, cli.config).await?,
+        Some(Commands::Daemon) => run_daemon(cli.config, cli.task).await?,
+        Some(Commands::Status) => run_status().await?,
+        Some(Commands::Kill) => run_kill().await?,
+        Some(Commands::Service { action }) => run_service(action).await?,
+        Some(Commands::Dogfood { action, json }) => run_dogfood(action, json).await?,
+        Some(Commands::Stats { json }) => run_stats(json).await?,
+        Some(Commands::Review { date }) => run_review(date).await?,
+        Some(Commands::Audit { period, json }) => run_audit(&period, json).await?,
+        Some(Commands::Upkeep { stale_days, json }) => run_upkeep(stale_days, json).await?,
+        Some(Commands::Feed { limit, json }) => run_feed(limit, json).await?,
+        Some(Commands::Ideas { json }) => run_ideas(json).await?,
+        Some(Commands::Update {
+            check,
+            force,
+            repo,
+            json,
+            dir,
+        }) => run_update(check, force, repo, json, dir).await?,
+        Some(Commands::Models { action, json }) => run_models(action, json).await?,
+        Some(Commands::Bots { action, json }) => run_bots(action, json, cli.config).await?,
+        Some(Commands::Queue { action, json }) => run_queue(action, json, cli.config).await?,
+        Some(Commands::Channels { action, json }) => run_channels(action, json, cli.config).await?,
+        Some(Commands::Team { action, json }) => run_team(action, json, cli.config).await?,
+        Some(Commands::Routines { action, json }) => run_routines(action, json, cli.config).await?,
+        Some(Commands::Doctor { action, json }) => run_doctor_cli(action, json, cli.config).await?,
+        Some(Commands::Diagnostics { action, json }) => {
+            run_diagnostics(action, json, cli.config).await?;
+        }
+        Some(Commands::Serve { bind }) => run_serve(&bind, cli.config).await?,
+        Some(Commands::Skills { action, json }) => run_skills(action, json, cli.config).await?,
+        Some(Commands::Goals { action, json }) => run_goals(action, json, cli.config).await?,
+        Some(Commands::Forget { action, json }) => run_forget(action, json, cli.config).await?,
+        Some(Commands::ImportMemory {
+            file,
+            input,
+            apply,
+            report_sha256,
+            bot,
+            json,
+        }) => run_import_memory(file, input, apply, report_sha256, bot, json, cli.config).await?,
+        Some(Commands::Dream { date, json }) => run_dream(date, json, cli.config).await?,
+        Some(Commands::Spaces { action, json }) => run_spaces(action, json, cli.config).await?,
+        None => {
+            if let Some(task) = cli.task {
+                run_do(&task, cli.config).await?;
+            } else {
+                run_onboard(true).await?;
             }
         }
     }

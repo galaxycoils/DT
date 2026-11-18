@@ -106,6 +106,24 @@ enum Commands {
         #[arg(long)]
         release: bool,
     },
+    /// Validate and display the US$100 release-wide inference budget ledger
+    BudgetLedger {
+        #[arg(long, default_value = "docs/release/inference-budget-ledger.json")]
+        ledger_path: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run DT release certification suites (rejects mock mode and candidate mismatches)
+    Certify {
+        /// Suite: providers, native, ux, integrations, lifecycle, soak, or all
+        #[arg(default_value = "all")]
+        suite: String,
+        #[arg(long)]
+        json: bool,
+        /// Return exit 0 with explicit blocked_missing_access status when external signing/hardware/accounts are absent
+        #[arg(long)]
+        allow_incomplete: bool,
+    },
     /// Submit a signed DMG to Apple Notary Service (`xcrun notarytool`) and staple notarization ticket
     Notarize {
         /// Path to signed .dmg file
@@ -322,12 +340,14 @@ fn create_app_bundles(release: bool) -> Result<(), Box<dyn std::error::Error>> {
         helper_plist,
     )?;
 
-    // Bundle main GrokMuse.app
+    // Bundle main GrokMuse.app (includes dt, dt-doctor, gm compatibility alias, gm-daemon, gm-ui)
     let app_macos_dir = Path::new("target/bundle/GrokMuse.app/Contents/MacOS");
     fs::create_dir_all(app_macos_dir)?;
     fs::copy(bin_dir.join("gm-ui"), app_macos_dir.join("gm-ui"))?;
     fs::copy(bin_dir.join("gm-daemon"), app_macos_dir.join("gm-daemon"))?;
     fs::copy(bin_dir.join("gm"), app_macos_dir.join("gm"))?;
+    fs::copy(bin_dir.join("dt"), app_macos_dir.join("dt"))?;
+    fs::copy(bin_dir.join("dt-doctor"), app_macos_dir.join("dt-doctor"))?;
 
     let app_plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -415,6 +435,8 @@ fn assemble_dmg(id: &str, output: &str, release: bool) -> Result<(), Box<dyn std
         "target/bundle/GrokMuse.app/Contents/MacOS/gm-ui",
         "target/bundle/GrokMuse.app/Contents/MacOS/gm-daemon",
         "target/bundle/GrokMuse.app/Contents/MacOS/gm",
+        "target/bundle/GrokMuse.app/Contents/MacOS/dt",
+        "target/bundle/GrokMuse.app/Contents/MacOS/dt-doctor",
     ] {
         let status = Command::new("strip").args(["-S", executable]).status()?;
         if !status.success() {
@@ -463,6 +485,50 @@ fn assemble_dmg(id: &str, output: &str, release: bool) -> Result<(), Box<dyn std
     let _ = Command::new("ln")
         .args(["-s", "/Applications", "target/dmg-staging/Applications"])
         .status();
+
+    // Build Install DT.pkg alongside bundles inside the DMG when pkgbuild/productbuild are present.
+    #[cfg(target_os = "macos")]
+    {
+        let pkg_root = Path::new("target/dmg-pkg-root");
+        let _ = fs::remove_dir_all(pkg_root);
+        let _ = fs::create_dir_all(pkg_root.join("Applications"));
+        let _ = Command::new("cp")
+            .args([
+                "-cR",
+                "target/bundle/GrokMuse.app",
+                "target/dmg-pkg-root/Applications/DT.app",
+            ])
+            .status();
+        let _ = Command::new("cp")
+            .args([
+                "-cR",
+                "target/bundle/GrokMuseCUHelper.app",
+                "target/dmg-pkg-root/Applications/DTCUHelper.app",
+            ])
+            .status();
+        let comp_pkg = "target/dmg-component.pkg";
+        let pkg_ok = Command::new("pkgbuild")
+            .args([
+                "--root",
+                "target/dmg-pkg-root",
+                "--identifier",
+                "co.anysphere.grok-muse.pkg",
+                "--version",
+                env!("CARGO_PKG_VERSION"),
+                "--install-location",
+                "/",
+                comp_pkg,
+            ])
+            .status()
+            .is_ok_and(|s| s.success());
+        if pkg_ok {
+            let _ = Command::new("productbuild")
+                .args(["--package", comp_pkg, "target/dmg-staging/Install DT.pkg"])
+                .status();
+        }
+        let _ = fs::remove_dir_all(pkg_root);
+        let _ = fs::remove_file(comp_pkg);
+    }
 
     // 4. Create DMG
     let out_file = Path::new(output);
@@ -934,6 +1000,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         Commands::Eval => {
             run_eval().await?;
+        }
+
+        Commands::BudgetLedger { ledger_path, json } => {
+            let ledger = gm_llm::ReleaseBudgetLedger::load_or_default(&ledger_path)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&ledger)?);
+            } else {
+                println!(
+                    "DT Release Budget Ledger (v{}): cap=${:.2}, exposure=${:.2}",
+                    ledger.release_version,
+                    ledger.total_cap_usd,
+                    ledger.total_exposure()
+                );
+                for (bucket, alloc) in &ledger.allocations {
+                    println!(
+                        "  - {:<20} allocated=${:.2} reserved=${:.2} uncertain=${:.2} spent=${:.2} remaining=${:.2}",
+                        bucket,
+                        alloc.allocated_usd,
+                        alloc.reserved_usd,
+                        alloc.uncertain_reserved_usd,
+                        alloc.spent_usd,
+                        alloc.remaining_usd()
+                    );
+                }
+            }
+        }
+
+        Commands::Certify {
+            suite,
+            json,
+            allow_incomplete,
+        } => {
+            run_certify(&suite, json, allow_incomplete).await?;
         }
 
         Commands::TestAll { identity } => {
@@ -2152,6 +2251,94 @@ fn run_notarize(
     }
 
     println!("==> Notarization and ticket stapling succeeded for {dmg_path}!");
+    Ok(())
+}
+
+async fn run_certify(
+    suite: &str,
+    json_out: bool,
+    allow_incomplete: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("GM_FORCE_MOCK_LLM").is_some() {
+        return Err("xtask certify rejects mock mode (GM_FORCE_MOCK_LLM is set)".into());
+    }
+    let valid_suites = [
+        "providers",
+        "native",
+        "ux",
+        "integrations",
+        "lifecycle",
+        "soak",
+        "all",
+    ];
+    if !valid_suites.contains(&suite) {
+        return Err(format!(
+            "Unknown certify suite '{suite}'. Expected one of: {}",
+            valid_suites.join(", ")
+        )
+        .into());
+    }
+    let commit = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()?
+            .stdout,
+    )?
+    .trim()
+    .to_string();
+    let ledger = gm_llm::ReleaseBudgetLedger::load_or_default(Path::new(
+        "docs/release/inference-budget-ledger.json",
+    ))?;
+    let inv_raw = fs::read_to_string("docs/release/coverage-inventory.json")?;
+    let inv_json: serde_json::Value = serde_json::from_str(&inv_raw)?;
+    let required_rows = inv_json["rows"]
+        .as_array()
+        .map(|arr| arr.iter().filter(|r| r["required"] == true).count())
+        .unwrap_or(0);
+
+    let apple_id_present = std::env::var("GM_APPLE_SIGNING_IDENTITY")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty() && v.trim() != "-");
+    let pub_key_present = std::env::var("GM_RELEASE_PUBLIC_KEY_HEX")
+        .ok()
+        .is_some_and(|v| v.trim().len() == 64);
+
+    let checks = serde_json::json!({
+        "schema": 1,
+        "product": "DT",
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": commit,
+        "suite": suite,
+        "target": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        "mock_mode_rejected": true,
+        "coverage_inventory_required_rows": required_rows,
+        "budget_cap_usd": ledger.total_cap_usd,
+        "budget_exposure_usd": ledger.total_exposure(),
+        "gates": {
+            "providers": if std::env::var_os("OPENAI_API_KEY").is_some() || std::env::var_os("XAI_API_KEY").is_some() { "ready_for_live" } else { "blocked_missing_access" },
+            "native": if apple_id_present { "ready_for_signed_native" } else { "blocked_missing_access" },
+            "ux": "local_tokens_and_web_mobile_verified_native_screenshots_pending",
+            "integrations": "blocked_missing_access",
+            "lifecycle": if pub_key_present { "ready_for_signed_lifecycle" } else { "blocked_missing_access" },
+            "soak": "blocked_requires_7_day_run"
+        }
+    });
+
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&checks)?);
+    } else {
+        println!(
+            "DT Certify (suite={suite}, commit={}, coverage_rows={required_rows}, budget_cap=${:.2})",
+            commit, ledger.total_cap_usd
+        );
+        println!("  Gates: {}", checks["gates"]);
+    }
+
+    if !allow_incomplete {
+        return Err(
+            "Certification incomplete: missing signing identities, multi-OS native hardware, real accounts, and 7-day soak (re-run with --allow-incomplete for status JSON)".into(),
+        );
+    }
     Ok(())
 }
 

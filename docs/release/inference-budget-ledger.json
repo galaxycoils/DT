@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "release_version": "1.0.0",
+  "total_cap_usd": 100.0,
+  "currency": "USD",
+  "allocations": {
+    "macos-aarch64": {
+      "allocated_usd": 15.0,
+      "reserved_usd": 0.0,
+      "spent_usd": 0.0,
+      "uncertain_reserved_usd": 0.0
+    },
+    "macos-x86_64": {
+      "allocated_usd": 15.0,
+      "reserved_usd": 0.0,
+      "spent_usd": 0.0,
+      "uncertain_reserved_usd": 0.0
+    },
+    "windows-x86_64": {
+      "allocated_usd": 15.0,
+      "reserved_usd": 0.0,
+      "spent_usd": 0.0,
+      "uncertain_reserved_usd": 0.0
+    },
+    "linux-x86_64": {
+      "allocated_usd": 15.0,
+      "reserved_usd": 0.0,
+      "spent_usd": 0.0,
+      "uncertain_reserved_usd": 0.0
+    },
+    "shared-tests": {
+      "allocated_usd": 25.0,
+      "reserved_usd": 0.0,
+      "spent_usd": 0.0,
+      "uncertain_reserved_usd": 0.0
+    },
+    "unallocated-reserve": {
+      "allocated_usd": 15.0,
+      "reserved_usd": 0.0,
+      "spent_usd": 0.0,
+      "uncertain_reserved_usd": 0.0
+    }
+  },
+  "transfers": [],
+  "entries": [],
+  "notes": "Enforces the US$100 release-wide inference cap (US$15 per desktop target, US$25 shared tests, US$15 reserve). Hardware, signing, hosting, and telephony expenses require separate authorization."
+}

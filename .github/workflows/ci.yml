@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ "master", "main" ]
+    branches: [ "master", "main", "codex/*" ]
     tags: [ "v*" ]
   pull_request:
     branches: [ "master", "main" ]
@@ -19,7 +19,7 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - name: Checkout Grok-Muse
+      - name: Checkout DT
         uses: actions/checkout@v4
         with:
           path: grok-muse
@@ -44,27 +44,42 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev clang xvfb gcc-mingw-w64-x86-64
+          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev clang xvfb gcc-mingw-w64-x86-64 dpkg-dev
 
       - name: Check formatting
         working-directory: grok-muse
         run: cargo fmt --all -- --check
 
-      - name: Install Node for companion verification
+      - name: Install Node for companion, web, and mobile verification
         if: runner.os == 'Linux'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
-      - name: Verify companion source, bundle and DOM interactions
+      - name: Verify generated UI tokens, companion bundle, React web, and Expo mobile
         if: runner.os == 'Linux'
         working-directory: grok-muse
         run: |
+          python3 tools/generate-ui-tokens.py
           npm ci --prefix tools/companion
           npm run build --prefix tools/companion
-          git diff --exit-code -- crates/gm-openbot/src/companion_ui.js crates/gm-openbot/src/companion_ui.html crates/gm-openbot/src/companion_ui.css crates/gm-openbot/src/companion_tokens.css crates/gm-ui/src/ui/tokens.rs
+          git diff --exit-code -- crates/gm-openbot/src/companion_ui.js crates/gm-openbot/src/companion_ui.html crates/gm-openbot/src/companion_ui.css crates/gm-openbot/src/companion_tokens.css crates/gm-ui/src/ui/tokens.rs clients/web/src/tokens.css clients/mobile/lib/tokens.ts
           npm test --prefix tools/companion
           node --test tools/tests/companion-events.test.cjs
+          npm ci --prefix clients/web
+          npm run typecheck --prefix clients/web
+          npm run build --prefix clients/web
+          npm test --prefix clients/web
+          npm ci --prefix clients/mobile
+          npm test --prefix clients/mobile
+
+      - name: Verify release tools, coverage inventory, and budget ledger (Linux)
+        if: runner.os == 'Linux'
+        working-directory: grok-muse
+        run: |
+          python3 tools/test_release_tools.py
+          cargo run --locked -p xtask -- budget-ledger
+          cargo run --locked -p xtask -- certify all --allow-incomplete --json
 
       - name: Clippy check (macOS)
         if: runner.os == 'macOS'
@@ -81,7 +96,7 @@ jobs:
         working-directory: grok-muse
         run: |
           rustup target add x86_64-pc-windows-gnu
-          cargo check --locked --target x86_64-pc-windows-gnu -p gm-platform -p gm-core -p gm-cu-helper -p gm-muse
+          cargo check --locked --target x86_64-pc-windows-gnu -p gm-platform -p gm-core -p gm-cu-helper -p gm-muse -p gm-daemon
 
       - name: Run nextest (macOS)
         if: runner.os == 'macOS'
@@ -134,8 +149,7 @@ jobs:
         run: |
           test "$(uname -m)" = arm64
           VERSION="${GITHUB_REF_NAME#v}"
-          DMG="target/dist/GrokMuse-${VERSION}-macos-aarch64-adhoc.dmg"
+          DMG="target/dist/DT-${VERSION}-macos-aarch64-adhoc.dmg"
           cargo run --locked -p xtask -- dmg --release --identity - --output "$DMG"
           cargo run --locked -p xtask -- verify-dmg --dmg-path "$DMG"
           (cd target/dist && shasum -a 256 -c "$(basename "$DMG").sha256")
-

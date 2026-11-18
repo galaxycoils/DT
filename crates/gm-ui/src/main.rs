@@ -57,7 +57,7 @@ unsafe extern "C" {
 #[derive(Parser, Debug)]
 #[command(
     name = "gm-ui",
-    about = "Grok-Muse Desktop Shell UI (Tray, Action Overlay, Onboarding & Hotkeys)"
+    about = "DT Desktop Shell UI (Tray, Action Overlay, Onboarding & Hotkeys)"
 )]
 struct Cli {
     #[arg(long, global = true)]
@@ -113,7 +113,7 @@ extern "C" fn hotkey_callback(hotkey_id: std::os::raw::c_int) {
         eprintln!("[HOTKEY] EMERGENCY KILL SWITCH ACTIVATED (Cmd+Alt+Escape)");
 
         // Update HUD to Stopped immediately (<1ms)
-        let status = CString::new("🛑 Grok-Muse: Stopped").unwrap();
+        let status = CString::new("🛑 DT: Stopped").unwrap();
         let detail = CString::new("Stopped (Emergency Kill)").unwrap();
         unsafe {
             gm_ui_set_hud_state(3, status.as_ptr(), detail.as_ptr());

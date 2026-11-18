@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "DT",
+    "slug": "dt-mobile",
+    "version": "1.0.0",
+    "scheme": "dt",
+    "platforms": ["ios", "android"],
+    "ios": {
+      "bundleIdentifier": "co.anysphere.grok-muse.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "co.anysphere.grok_muse.mobile"
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store"
+    ]
+  }
+}

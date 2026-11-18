@@ -1,6 +1,15 @@
 # Changelog
 
-All notable changes to **Grok-Muse** are documented in this file.
+All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
+
+## [v1.0.0] — DT Stable Release Candidate & Certification Infrastructure (2026-11-17)
+
+- **Rename & Compatibility**: Branded user-facing surfaces to **DT**, exposed `dt` primary CLI and standalone `dt-doctor` recovery binary while preserving `gm` compatibility alias, crate names, credential namespaces, bundle IDs, OAuth identity, and legacy config inputs.
+- **Unified Doctor Engine, Installers & Migration (`doctor.rs`, `migration.rs`, `components.rs`)**: Added `dt doctor check/repair/resume --json` with journaled runs, max 2 repair attempts, safe stale lock/socket ownership checks, consistent SQLite snapshot backups (`VACUUM INTO`), dual-store conflict preservation, rollback snapshots, chunked signed component delivery, macOS `Install DT.pkg`, Windows NSIS 3.13 installer, and Ubuntu 24.04 `.deb` packaging.
+- **Windows Per-User Pipe & Task Isolation (`ipc.rs`, `user_services.rs`)**: Added SID-scoped pipe names, owner-only SDDL DACLs, `reject_remote_clients(true)`, peer SID checks, and `DT-Daemon-{sid}`/`DT-Helper-{sid}` tasks.
+- **Hosted PostgreSQL, AES-256-GCM/HKDF & Cookie+CSRF Sessions (`hosted.rs`, `web.rs`, `clients/`)**: Added `sqlx` PostgreSQL migrations and membership RBAC, AES-256-GCM + HKDF-SHA256 tenant secret encryption, same-origin `HttpOnly; Secure` cookie sessions with `X-DT-CSRF-Token` validation, server-side Stripe secrets/price allowlist, Expo SDK 58 mobile `expo-secure-store`, single-source token generation for all 4 clients, and digest-pinned Docker/TLS deployment configs.
+- **Local Runtimes, CLI Egress Broker & Certification (`local_vlm.rs`, `voice.rs`, `cli_driver.rs`, `xtask`, `tools/`)**: Excluded mock inference from release builds, added `llama.cpp` MTMD / DirectML worker specs with explicit CPU fallback reporting, managed Whisper/TTS lifecycle with bounded buffers, job-scoped CLI egress broker, bounded PDF/image attachment previews, `docs/release/coverage-inventory.json`, US\$100 `ReleaseBudgetLedger`, renewable update metadata verification, and `xtask certify`.
+- **Certification Gate**: Signing identities, multi-OS hardware runs (Intel Mac, Windows 11, Ubuntu 24.04 X11/Wayland, iOS/Android), real account checks, and the >=7-day soak remain pending execution before public v1.0.0 tag/release publication.
 
 ## [v0.7.0] — UI and Provider Connections (2026-11-17)
 

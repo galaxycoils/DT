@@ -568,7 +568,7 @@ int gm_mac_ui_show_onboarding(void) {
         if (!g_onboarding_window) return -1;
         [g_onboarding_window setDelegate:g_ui_controller];
         
-        [g_onboarding_window setTitle:@"Grok-Muse Permissions & Setup"];
+        [g_onboarding_window setTitle:@"DT Permissions & Setup"];
         [g_onboarding_window center];
         
         NSView *cv = [g_onboarding_window contentView];
@@ -579,7 +579,7 @@ int gm_mac_ui_show_onboarding(void) {
         [title setBordered:NO];
         [title setDrawsBackground:NO];
         [title setFont:[NSFont boldSystemFontOfSize:18.0]];
-        [title setStringValue:@"Grok-Muse System Permissions"];
+        [title setStringValue:@"DT System Permissions"];
         [cv addSubview:title];
         
         NSTextField *desc = [[NSTextField alloc] initWithFrame:NSMakeRect(20, 335, 500, 45)];
@@ -588,7 +588,7 @@ int gm_mac_ui_show_onboarding(void) {
         [desc setDrawsBackground:NO];
         [desc setFont:[NSFont systemFontOfSize:12.0]];
         [desc setTextColor:[NSColor secondaryLabelColor]];
-        [desc setStringValue:@"To enable fast computer-use and proactive assistance, Grok-Muse requires permissions in macOS System Settings. Grant each permission below, then click Refresh Status."];
+        [desc setStringValue:@"To enable fast computer-use and proactive assistance, DT requires permissions in macOS System Settings. Grant each permission below, then click Refresh Status."];
         [cv addSubview:desc];
         
         // Row 1: Screen Recording
@@ -756,12 +756,12 @@ int gm_mac_ui_init_tray(void) {
         g_status_item = [NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
         if (!g_status_item) return -1;
         
-        g_status_item.button.title = @"🤖 Grok-Muse";
+        g_status_item.button.title = @"DT";
         
-        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Grok-Muse"];
+        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"DT"];
         
         // 1. Header / title
-        NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:@"Grok-Muse Hybrid Agent" action:nil keyEquivalent:@""];
+        NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:@"DT Hybrid Agent" action:nil keyEquivalent:@""];
         [header setEnabled:NO];
         [menu addItem:header];
         
@@ -814,7 +814,7 @@ int gm_mac_ui_init_tray(void) {
         [menu addItem:[NSMenuItem separatorItem]];
         
         // 8. Quit
-        NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit Grok-Muse"
+        NSMenuItem *quitItem = [[NSMenuItem alloc] initWithTitle:@"Quit DT"
                                                          action:@selector(terminate:)
                                                   keyEquivalent:@"q"];
         [menu addItem:quitItem];
