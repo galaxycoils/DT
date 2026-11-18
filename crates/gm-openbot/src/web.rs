@@ -4855,8 +4855,13 @@ mod tests {
         };
         cfg.openbot.bots_dir = dir.path().join("bots");
         let (tx, _) = broadcast::channel(64);
-        let sup =
-            OpenBotSupervisor::open(cfg.clone(), Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let sup = OpenBotSupervisor::open_with_secret_backend(
+            cfg.clone(),
+            Arc::new(AuditLogger::in_memory()),
+            tx,
+            Arc::new(crate::vault::InMemorySecretBackend::default()),
+        )
+        .unwrap();
         let spaces_server = SpacesWebServer::new(sup.spaces().clone());
         let (spaces_addr, spaces_handle) =
             spaces_server.bind_and_serve("127.0.0.1:0").await.unwrap();
