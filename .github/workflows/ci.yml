@@ -167,6 +167,9 @@ jobs:
         working-directory: grok-muse
         shell: bash
         run: |
+          if ! command -v makensis >/dev/null 2>&1 && [[ ! -f "/c/Program Files (x86)/NSIS/makensis.exe" ]] && [[ ! -f "/c/Program Files/NSIS/makensis.exe" ]]; then
+            choco install nsis -y --no-progress
+          fi
           cargo build --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
           python3 -c '
           import hashlib, json, pathlib, runpy, shutil, subprocess
@@ -177,7 +180,14 @@ jobs:
           out.mkdir(parents=True, exist_ok=True)
           name = "DT-1.0.0-windows-x86_64-setup.exe"
           exe = out / name
-          makensis = shutil.which("makensis") or shutil.which("makensis.exe") or r"C:\Program Files (x86)\NSIS\makensis.exe"
+          candidates = [
+              shutil.which("makensis"),
+              shutil.which("makensis.exe"),
+              "C:/Program Files (x86)/NSIS/makensis.exe",
+              "C:/Program Files/NSIS/makensis.exe",
+              "C:/ProgramData/chocolatey/bin/makensis.exe",
+          ]
+          makensis = next(c for c in candidates if c and pathlib.Path(c).exists())
           subprocess.run([
               makensis,
               "/DVERSION=1.0.0",
