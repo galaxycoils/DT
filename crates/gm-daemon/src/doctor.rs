@@ -1,7 +1,7 @@
 //! Unified DT Doctor engine serving installers, `dt doctor`, standalone `dt-doctor`,
 //! onboarding, Settings, and sanitized Web/Mobile status.
 
-use crate::migration::{CURRENT_DATA_SCHEMA_VERSION, MigrationOutcome, migrate_user_data};
+use crate::migration::{MigrationState, StorageLease, inspect_migration, migrate_user_data};
 use crate::service;
 use chrono::Utc;
 use gm_core::config::GmConfig;
@@ -43,6 +43,7 @@ pub enum FixedRepairAction {
     CreatePrivateStorageDir,
     RemoveStaleSocketOrLock,
     VerifyAndMigrateStorage,
+    RestoreDefaultConfig,
     RepairUserServices,
     QuarantineCorruptDatabase,
     PromptOsElevation,
@@ -117,7 +118,6 @@ pub struct DoctorSanitizedCheck {
 
 impl DoctorReport {
     pub fn sanitized_for_remote(&self) -> DoctorSanitizedReport {
-        let scrubber = SecretScrubber::new();
         DoctorSanitizedReport {
             schema: self.schema,
             run_id: self.run_id.clone(),
@@ -133,7 +133,14 @@ impl DoctorReport {
                     id: c.id.clone(),
                     category: c.category.clone(),
                     outcome: c.outcome,
-                    summary: scrubber.scrub_str(&c.summary),
+                    summary: match c.outcome {
+                        DoctorCheckOutcome::Pass => "Passed",
+                        DoctorCheckOutcome::Repaired => "Repaired",
+                        DoctorCheckOutcome::ActionRequired => "Local action required",
+                        DoctorCheckOutcome::RestartRequired => "Restart required",
+                        DoctorCheckOutcome::Failed => "Failed",
+                    }
+                    .into(),
                 })
                 .collect(),
             restart_required: self.restart_status.required,
@@ -207,61 +214,22 @@ fn save_journal(storage_dir: &Path, journal: &DoctorRunJournal) -> Result<()> {
     Ok(())
 }
 
-/// Remove a stale socket or lock file ONLY after proving ownership and verifying no live writer.
-pub fn remove_stale_socket_if_unowned_live(socket_path: &Path) -> Result<bool> {
-    if !socket_path.exists() {
+#[cfg(unix)]
+fn repair_stale_socket(socket_path: &Path, lock_extension: &str) -> Result<bool> {
+    if !socket_path.try_exists()? {
         return Ok(false);
     }
-    #[cfg(unix)]
-    {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::MetadataExt;
-        let meta = fs::symlink_metadata(socket_path)?;
-        let my_uid = unsafe { libc::geteuid() };
-        if meta.uid() != my_uid {
-            return Err(GmError::SafetyViolation(format!(
-                "Refusing to remove socket {} owned by UID {} (current UID {})",
-                socket_path.display(),
-                meta.uid(),
-                my_uid
-            )));
-        }
-        let lock_path = socket_path.with_extension("helper.lock");
-        if lock_path.exists() {
-            let lock_meta = fs::symlink_metadata(&lock_path)?;
-            if lock_meta.uid() != my_uid {
-                return Err(GmError::SafetyViolation(format!(
-                    "Refusing to touch lock {} owned by UID {}",
-                    lock_path.display(),
-                    lock_meta.uid()
-                )));
-            }
-            let file = OpenOptions::new().read(true).write(true).open(&lock_path)?;
-            if file.try_lock().is_err() {
-                // Live writer holds lock; never unlink!
-                return Ok(false);
-            }
-        }
-        // Probe Unix socket non-destructively before removing.
-        if std::os::unix::net::UnixStream::connect(socket_path).is_ok() {
-            return Ok(false);
-        }
-        fs::remove_file(socket_path)?;
-        Ok(true)
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = socket_path;
-        Ok(false)
-    }
+    let Some(_lease) = gm_core::ipc::try_lock_unix_socket(socket_path, lock_extension)? else {
+        return Ok(false);
+    };
+    gm_core::ipc::remove_stale_unix_socket(socket_path)
 }
 
 fn available_disk_bytes(path: &Path) -> Option<u64> {
-    let probe = if path.exists() {
-        path.to_path_buf()
-    } else {
-        path.parent().unwrap_or(Path::new("/")).to_path_buf()
-    };
+    let probe = path
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .unwrap_or(Path::new("."));
     #[cfg(unix)]
     {
         use std::ffi::CString;
@@ -274,7 +242,33 @@ fn available_disk_bytes(path: &Path) -> Option<u64> {
         }
         None
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetDiskFreeSpaceExW(
+                directory: *const u16,
+                available: *mut u64,
+                total: *mut u64,
+                free: *mut u64,
+            ) -> i32;
+        }
+
+        let wide: Vec<_> = probe.as_os_str().encode_wide().chain([0]).collect();
+        let mut available = 0;
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(
+                wide.as_ptr(),
+                &mut available,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        (ok != 0).then_some(available)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = probe;
         None
@@ -397,11 +391,69 @@ fn check_hypervisor_capability() -> CapabilityStatus {
     }
 }
 
+pub async fn run_doctor_from_config_path(
+    custom_path: Option<&Path>,
+    mode: DoctorMode,
+    resume_run_id: Option<&str>,
+) -> Result<DoctorReport> {
+    match GmConfig::load(custom_path) {
+        Ok(config) => run_doctor(&config, mode, resume_run_id).await,
+        Err(error) => {
+            let path = custom_path
+                .map(Path::to_path_buf)
+                .unwrap_or_else(gm_core::config::default_config_path);
+            let config = GmConfig::default();
+            run_doctor_inner(&config, mode, resume_run_id, Some((&path, &error))).await
+        }
+    }
+}
+
+pub(crate) async fn doctor_status_snapshot(
+    config: &GmConfig,
+) -> std::sync::Arc<parking_lot::RwLock<Option<serde_json::Value>>> {
+    let report = run_doctor(config, DoctorMode::Check, None)
+        .await
+        .ok()
+        .and_then(|report| serde_json::to_value(report.sanitized_for_remote()).ok());
+    std::sync::Arc::new(parking_lot::RwLock::new(report))
+}
+
+fn repair_corrupt_config(path: &Path, config: &GmConfig) -> Result<bool> {
+    let _lease = StorageLease::acquire(&config.storage_dir)?;
+    if !fs::symlink_metadata(path)?.is_file() {
+        return Err(GmError::SafetyViolation(
+            "Configuration must be a regular file".into(),
+        ));
+    }
+    let raw = fs::read(path)?;
+    if serde_json::from_slice::<GmConfig>(&raw).is_ok() {
+        return Ok(false);
+    }
+    let backup = path.with_extension(format!("corrupt-{}.bak", uuid::Uuid::new_v4().simple()));
+    gm_core::storage::atomic_write_private(&backup, &raw)?;
+    if fs::read(path)? != raw {
+        return Err(GmError::Config(
+            "Configuration changed during recovery".into(),
+        ));
+    }
+    config.save_atomic(path)?;
+    Ok(true)
+}
+
 /// Run the unified Doctor engine in Check, Repair, or Resume mode.
 pub async fn run_doctor(
     config: &GmConfig,
     mode: DoctorMode,
     resume_run_id: Option<&str>,
+) -> Result<DoctorReport> {
+    run_doctor_inner(config, mode, resume_run_id, None).await
+}
+
+async fn run_doctor_inner(
+    config: &GmConfig,
+    mode: DoctorMode,
+    resume_run_id: Option<&str>,
+    config_error: Option<(&Path, &GmError)>,
 ) -> Result<DoctorReport> {
     let storage_dir = &config.storage_dir;
     let mut journal = match mode {
@@ -409,8 +461,45 @@ pub async fn run_doctor(
         _ => load_or_create_journal(storage_dir, None)?,
     };
 
-    let apply_repairs = matches!(mode, DoctorMode::Repair | DoctorMode::Resume);
+    let mut apply_repairs = matches!(mode, DoctorMode::Repair | DoctorMode::Resume);
     let mut checks = Vec::new();
+    if let Some((path, error)) = config_error {
+        let attempts = journal
+            .attempts_by_check
+            .entry("configuration".into())
+            .or_default();
+        let mut check = DoctorCheckEntry {
+            id: "configuration".into(),
+            category: "storage".into(),
+            outcome: DoctorCheckOutcome::ActionRequired,
+            attempts: *attempts,
+            summary: format!("DT configuration could not be loaded: {error}"),
+            next_action: Some("Review the DT configuration file, then run Doctor again.".into()),
+            repair_action: Some(FixedRepairAction::RestoreDefaultConfig),
+        };
+        if apply_repairs
+            && *attempts < MAX_REPAIR_ATTEMPTS
+            && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_file())
+        {
+            *attempts += 1;
+            check.attempts = *attempts;
+            match repair_corrupt_config(path, config) {
+                Ok(true) => {
+                    check.outcome = DoctorCheckOutcome::Repaired;
+                    check.summary = "Preserved corrupt configuration and installed defaults".into();
+                    check.next_action = None;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    check.outcome = DoctorCheckOutcome::Failed;
+                    check.summary = format!("Configuration recovery failed: {error}");
+                }
+            }
+        }
+        // The original config could name another storage directory. Limit repairs to the config file.
+        apply_repairs = false;
+        checks.push(check);
+    }
     let mut pending_actions = Vec::new();
     let mut restart_status = RestartStatus {
         required: false,
@@ -517,21 +606,29 @@ pub async fn run_doctor(
             ));
         }
     }
-    // Check stale helper socket safely (never delete live owned sockets)
-    if apply_repairs {
-        match remove_stale_socket_if_unowned_live(&config.socket_path) {
+    // Hold the same lease as each server while checking and removing stale sockets.
+    #[cfg(unix)]
+    for (path, extension) in [
+        (&config.socket_path, "helper.lock"),
+        (&config.daemon_socket_path, "daemon.lock"),
+    ] {
+        if !apply_repairs {
+            break;
+        }
+        match repair_stale_socket(path, extension) {
             Ok(true) => {
                 storage_outcome = DoctorCheckOutcome::Repaired;
                 storage_msg = format!(
                     "{storage_msg}; removed verified stale socket {}",
-                    config.socket_path.display()
+                    path.display()
                 );
             }
             Ok(false) => {}
             Err(e) => {
                 storage_outcome = DoctorCheckOutcome::Failed;
-                storage_msg = format!("Socket ownership check failed: {e}");
+                storage_msg = format!("{storage_msg}; socket ownership check failed: {e}");
                 storage_next = Some("Inspect socket ownership manually.".into());
+                break;
             }
         }
     }
@@ -577,114 +674,87 @@ pub async fn run_doctor(
     });
 
     // 5. Migration & SQLite integrity check
-    let mut mig_attempts = *journal
-        .attempts_by_check
-        .get("migration_state")
-        .unwrap_or(&0);
-    let legacy_dir = gm_core::config::legacy_storage_dir();
-    let mig_entry = if storage_dir.exists() {
-        if apply_repairs && mig_attempts < MAX_REPAIR_ATTEMPTS {
-            mig_attempts += 1;
-            journal
-                .attempts_by_check
-                .insert("migration_state".into(), mig_attempts);
-            match migrate_user_data(
-                legacy_dir.as_deref(),
-                storage_dir,
-                env!("CARGO_PKG_VERSION"),
-                None,
-            ) {
-                Ok(MigrationOutcome {
-                    dual_store_conflict: true,
-                    message,
-                    ..
-                }) => DoctorCheckEntry {
-                    id: "migration_state".into(),
-                    category: "storage".into(),
-                    outcome: DoctorCheckOutcome::ActionRequired,
-                    attempts: mig_attempts,
-                    summary: message,
-                    next_action: Some(
-                        "Choose whether to preserve legacy or DT store in Settings -> Migration before continuing.".into(),
-                    ),
-                    repair_action: Some(FixedRepairAction::VerifyAndMigrateStorage),
-                },
-                Ok(outcome) => DoctorCheckEntry {
-                    id: "migration_state".into(),
-                    category: "storage".into(),
-                    outcome: if outcome.status == "migrated" {
-                        DoctorCheckOutcome::Repaired
-                    } else {
-                        DoctorCheckOutcome::Pass
-                    },
-                    attempts: mig_attempts,
-                    summary: format!(
-                        "{} (schema v{} -> v{CURRENT_DATA_SCHEMA_VERSION})",
-                        outcome.message, outcome.from_schema
-                    ),
-                    next_action: None,
-                    repair_action: Some(FixedRepairAction::VerifyAndMigrateStorage),
-                },
-                Err(e) => DoctorCheckEntry {
-                    id: "migration_state".into(),
-                    category: "storage".into(),
-                    outcome: DoctorCheckOutcome::Failed,
-                    attempts: mig_attempts,
-                    summary: format!("Migration check failed: {e}"),
-                    next_action: Some("Preserve backups and run `dt diagnostics recover-database`.".into()),
-                    repair_action: Some(FixedRepairAction::QuarantineCorruptDatabase),
-                },
-            }
-        } else {
-            // Check integrity read-only
-            let mut db_err = None;
-            for db_name in ["openbot.sqlite", "channels.sqlite", "usage.sqlite3"] {
-                let db_path = storage_dir.join(db_name);
-                if db_path.exists()
-                    && let Err(e) = gm_openbot::check_sqlite_integrity(&db_path)
-                {
-                    db_err = Some(format!("{db_name}: {e}"));
-                    break;
-                }
-            }
-            if let Some(err) = db_err {
-                DoctorCheckEntry {
-                    id: "migration_state".into(),
-                    category: "storage".into(),
-                    outcome: if mig_attempts >= MAX_REPAIR_ATTEMPTS {
-                        DoctorCheckOutcome::Failed
-                    } else {
-                        DoctorCheckOutcome::ActionRequired
-                    },
-                    attempts: mig_attempts.max(1),
-                    summary: format!("Database integrity failure: {err}"),
-                    next_action: Some("Run `dt diagnostics recover-database` to quarantine with preserved backups.".into()),
-                    repair_action: Some(FixedRepairAction::QuarantineCorruptDatabase),
-                }
-            } else {
-                DoctorCheckEntry {
-                    id: "migration_state".into(),
-                    category: "storage".into(),
-                    outcome: DoctorCheckOutcome::Pass,
-                    attempts: 1,
-                    summary: "SQLite stores passed integrity check".into(),
-                    next_action: None,
-                    repair_action: None,
-                }
-            }
-        }
-    } else {
-        DoctorCheckEntry {
-            id: "migration_state".into(),
-            category: "storage".into(),
-            outcome: DoctorCheckOutcome::Pass,
-            attempts: 1,
-            summary: "No existing stores yet; fresh schema will initialize on first start".into(),
-            next_action: None,
-            repair_action: None,
-        }
+    let legacy = (storage_dir == &gm_core::config::default_storage_dir())
+        .then(gm_core::config::legacy_storage_dir)
+        .flatten();
+    let mut migration_check = DoctorCheckEntry {
+        id: "migration_state".into(),
+        category: "storage".into(),
+        outcome: DoctorCheckOutcome::Pass,
+        attempts: 1,
+        summary: "SQLite stores passed integrity check and the schema is current".into(),
+        next_action: None,
+        repair_action: None,
     };
-    checks.push(mig_entry);
+    let state = inspect_migration(legacy.as_deref(), storage_dir).and_then(|state| {
+        for name in [
+            "openbot.sqlite",
+            "channels.sqlite",
+            "usage.sqlite3",
+            "memory.sqlite",
+        ] {
+            let path = storage_dir.join(name);
+            if path.try_exists()? {
+                gm_openbot::check_sqlite_integrity(&path)?;
+            }
+        }
+        Ok(state)
+    });
+    match state {
+        Ok(MigrationState::Fresh) => {
+            migration_check.summary = "No existing data requires migration".into();
+        }
+        Ok(MigrationState::Current) => {}
+        Ok(MigrationState::Conflict) => {
+            migration_check.outcome = DoctorCheckOutcome::ActionRequired;
+            migration_check.summary = "Separate legacy and DT stores both contain data".into();
+            migration_check.next_action =
+                Some("Preserve both stores before choosing which to activate.".into());
+        }
+        Ok(MigrationState::Pending) => {
+            migration_check.outcome = DoctorCheckOutcome::ActionRequired;
+            migration_check.summary = "Existing data requires a schema migration".into();
+            migration_check.next_action =
+                Some("Stop DT services and run `dt doctor repair`.".into());
+            migration_check.repair_action = Some(FixedRepairAction::VerifyAndMigrateStorage);
+            let attempts = journal
+                .attempts_by_check
+                .entry("migration_state".into())
+                .or_default();
+            if apply_repairs && *attempts < MAX_REPAIR_ATTEMPTS {
+                *attempts += 1;
+                match migrate_user_data(
+                    legacy.as_deref(),
+                    storage_dir,
+                    env!("CARGO_PKG_VERSION"),
+                    None,
+                ) {
+                    Ok(result) if !result.dual_store_conflict => {
+                        migration_check.outcome = DoctorCheckOutcome::Repaired;
+                        migration_check.summary = result.message;
+                        migration_check.next_action = None;
+                    }
+                    Ok(result) => migration_check.summary = result.message,
+                    Err(error) => {
+                        migration_check.outcome = DoctorCheckOutcome::Failed;
+                        migration_check.summary = format!("Migration failed: {error}");
+                    }
+                }
+            } else if apply_repairs {
+                migration_check.outcome = DoctorCheckOutcome::Failed;
+                migration_check.summary = "Migration reached the repair attempt limit".into();
+            }
+            migration_check.attempts = *attempts;
+        }
+        Err(error) => {
+            migration_check.outcome = DoctorCheckOutcome::Failed;
+            migration_check.summary = format!("Storage check failed: {error}");
+            migration_check.next_action = Some(
+                "Preserve the profile and review its schema marker and database integrity.".into(),
+            );
+        }
+    }
+    checks.push(migration_check);
 
     // 6. Real daemon / helper handshake check
     let helper_client = IpcPlatformClient::new(&config.socket_path);
@@ -845,8 +915,7 @@ pub async fn run_doctor(
         redacted_log_location: None,
     };
 
-    // Persist redacted log & journal if storage dir exists or was repaired.
-    if storage_dir.exists() {
+    if mode != DoctorMode::Check && storage_dir.is_dir() {
         let _ = save_journal(storage_dir, &journal);
         let log_path = journal_dir(storage_dir).join(format!("{}.log", journal.run_id));
         let scrubber = SecretScrubber::new();
@@ -931,6 +1000,58 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn doctor_reports_then_preserves_invalid_config() {
+        let root = tempfile::tempdir().unwrap();
+        let config = GmConfig {
+            storage_dir: root.path().join("storage"),
+            socket_path: root.path().join("helper.sock"),
+            daemon_socket_path: root.path().join("daemon.sock"),
+            ..GmConfig::default()
+        };
+        let path = root.path().join("config.json");
+        let broken = b"{invalid";
+        fs::write(&path, broken).unwrap();
+        let error = GmConfig::load(Some(&path)).unwrap_err();
+        let check = run_doctor_inner(&config, DoctorMode::Check, None, Some((&path, &error)))
+            .await
+            .unwrap();
+        assert_eq!(check.checks[0].outcome, DoctorCheckOutcome::ActionRequired);
+        assert_eq!(fs::read(&path).unwrap(), broken);
+        assert!(!config.storage_dir.exists());
+
+        let report = run_doctor_inner(&config, DoctorMode::Repair, None, Some((&path, &error)))
+            .await
+            .unwrap();
+        assert_eq!(report.checks[0].outcome, DoctorCheckOutcome::Repaired);
+        assert!(GmConfig::load(Some(&path)).is_ok());
+        let backup = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "bak"))
+            .unwrap();
+        assert_eq!(fs::read(backup).unwrap(), broken);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_preserves_live_sockets_and_unrelated_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("daemon.sock");
+        let lease = gm_core::ipc::try_lock_unix_socket(&path, "daemon.lock")
+            .unwrap()
+            .unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        assert!(!repair_stale_socket(&path, "daemon.lock").unwrap());
+        drop(lease);
+        assert!(!repair_stale_socket(&path, "daemon.lock").unwrap());
+        drop(listener);
+        assert!(repair_stale_socket(&path, "daemon.lock").unwrap());
+        fs::write(&path, b"keep").unwrap();
+        assert!(repair_stale_socket(&path, "daemon.lock").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
     }
 
     #[test]

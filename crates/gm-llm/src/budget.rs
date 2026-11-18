@@ -766,7 +766,8 @@ impl Default for ReleaseBudgetLedger {
             "macos-aarch64",
             "macos-x86_64",
             "windows-x86_64",
-            "linux-x86_64",
+            "linux-x86_64-x11",
+            "linux-x86_64-wayland",
         ] {
             allocations.insert(
                 target.to_string(),
@@ -787,15 +788,6 @@ impl Default for ReleaseBudgetLedger {
                 uncertain_reserved_usd: 0.0,
             },
         );
-        allocations.insert(
-            "unallocated-reserve".to_string(),
-            ReleaseAllocation {
-                allocated_usd: 15.0,
-                reserved_usd: 0.0,
-                spent_usd: 0.0,
-                uncertain_reserved_usd: 0.0,
-            },
-        );
         Self {
             schema: 1,
             release_version: "1.0.0".to_string(),
@@ -804,8 +796,9 @@ impl Default for ReleaseBudgetLedger {
             allocations,
             transfers: Vec::new(),
             entries: Vec::new(),
-            notes: "US$100 release-wide inference cap: US$15 per desktop target + US$25 shared tests + US$15 reserve."
-                .to_string(),
+            notes:
+                "US$100 release-wide inference cap: US$15 per desktop target + US$25 shared tests."
+                    .to_string(),
         }
     }
 }
@@ -1020,10 +1013,10 @@ mod release_ledger_tests {
         );
         assert_eq!(ledger.allocations["macos-aarch64"].remaining_usd(), 5.0);
 
-        // Record transfer from unallocated-reserve to macos-aarch64.
+        // Record transfer from shared-tests to macos-aarch64.
         ledger
             .transfer(
-                "unallocated-reserve",
+                "shared-tests",
                 "macos-aarch64",
                 5.0,
                 "Additional ARM64 certification run",

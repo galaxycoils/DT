@@ -4,7 +4,7 @@ This document distinguishes implementation checks from account certification for
 
 | Provider | Connection and model source | Development evidence | Real account inference |
 |---|---|---|---|
-| ChatGPT | Grok Muse public-client registration; account `/v1/models`; Responses streaming | Registration/PKCE checks, signed identity fixtures, state/nonce/audience/expiry/account checks, completed-stream fixtures, cancellation and revision checks | Pending user sign-in and plan permission |
+| ChatGPT | DT public-client registration (existing OAuth client ID); account `/v1/models`; Responses streaming | Registration/PKCE checks, signed identity fixtures, state/nonce/audience/expiry/account checks, completed-stream fixtures, cancellation and revision checks | Pending user sign-in and plan permission |
 | OpenAI API | Separate API key; `/v1/models`; Responses | Shared discovery and inference transport tests | Pending API key |
 | Meta | API key; `/v1/models`; Chat Completions | Shared provider fixtures and discovery schema | Pending API key |
 | xAI | API key; `/v1/language-models`; Chat Completions | Language catalog schema and shared transport fixtures | Pending API key |
@@ -13,7 +13,7 @@ This document distinguishes implementation checks from account certification for
 | Nous Portal | Device grant, immediate inference renewal, paid/welcome inference API | OAuth token/renewal fixtures and destination restrictions | Pending account authorization |
 | Custom/local | Configured `/models`; Chat Completions or Responses | Actual loopback HTTP catalog and streamed reply; denied-model failure; durable state/revision tests | Validated against a deterministic local server; external servers require their own test |
 
-The development machine had no configured provider keys or Grok Muse configuration. Foreign CLI credentials are not imported. Sign-in must complete with the user's provider account.
+The development machine had no configured provider keys or DT configuration. Foreign CLI credentials are not imported. Sign-in must complete with the user's provider account.
 
 ## What the UI verifies
 

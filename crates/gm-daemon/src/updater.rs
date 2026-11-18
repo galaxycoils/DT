@@ -251,16 +251,119 @@ pub fn parse_github_release_json(
     })
 }
 
+fn trusted_release_key() -> Result<String> {
+    let compiled = option_env!("GM_RELEASE_PUBLIC_KEY_HEX").map(str::to_owned);
+    #[cfg(debug_assertions)]
+    let compiled = compiled.or_else(|| std::env::var("GM_UPDATE_TRUSTED_PUBLIC_KEY_HEX").ok());
+    compiled.ok_or_else(|| GmError::Config("No pinned DT update publisher key".into()))
+}
+
+async fn trusted_update_metadata(
+    client: &reqwest::Client,
+    repo: &str,
+) -> Result<RenewableUpdateMetadata> {
+    let parts: Vec<_> = repo.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err(GmError::Config("Expected a GitHub owner/repository".into()));
+    }
+    let key = trusted_release_key()?;
+    let base = format!("https://raw.githubusercontent.com/{repo}/{DEFAULT_METADATA_BRANCH}");
+    let raw = bounded_release_fetch(
+        client,
+        &format!("{base}/dt-update-metadata.json"),
+        128 * 1024,
+    )
+    .await?;
+    let signature =
+        bounded_release_fetch(client, &format!("{base}/dt-update-metadata.sig"), 4096).await?;
+    let metadata = verify_renewable_metadata_with_keys(&raw, &signature, &[&key], repo, 1)?;
+    let storage = gm_core::config::default_storage_dir().join("update-trust");
+    gm_core::storage::ensure_private_dir(&storage)?;
+    let record = storage.join(format!("{}+{}.json", parts[0], parts[1]));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(record.with_extension("lock"))?;
+    file.lock()?;
+    remember_update_sequence(&record, &metadata, &raw)?;
+    Ok(metadata)
+}
+
+fn remember_update_sequence(
+    record: &Path,
+    metadata: &RenewableUpdateMetadata,
+    raw: &[u8],
+) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    let hash = hex::encode(Sha256::digest(raw));
+    let previous = match std::fs::read(record) {
+        Ok(bytes) => Some(serde_json::from_slice::<(u64, String)>(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some((sequence, previous_hash)) = previous {
+        if metadata.sequence < sequence || (metadata.sequence == sequence && hash != previous_hash)
+        {
+            return Err(GmError::SafetyViolation(
+                "Update metadata rollback or sequence reuse rejected".into(),
+            ));
+        }
+        if metadata.sequence == sequence {
+            return Ok(());
+        }
+    }
+    gm_core::storage::atomic_write_private(record, &serde_json::to_vec(&(metadata.sequence, hash))?)
+}
+
+fn asset_for_update<'a>(
+    metadata: &'a RenewableUpdateMetadata,
+    version: &str,
+    file_name: &str,
+) -> Result<&'a SignedReleaseAsset> {
+    if version != metadata.version {
+        return Err(GmError::SafetyViolation(
+            "GitHub release does not match signed update metadata".into(),
+        ));
+    }
+    metadata
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.name == file_name
+                && asset.os == std::env::consts::OS
+                && asset.architecture == std::env::consts::ARCH
+        })
+        .ok_or_else(|| {
+            GmError::SafetyViolation("Signed update metadata has no package for this target".into())
+        })
+}
+
 /// Fetch latest release metadata from GitHub Releases API.
 pub async fn check_latest_release(
     repo: &str,
     client_opt: Option<&reqwest::Client>,
 ) -> Result<UpdateCheckResult> {
     let current_version = env!("CARGO_PKG_VERSION");
-    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
-
-    let default_client = reqwest::Client::new();
+    let default_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| GmError::Platform(e.to_string()))?;
     let client = client_opt.unwrap_or(&default_client);
+    let metadata = trusted_update_metadata(client, repo).await?;
+    let url = format!(
+        "https://api.github.com/repos/{repo}/releases/tags/v{}",
+        metadata.version
+    );
 
     info!("Checking for updates at {}", url);
 
@@ -304,7 +407,18 @@ pub async fn check_latest_release(
         .await
         .map_err(|e| GmError::Platform(format!("Failed reading response body: {e}")))?;
 
-    parse_github_release_json(&json_text, current_version)
+    let mut result = parse_github_release_json(&json_text, current_version)?;
+    let name = result.dmg_asset_name.as_deref().ok_or_else(|| {
+        GmError::SafetyViolation("GitHub release has no package for this target".into())
+    })?;
+    let asset = asset_for_update(&metadata, &result.latest_version, name)?;
+    if result.dmg_size_bytes != Some(asset.size_bytes) {
+        return Err(GmError::SafetyViolation(
+            "GitHub package size differs from signed metadata".into(),
+        ));
+    }
+    result.expected_sha256 = Some(asset.sha256.clone());
+    Ok(result)
 }
 
 /// Download DMG release asset and verify its SHA-256 checksum with streaming O(1) memory.
@@ -312,13 +426,32 @@ pub async fn download_and_verify_update(
     check_result: &UpdateCheckResult,
     target_dir: &Path,
     client_opt: Option<&reqwest::Client>,
+    repo: &str,
 ) -> Result<(PathBuf, bool)> {
-    let key=option_env!("GM_RELEASE_PUBLIC_KEY_HEX").map(str::to_owned)
-        .or_else(||std::env::var("GM_UPDATE_TRUSTED_PUBLIC_KEY_HEX").ok())
-        .ok_or_else(||GmError::Config("This development build has no trusted release signing key. Configure GM_UPDATE_TRUSTED_PUBLIC_KEY_HEX from an independently verified publisher key.".into()))?;
-    download_with_trusted_key(check_result, target_dir, client_opt, &key).await
+    let default_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|error| GmError::Platform(error.to_string()))?;
+    let client = client_opt.unwrap_or(&default_client);
+    let metadata = trusted_update_metadata(client, repo).await?;
+    let file_name = check_result
+        .dmg_asset_name
+        .as_deref()
+        .ok_or_else(|| GmError::Config("Release package name is missing".into()))?;
+    let asset = asset_for_update(&metadata, &check_result.latest_version, file_name)?;
+    if is_newer_version(&metadata.version, env!("CARGO_PKG_VERSION")) {
+        return Err(GmError::SafetyViolation(
+            "Download would downgrade this DT installation".into(),
+        ));
+    }
+    let url = format!(
+        "https://github.com/{repo}/releases/download/v{}/{file_name}",
+        metadata.version
+    );
+    download_signed_asset(client, &url, target_dir, asset).await
 }
 
+#[cfg(test)]
 async fn download_with_trusted_key(
     check_result: &UpdateCheckResult,
     target_dir: &Path,
@@ -375,13 +508,23 @@ async fn download_with_trusted_key(
         ));
     }
     let asset = asset[0];
+    download_signed_asset(client, dmg_url, target_dir, asset).await
+}
+
+async fn download_signed_asset(
+    client: &reqwest::Client,
+    dmg_url: &str,
+    target_dir: &Path,
+    asset: &SignedReleaseAsset,
+) -> Result<(PathBuf, bool)> {
+    let file_name = &asset.name;
     if asset.size_bytes == 0 || asset.size_bytes > 2 * 1024 * 1024 * 1024 {
         return Err(GmError::SafetyViolation(
             "Release exceeds download limits".into(),
         ));
     }
     std::fs::create_dir_all(target_dir)?;
-    let target_path = target_dir.join(&file_name);
+    let target_path = target_dir.join(file_name);
     let temp_path = target_dir.join(format!(".gm-update-{}", uuid::Uuid::new_v4()));
     struct Temp(std::path::PathBuf);
     impl Drop for Temp {
@@ -494,7 +637,11 @@ pub fn verify_renewable_metadata_with_keys(
     }
 
     let meta: RenewableUpdateMetadata = serde_json::from_slice(raw)?;
-    if meta.schema != 1 || meta.assets.is_empty() || meta.assets.len() > 32 {
+    if meta.schema != 1
+        || meta.assets.is_empty()
+        || meta.assets.len() > 32
+        || parse_version(&meta.version).is_none()
+    {
         return Err(GmError::SafetyViolation(
             "Unsupported or empty update metadata".into(),
         ));
@@ -654,7 +801,7 @@ pub fn print_installation_guidance(dmg_path: &Path, result: &UpdateCheckResult) 
             dmg_path.display()
         );
         println!(
-            "Quit Grok Muse before replacing the installed application. Keep the previous installation for manual rollback. Application data is stored separately."
+            "Quit DT before replacing the installed application. Keep the previous installation for manual rollback. Application data is stored separately."
         );
         return;
     }
@@ -669,7 +816,7 @@ pub fn print_installation_guidance(dmg_path: &Path, result: &UpdateCheckResult) 
     println!("  Release Tag: {}", result.release_tag);
     println!();
     println!(
-        "  Stop Grok Muse and its services before replacing applications. Retain the previous package and a closed-app data backup for manual recovery."
+        "  Stop DT and its services before replacing applications. Retain the previous package and a closed-app data backup for manual recovery."
     );
     println!("  To complete installation, run the following commands:");
     println!();
@@ -677,11 +824,11 @@ pub fn print_installation_guidance(dmg_path: &Path, result: &UpdateCheckResult) 
     println!("     hdiutil attach \"{}\"", dmg_path.display());
     println!();
     println!("  2. Install applications to /Applications:");
-    println!("     cp -R /Volumes/Grok-Muse/GrokMuse.app /Applications/");
-    println!("     cp -R /Volumes/Grok-Muse/GrokMuseCUHelper.app /Applications/");
+    println!("     cp -R /Volumes/DT/DT.app /Applications/");
+    println!("     cp -R /Volumes/DT/DTCUHelper.app /Applications/");
     println!();
     println!("  3. Unmount the disk image:");
-    println!("     hdiutil detach /Volumes/Grok-Muse");
+    println!("     hdiutil detach /Volumes/DT");
     println!();
     println!("  4. Reload background LaunchAgent services:");
     println!("     gm service install");
@@ -733,7 +880,7 @@ pub async fn run_update(
     }
 
     println!("\n===============================================================================");
-    println!("  Grok-Muse Update Client (Action A11)");
+    println!("  DT Updater (Action A11)");
     println!("===============================================================================");
     println!("  Repository:       {}", repo);
     println!("  Current Version:  v{}", result.current_version);
@@ -759,7 +906,7 @@ pub async fn run_update(
 
     if !result.update_available && !force {
         println!(
-            "\n  Status: Grok-Muse is up to date (v{}).",
+            "\n  Status: DT is up to date (v{}).",
             result.current_version
         );
         return Ok(());
@@ -800,7 +947,7 @@ pub async fn run_update(
 
     println!("\n  Downloading update asset...");
     let (dmg_path, checksum_verified) =
-        download_and_verify_update(&result, &target_dir, None).await?;
+        download_and_verify_update(&result, &target_dir, None, &repo).await?;
 
     println!("  Downloaded to: {}", dmg_path.display());
     println!(
@@ -1067,6 +1214,17 @@ mod signed_manifest_tests {
         .unwrap();
         assert_eq!(verified.version, "1.0.0");
 
+        let trust_dir = tempfile::tempdir().unwrap();
+        let record = trust_dir.path().join("sequence.json");
+        remember_update_sequence(&record, &verified, &raw).unwrap();
+        remember_update_sequence(&record, &verified, &raw).unwrap();
+        assert!(remember_update_sequence(&record, &verified, b"changed").is_err());
+        let older = RenewableUpdateMetadata {
+            sequence: 4,
+            ..verified
+        };
+        assert!(remember_update_sequence(&record, &older, &raw).is_err());
+
         // Rejects rolled-back metadata sequence.
         assert!(
             verify_renewable_metadata_with_keys(
@@ -1248,12 +1406,12 @@ impl gm_openbot::CompanionUpdates for CompanionUpdateService {
             return Ok(serde_json::json!({"update_available": false}));
         }
         let (path, verified) =
-            download_and_verify_update(&latest, &self.download_dir, None).await?;
+            download_and_verify_update(&latest, &self.download_dir, None, DEFAULT_REPO).await?;
         Ok(serde_json::json!({
             "path": path,
             "verified": verified,
             "release_url": latest.release_url,
-            "next_step": "Open the verified installer, then restart Grok Muse.",
+            "next_step": "Open the verified installer, then restart DT.",
         }))
     }
 }

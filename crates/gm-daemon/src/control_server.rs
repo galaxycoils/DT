@@ -510,12 +510,12 @@ impl DaemonControlServer {
         let path = self.shared_config.read().daemon_socket_path.clone();
         #[cfg(unix)]
         {
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
-            }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            let _lease = gm_core::ipc::try_lock_unix_socket(&path, "daemon.lock")?
+                .ok_or_else(|| GmError::Config("Another daemon owns this socket".into()))?;
+            gm_core::ipc::remove_stale_unix_socket(&path)?;
 
             let listener = UnixListener::bind(&path)?;
             {
@@ -1100,6 +1100,8 @@ impl DaemonControlServerState {
                             .roster()
                             .workspace_sandbox(&bot_id)?
                             .preview_shared_file(&path)?;
+                        let preview =
+                            gm_openbot::attachments::preview_attachment_bounded(&path, &bytes)?;
                         use base64::Engine as _;
                         let (text, encoded) = match std::str::from_utf8(&bytes).map(str::to_string)
                         {
@@ -1110,7 +1112,7 @@ impl DaemonControlServerState {
                             ),
                         };
                         Ok::<_, GmError>(
-                            serde_json::json!({"bot_id":bot_id,"path":path,"text":text,"bytes_base64":encoded}),
+                            serde_json::json!({"bot_id":bot_id,"path":path,"text":text,"bytes_base64":encoded,"preview":preview}),
                         )
                     })();
                     let payload = match result {
@@ -3401,8 +3403,13 @@ impl DaemonControlServerState {
                         }
                         "health" => {
                             let cfg_snap = self.shared_config.read().clone();
-                            let rep = crate::diagnostics::run_health_diagnostics(&cfg_snap);
-                            serde_json::to_value(rep).map_err(Into::into)
+                            crate::doctor::run_doctor(
+                                &cfg_snap,
+                                crate::doctor::DoctorMode::Check,
+                                None,
+                            )
+                            .await
+                            .and_then(|report| serde_json::to_value(report).map_err(Into::into))
                         }
                         "support_bundle" => {
                             let cfg_snap = self.shared_config.read().clone();

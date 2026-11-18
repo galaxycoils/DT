@@ -85,16 +85,19 @@ fn sha256_file(path: &Path) -> Result<(String, u64)> {
 
 fn read_schema_marker(storage_dir: &Path) -> Result<Option<u32>> {
     let marker = storage_dir.join("dt-schema-version.json");
-    if !marker.exists() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&marker)?;
+    let raw = match fs::read_to_string(&marker) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let val: serde_json::Value = serde_json::from_str(&raw)
         .map_err(|e| GmError::Config(format!("Corrupt schema marker {}: {e}", marker.display())))?;
     let ver = val["schema_version"]
         .as_u64()
-        .ok_or_else(|| GmError::Config("Missing schema_version in marker".into()))?;
-    Ok(Some(ver as u32))
+        .and_then(|v| u32::try_from(v).ok())
+        .filter(|&v| v > 0)
+        .ok_or_else(|| GmError::Config("Invalid schema_version in marker".into()))?;
+    Ok(Some(ver))
 }
 
 fn write_schema_marker(storage_dir: &Path, version: u32, package_version: &str) -> Result<()> {
@@ -140,7 +143,13 @@ fn dir_has_user_data(dir: &Path) -> bool {
     entries.flatten().any(|entry| {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        !name.starts_with('.') && name != "dt-schema-version.json"
+        !name.starts_with('.')
+            && !name.ends_with(".sock")
+            && !name.ends_with(".lock")
+            && !matches!(
+                name.as_ref(),
+                "dt-schema-version.json" | "doctor-runs" | "snapshots"
+            )
     })
 }
 
@@ -208,6 +217,52 @@ pub fn create_rollback_snapshot(
     Ok(snapshot)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MigrationState {
+    Current,
+    Fresh,
+    Pending,
+    Conflict,
+}
+
+fn distinct_legacy<'a>(legacy: Option<&'a Path>, target: &Path) -> Option<&'a Path> {
+    legacy.filter(|legacy| {
+        *legacy != target
+            && !matches!(
+                (legacy.canonicalize(), target.canonicalize()),
+                (Ok(left), Ok(right)) if left == right
+            )
+    })
+}
+
+fn reject_downgrade(storage_dir: &Path) -> Result<Option<u32>> {
+    let version = read_schema_marker(storage_dir)?;
+    if let Some(version) = version
+        && version > CURRENT_DATA_SCHEMA_VERSION
+    {
+        return Err(GmError::Config(format!(
+            "Schema downgrade refused: store schema v{version} is newer than DT binary schema v{CURRENT_DATA_SCHEMA_VERSION}"
+        )));
+    }
+    Ok(version)
+}
+
+pub(crate) fn inspect_migration(legacy: Option<&Path>, target: &Path) -> Result<MigrationState> {
+    let version = reject_downgrade(target)?;
+    if version == Some(CURRENT_DATA_SCHEMA_VERSION) {
+        return Ok(MigrationState::Current);
+    }
+    let legacy = distinct_legacy(legacy, target).filter(|path| dir_has_user_data(path));
+    if let Some(path) = legacy {
+        reject_downgrade(path)?;
+    }
+    Ok(match (legacy.is_some(), dir_has_user_data(target)) {
+        (true, true) => MigrationState::Conflict,
+        (false, false) if version.is_none() => MigrationState::Fresh,
+        _ => MigrationState::Pending,
+    })
+}
+
 /// Migrate from v0.7.0/legacy `grok-muse` stores into `dt` while preserving custom paths,
 /// preventing schema downgrades, and halting safely if both legacy and DT stores contain data.
 pub fn migrate_user_data(
@@ -216,28 +271,24 @@ pub fn migrate_user_data(
     package_version: &str,
     choice: Option<DualStoreChoice>,
 ) -> Result<MigrationOutcome> {
-    if let Some(existing) = read_schema_marker(dt_storage_dir)? {
-        if existing > CURRENT_DATA_SCHEMA_VERSION {
-            return Err(GmError::Config(format!(
-                "Schema downgrade refused: store schema v{existing} is newer than DT binary schema v{CURRENT_DATA_SCHEMA_VERSION}"
-            )));
-        }
-        if existing == CURRENT_DATA_SCHEMA_VERSION {
-            return Ok(MigrationOutcome {
-                status: "up_to_date".into(),
-                from_schema: existing,
-                to_schema: CURRENT_DATA_SCHEMA_VERSION,
-                snapshot_id: None,
-                dual_store_conflict: false,
-                message: "User data schema is already current".into(),
-            });
-        }
+    let _lease = StorageLease::acquire(dt_storage_dir)?;
+    let legacy_dir = distinct_legacy(legacy_dir, dt_storage_dir);
+    let migration = inspect_migration(legacy_dir, dt_storage_dir)?;
+    if migration == MigrationState::Current {
+        return Ok(MigrationOutcome {
+            status: "up_to_date".into(),
+            from_schema: CURRENT_DATA_SCHEMA_VERSION,
+            to_schema: CURRENT_DATA_SCHEMA_VERSION,
+            snapshot_id: None,
+            dual_store_conflict: false,
+            message: "User data schema is already current".into(),
+        });
     }
 
     let legacy_has_data = legacy_dir.is_some_and(dir_has_user_data);
     let dt_has_data = dir_has_user_data(dt_storage_dir);
 
-    if legacy_has_data && dt_has_data && choice.is_none() {
+    if migration == MigrationState::Conflict && choice.is_none() {
         return Ok(MigrationOutcome {
             status: "conflict_requires_choice".into(),
             from_schema: 1,
@@ -254,8 +305,6 @@ pub fn migrate_user_data(
         });
     }
 
-    gm_core::storage::ensure_private_dir(dt_storage_dir)?;
-    let _lease = StorageLease::acquire(dt_storage_dir)?;
     let snapshots_root = dt_storage_dir.join("snapshots");
     let source_for_snapshot = match (legacy_dir, legacy_has_data, dt_has_data, choice) {
         (Some(legacy), true, false, _)
@@ -263,7 +312,12 @@ pub fn migrate_user_data(
         _ => dt_storage_dir,
     };
 
-    let from_schema = read_schema_marker(source_for_snapshot)?.unwrap_or(1);
+    let _source_lease = if source_for_snapshot != dt_storage_dir {
+        Some(StorageLease::acquire(source_for_snapshot)?)
+    } else {
+        None
+    };
+    let from_schema = reject_downgrade(source_for_snapshot)?.unwrap_or(1);
     let snapshot = if dir_has_user_data(source_for_snapshot) {
         let snap =
             create_rollback_snapshot_unlocked(source_for_snapshot, "0.7.0", &snapshots_root)?;
@@ -423,6 +477,26 @@ pub fn restore_rollback_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_place_migration_is_pending_then_current_and_refuses_downgrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        fs::write(path.join("config.json"), b"{}").unwrap();
+        assert_eq!(
+            inspect_migration(Some(path), path).unwrap(),
+            MigrationState::Pending
+        );
+        let outcome = migrate_user_data(Some(path), path, "1.0.0", None).unwrap();
+        assert!(!outcome.dual_store_conflict);
+        assert!(outcome.snapshot_id.is_some());
+        assert_eq!(
+            inspect_migration(Some(path), path).unwrap(),
+            MigrationState::Current
+        );
+        write_schema_marker(path, 999, "9.0.0").unwrap();
+        assert!(inspect_migration(Some(path), path).is_err());
+    }
 
     #[test]
     fn test_migration_dual_store_conflict_and_rollback() {

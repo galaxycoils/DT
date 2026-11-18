@@ -638,7 +638,7 @@ pub enum TeamSubcommand {
     /// Export current team roster, channels, and routines to a portable JSON template
     Export {
         /// Team name
-        #[arg(long, default_value = "Grok Muse Team")]
+        #[arg(long, default_value = "DT Team")]
         name: String,
         /// Description
         #[arg(long, default_value = "Exported team configuration")]
@@ -824,7 +824,7 @@ pub async fn run_permissions(
     }
 
     println!("\n============================================================");
-    println!("             Grok-Muse macOS Permissions Status             ");
+    println!("             DT macOS Permissions Status             ");
     println!("============================================================");
 
     let format_row = |name: &str, granted: bool, pane: PrivacyPane| {
@@ -872,9 +872,9 @@ pub async fn run_permissions(
 
 pub async fn run_onboard(check_only: bool) -> Result<()> {
     println!("\n╔══════════════════════════════════════════════════════════╗");
-    println!("║           Grok-Muse Interactive Onboarding Guide         ║");
+    println!("║           DT Interactive Onboarding Guide         ║");
     println!("╚══════════════════════════════════════════════════════════╝");
-    println!("Grok-Muse combines low-latency macOS computer-use with a");
+    println!("DT combines low-latency macOS computer-use with a");
     println!("proactive personal agent. Let's verify your system setup.\n");
 
     // 1. TCC Permissions
@@ -926,25 +926,13 @@ pub async fn run_onboard(check_only: bool) -> Result<()> {
         println!("  ○ xAI Grok API key   : Not configured (Optional: export XAI_API_KEY=...)");
     }
 
-    // 3. Helper & Daemon status
-    println!("\n▶ Step 3: Checking Background Helper & Daemon Architecture");
-    let config = GmConfig::load(None)?;
-    let helper_socket = &config.socket_path;
-    if helper_socket.exists() {
-        println!("  ✔ CU Helper socket   : Active at {:?}", helper_socket);
-    } else {
-        println!(
-            "  ○ CU Helper socket   : Idle (Started automatically or via GrokMuseCUHelper.app)"
-        );
-    }
-
-    // 4. Summary
-    println!("\n════════════════════════════════════════════════════════════");
-    if perms.all_granted() {
-        println!("🎉 Onboarding complete! Grok-Muse is fully configured and ready.");
-    } else {
-        println!("⚠️  Some permissions are pending. After toggling switches in");
-        println!("    System Settings, verify anytime with: gm permissions");
+    let report = run_doctor_from_config_path(None, DoctorMode::Check, None).await?;
+    println!(
+        "\nDT installation readiness: {:?}",
+        report.installation_readiness
+    );
+    for action in report.pending_actions {
+        println!("  - {action}");
     }
     println!("\nUseful Commands:");
     println!("  • Execute a task:       gm do \"Open Notes and add meeting notes\"");
@@ -1044,10 +1032,7 @@ pub async fn run_do(instruction: &str, config_path: Option<PathBuf>) -> Result<(
     let _runtime_lease = gm_openbot::runtime::RuntimeLease::acquire(&config.storage_dir)?;
     let _ = ensure_helper_running(&config).await;
 
-    println!(
-        "==> Running Grok-Muse computer-use task: \"{}\"",
-        instruction
-    );
+    println!("==> Running DT computer-use task: \"{}\"", instruction);
     let audit_log = AuditLogger::default_logger().unwrap_or_else(|_| AuditLogger::in_memory());
     let kill_switch = KillSwitch::new();
     let blocklist = BlocklistManager::new(&config.safety.blocklisted_apps);
@@ -1119,7 +1104,7 @@ pub async fn run_do(instruction: &str, config_path: Option<PathBuf>) -> Result<(
 
 pub async fn run_status() -> Result<()> {
     println!("\n============================================================");
-    println!("                Grok-Muse System Status                     ");
+    println!("                DT System Status                     ");
     println!("============================================================");
 
     let perms = check_all_permissions();
@@ -1166,7 +1151,7 @@ pub async fn run_kill() -> Result<()> {
 }
 
 pub async fn run_kill_with_config(_config: &GmConfig) -> Result<()> {
-    println!("🚨 Grok-Muse Emergency Kill Switch Triggered");
+    println!("🚨 DT Emergency Kill Switch Triggered");
 
     let daemon_kill = async {
         #[cfg(unix)]
@@ -1230,7 +1215,7 @@ pub async fn run_kill_with_config(_config: &GmConfig) -> Result<()> {
     Ok(())
 }
 
-pub const LEGACY_REPL_SYSTEM: &str = "You are Grok-Muse, a fast computer-use personal assistant for macOS. \
+pub const LEGACY_REPL_SYSTEM: &str = "You are DT, a fast computer-use personal assistant for macOS. \
 You have direct access to local memory, system permissions, and desktop automation tools. \
 Respond concisely, accurately, and politely.";
 
@@ -1312,7 +1297,7 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
     )?;
     writeln!(
         writer,
-        "║                 Grok-Muse Interactive Terminal REPL                         ║"
+        "║                 DT Interactive Terminal REPL                         ║"
     )?;
     writeln!(
         writer,
@@ -1365,7 +1350,7 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
         }
 
         if input == "/exit" || input == "/quit" || input == "exit" || input == "quit" {
-            writeln!(writer, "Exiting Grok-Muse chat. Goodbye!")?;
+            writeln!(writer, "Exiting DT chat. Goodbye!")?;
             break;
         }
 
@@ -1652,6 +1637,7 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
 
 pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> Result<()> {
     let config = GmConfig::load(config_path.as_deref())?;
+    let _storage_lease = migration::StorageLease::acquire(&config.storage_dir)?;
 
     info!("Starting gm-daemon...");
     let _ = ensure_helper_running(&config).await;
@@ -1736,6 +1722,7 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
             let (token, slack_secret) = companion_web_credentials(&config)?;
             let bridge = gm_openbot::BridgeRouter::new(sup.clone(), bridges_cfg);
             let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+                .with_sanitized_doctor(doctor_status_snapshot(&config).await)
                 .with_updates(Arc::new(updater::CompanionUpdateService {
                     download_dir: config.storage_dir.join("updates"),
                 }))
@@ -2067,10 +2054,7 @@ pub async fn run_review(date_str: Option<String>) -> Result<()> {
         now
     };
     let date = target_time.format("%Y-%m-%d").to_string();
-    println!(
-        "==> Running Grok-Muse Nightly Review synthesis for {}...",
-        date
-    );
+    println!("==> Running DT Nightly Review synthesis for {}...", date);
 
     let config = GmConfig::load(None)?;
     let audit = AuditLogger::default_logger().unwrap_or_else(|_| AuditLogger::in_memory());
@@ -2539,7 +2523,7 @@ pub async fn run_team(
 ) -> Result<()> {
     let sup = open_default_openbot_supervisor(config_path)?;
     match action.unwrap_or(TeamSubcommand::Export {
-        name: "Grok Muse Team".into(),
+        name: "DT Team".into(),
         description: "Exported team configuration".into(),
         output: None,
     }) {
@@ -2694,14 +2678,14 @@ pub async fn run_doctor_cli(
     top_json: bool,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
-    let config = GmConfig::load(config_path.as_deref())?;
     let (mode, run_id, sub_json) = match action {
         Some(DoctorSubcommand::Check { json }) => (DoctorMode::Check, None, json),
         Some(DoctorSubcommand::Repair { json }) => (DoctorMode::Repair, None, json),
         Some(DoctorSubcommand::Resume { run_id, json }) => (DoctorMode::Resume, Some(run_id), json),
         None => (DoctorMode::Check, None, false),
     };
-    let report = run_doctor(&config, mode, run_id.as_deref()).await?;
+    let report =
+        run_doctor_from_config_path(config_path.as_deref(), mode, run_id.as_deref()).await?;
     if top_json || sub_json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
@@ -2793,35 +2777,13 @@ pub async fn run_diagnostics(
     json: bool,
     config_path: Option<PathBuf>,
 ) -> Result<()> {
+    let action = action.unwrap_or(DiagnosticsSubcommand::Check);
+    if matches!(action, DiagnosticsSubcommand::Check) {
+        return run_doctor_cli(None, json, config_path).await;
+    }
     let config = GmConfig::load(config_path.as_deref())?;
-    match action.unwrap_or(DiagnosticsSubcommand::Check) {
-        DiagnosticsSubcommand::Check => {
-            let report = run_health_diagnostics(&config);
-            if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                println!("Grok Muse System Health Diagnostics:");
-                println!("Overall Status: {:?}", report.overall);
-                println!("Timestamp:      {}", report.timestamp);
-                println!("--------------------------------------------------");
-                for check in &report.checks {
-                    let status_badge = match check.status {
-                        DiagnosticStatus::Ok => "✔ OK",
-                        DiagnosticStatus::Warning => "⚠ WARN",
-                        DiagnosticStatus::Error => "✘ ERROR",
-                    };
-                    println!(
-                        "{:<8} [{:<12}] {}",
-                        status_badge, check.category, check.name
-                    );
-                    println!("         {}", check.message);
-                    if let Some(ref rem) = check.remediation {
-                        println!("         Action: {rem}");
-                    }
-                }
-                println!("--------------------------------------------------");
-            }
-        }
+    match action {
+        DiagnosticsSubcommand::Check => unreachable!(),
         DiagnosticsSubcommand::Export { output } => {
             println!("Generating sanitized diagnostic support bundle...");
             let bundle = export_support_bundle(&config, &output)?;
@@ -2882,6 +2844,7 @@ fn companion_web_credentials(config: &GmConfig) -> Result<(Option<String>, Optio
 
 pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
     let config = GmConfig::load(config_path.as_deref())?;
+    let _storage_lease = migration::StorageLease::acquire(&config.storage_dir)?;
     let sup = open_default_openbot_supervisor(config_path.clone())?;
     println!("==> Starting OpenBot Companion Web / AG-UI / A2A server on http://{bind} ...");
     let secrets = KeychainSecrets::default();
@@ -2917,6 +2880,7 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
     let (token, slack_secret) = companion_web_credentials(&config)?;
     let shared_config = Arc::new(parking_lot::RwLock::new(config.clone()));
     let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+        .with_sanitized_doctor(doctor_status_snapshot(&config).await)
         .with_updates(Arc::new(updater::CompanionUpdateService {
             download_dir: config.storage_dir.join("updates"),
         }))
@@ -3713,12 +3677,12 @@ mod tests {
         assert!(res.is_ok());
 
         let out_str = String::from_utf8_lossy(&output);
-        assert!(out_str.contains("Grok-Muse Interactive Terminal REPL"));
+        assert!(out_str.contains("DT Interactive Terminal REPL"));
         assert!(out_str.contains("Available REPL Commands:"));
         assert!(out_str.contains("System Status Inspection"));
         assert!(out_str.contains("Context History:"));
         assert!(out_str.contains("Conversation history cleared."));
-        assert!(out_str.contains("Exiting Grok-Muse chat. Goodbye!"));
+        assert!(out_str.contains("Exiting DT chat. Goodbye!"));
     }
 
     #[tokio::test]
@@ -3745,7 +3709,7 @@ mod tests {
         assert!(out_str.contains("Usage: /memory <search terms>"));
         assert!(out_str.contains("[1] user:"));
         assert!(out_str.contains("[2] assistant:"));
-        assert!(out_str.contains("Exiting Grok-Muse chat. Goodbye!"));
+        assert!(out_str.contains("Exiting DT chat. Goodbye!"));
     }
 
     #[test]

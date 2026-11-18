@@ -717,7 +717,7 @@ impl ReqwestLlmBackend {
             if *provider == ProviderKind::OpenRouter {
                 req = req
                     .header("HTTP-Referer", "https://github.com/galaxycoils/grok-muse")
-                    .header("X-Title", "Grok-Muse");
+                    .header("X-Title", "DT");
             }
             match req.send().await {
                 Ok(resp) => {

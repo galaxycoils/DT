@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [macos-latest, ubuntu-24.04, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout DT
@@ -71,6 +71,7 @@ jobs:
           npm run build --prefix clients/web
           npm test --prefix clients/web
           npm ci --prefix clients/mobile
+          npm run typecheck --prefix clients/mobile
           npm test --prefix clients/mobile
 
       - name: Verify release tools, coverage inventory, and budget ledger (Linux)
@@ -139,9 +140,9 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: grok-muse
         run: |
-          cargo build --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+          cargo build --release --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
           mkdir -p target/dist
-          bash tools/installers/linux/build-deb.sh 1.0.0 target/debug target/dist/dt_1.0.0_amd64.deb
+          bash tools/installers/linux/build-deb.sh 1.0.0 target/release target/dist/dt_1.0.0_amd64.deb
           dpkg-deb -I target/dist/dt_1.0.0_amd64.deb
           python3 -c '
           import hashlib, json, pathlib, runpy, subprocess
@@ -170,12 +171,12 @@ jobs:
           if ! command -v makensis >/dev/null 2>&1 && [[ ! -f "/c/Program Files (x86)/NSIS/makensis.exe" ]] && [[ ! -f "/c/Program Files/NSIS/makensis.exe" ]]; then
             choco install nsis -y --no-progress
           fi
-          cargo build --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+          cargo build --release --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
           python3 -c '
           import hashlib, json, pathlib, runpy, shutil, subprocess
           m = runpy.run_path("tools/package-release.py")
           root = pathlib.Path(".").resolve()
-          bin_dir = (root / "target" / "debug").resolve()
+          bin_dir = (root / "target" / "release").resolve()
           out = (root / "target" / "dist").resolve()
           out.mkdir(parents=True, exist_ok=True)
           name = "DT-1.0.0-windows-x86_64-setup.exe"
@@ -213,37 +214,21 @@ jobs:
       - name: Verify release DMG pipeline (macOS only)
         if: runner.os == 'macOS'
         working-directory: grok-muse
+        shell: bash
         run: |
-          cargo run --locked -p xtask -- verify-dmg
-          (cd target/dist && shasum -a 256 -c Grok-Muse.dmg.sha256)
-          cp target/dist/Grok-Muse.dmg target/dist/DT-1.0.0-macos-aarch64.dmg
-          python3 -c '
-          import hashlib, json, pathlib, runpy, subprocess
-          m = runpy.run_path("tools/package-release.py")
-          out = pathlib.Path("target/dist")
-          name = "DT-1.0.0-macos-aarch64.dmg"
-          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-          digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
-          (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
-          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version="1.0.0", os="macos", architecture="aarch64", sha256=digest), sort_keys=True) + "\n")
-          m["write_sbom"](out, name, "1.0.0", commit, "macos", "aarch64")
-          '
+          VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          for ARCH in aarch64 x86_64; do
+            rustup target add "${ARCH}-apple-darwin"
+            DMG="target/dist/DT-${VERSION}-macos-${ARCH}.dmg"
+            cargo run --locked -p xtask -- dmg --release --target "${ARCH}-apple-darwin" --identity - --output "$DMG"
+            cargo run --locked -p xtask -- verify-dmg --dmg-path "$DMG"
+            (cd target/dist && shasum -a 256 -c "$(basename "$DMG").sha256")
+          done
 
-      - name: Upload macOS DMG installer artifact
+      - name: Upload macOS DMG installer artifacts
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: installer-macos-aarch64
-          path: grok-muse/target/dist/DT-1.0.0-macos-aarch64.dmg*
-
-      - name: Verify release-profile Apple Silicon preview
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
-        working-directory: grok-muse
-        shell: bash
-        run: |
-          test "$(uname -m)" = arm64
-          VERSION="${GITHUB_REF_NAME#v}"
-          DMG="target/dist/DT-${VERSION}-macos-aarch64-adhoc.dmg"
-          cargo run --locked -p xtask -- dmg --release --identity - --output "$DMG"
-          cargo run --locked -p xtask -- verify-dmg --dmg-path "$DMG"
-          (cd target/dist && shasum -a 256 -c "$(basename "$DMG").sha256")
+          name: installer-macos
+          path: grok-muse/target/dist/DT-*-macos-*.dmg*
+          if-no-files-found: error

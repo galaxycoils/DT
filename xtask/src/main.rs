@@ -20,7 +20,7 @@ use std::time::Instant;
 #[derive(Parser, Debug)]
 #[command(
     name = "xtask",
-    about = "Grok-Muse Automation, Benchmarking and Release Harness"
+    about = "DT Automation, Benchmarking and Release Harness"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -43,7 +43,7 @@ enum Commands {
         #[arg(long)]
         release: bool,
     },
-    /// Assemble a distributable macOS .dmg containing GrokMuse.app and GrokMuseCUHelper.app
+    /// Assemble a distributable macOS .dmg containing DT.app and DTCUHelper.app
     Dmg {
         /// Package optimized release binaries.
         #[arg(long)]
@@ -52,12 +52,12 @@ enum Commands {
         target: Option<String>,
         #[arg(long)]
         identity: Option<String>,
-        #[arg(long, default_value = "target/dist/Grok-Muse.dmg")]
+        #[arg(long, default_value = "target/dist/DT.dmg")]
         output: String,
     },
     /// Verify DMG package: attach image, verify codesign on both bundles, verify /Applications symlink, detach cleanly
     VerifyDmg {
-        #[arg(long, default_value = "target/dist/Grok-Muse.dmg")]
+        #[arg(long, default_value = "target/dist/DT.dmg")]
         dmg_path: String,
     },
     /// Benchmark G3 local hot-path budgets
@@ -90,7 +90,7 @@ enum Commands {
         #[arg(long, default_value = "dogfood_metrics.jsonl")]
         output: String,
     },
-    /// Install GrokMuse.app and GrokMuseCUHelper.app into /Applications (or ~/Applications) with symlink creation
+    /// Install DT.app and DTCUHelper.app into /Applications (or ~/Applications) with symlink creation
     Install {
         /// Target applications directory (defaults to /Applications or ~/Applications)
         #[arg(long)]
@@ -125,11 +125,14 @@ enum Commands {
         /// Return exit 0 with explicit blocked_missing_access status when external signing/hardware/accounts are absent
         #[arg(long)]
         allow_incomplete: bool,
+        /// Directory containing native evidence and its detached signature.
+        #[arg(long)]
+        evidence_dir: Option<PathBuf>,
     },
     /// Submit a signed DMG to Apple Notary Service (`xcrun notarytool`) and staple notarization ticket
     Notarize {
         /// Path to signed .dmg file
-        #[arg(long, default_value = "target/dist/Grok-Muse.dmg")]
+        #[arg(long, default_value = "target/dist/DT.dmg")]
         dmg_path: String,
         /// Keychain notarytool profile name (preferred over Apple ID + app-specific password)
         #[arg(long)]
@@ -275,9 +278,7 @@ fn create_app_bundles(
         let _ = std::env::set_current_dir(workspace_root);
     }
 
-    println!(
-        "==> Compiling Grok-Muse binaries for bundling (release={release}, target={target:?})..."
-    );
+    println!("==> Compiling DT binaries for bundling (release={release}, target={target:?})...");
     let mut args = vec![
         "build",
         "--locked",
@@ -302,11 +303,8 @@ fn create_app_bundles(
     }
 
     let bin_dir = cargo_profile_dir(release, target);
-    println!(
-        "==> Bundling Grok-Muse applications from {}...",
-        bin_dir.display()
-    );
-    let helper_app_dir = Path::new("target/bundle/GrokMuseCUHelper.app/Contents/MacOS");
+    println!("==> Bundling DT applications from {}...", bin_dir.display());
+    let helper_app_dir = Path::new("target/bundle/DTCUHelper.app/Contents/MacOS");
     fs::create_dir_all(helper_app_dir)?;
 
     // Copy helper binary
@@ -326,7 +324,7 @@ fn create_app_bundles(
     <key>CFBundleIdentifier</key>
     <string>co.anysphere.grok-muse.cu-helper</string>
     <key>CFBundleName</key>
-    <string>GrokMuseCUHelper</string>
+    <string>DTCUHelper</string>
     <key>CFBundleShortVersionString</key>
     <string>{pkg_version}</string>
     <key>CFBundleVersion</key>
@@ -338,24 +336,24 @@ fn create_app_bundles(
     <key>LSUIElement</key>
     <true/>
     <key>NSAccessibilityUsageDescription</key>
-    <string>Grok-Muse requires accessibility to inspect UI elements and execute actions.</string>
+    <string>DT requires accessibility to inspect UI elements and execute actions.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Grok-Muse requires screen recording to ground vision model actions.</string>
+    <string>DT requires screen recording to ground vision model actions.</string>
     <key>NSCalendarsUsageDescription</key>
-    <string>Grok-Muse proactive engine requires Calendar access to patrol upcoming events.</string>
+    <string>DT proactive engine requires Calendar access to patrol upcoming events.</string>
     <key>NSRemindersUsageDescription</key>
-    <string>Grok-Muse proactive engine requires Reminders access to follow up on tasks.</string>
+    <string>DT proactive engine requires Reminders access to follow up on tasks.</string>
 </dict>
 </plist>
 "#
     );
     fs::write(
-        "target/bundle/GrokMuseCUHelper.app/Contents/Info.plist",
+        "target/bundle/DTCUHelper.app/Contents/Info.plist",
         helper_plist,
     )?;
 
-    // Bundle main GrokMuse.app (includes dt, dt-doctor, gm compatibility alias, gm-daemon, gm-ui)
-    let app_macos_dir = Path::new("target/bundle/GrokMuse.app/Contents/MacOS");
+    // Bundle main DT.app (includes dt, dt-doctor, gm compatibility alias, gm-daemon, gm-ui)
+    let app_macos_dir = Path::new("target/bundle/DT.app/Contents/MacOS");
     fs::create_dir_all(app_macos_dir)?;
     fs::copy(bin_dir.join("gm-ui"), app_macos_dir.join("gm-ui"))?;
     fs::copy(bin_dir.join("gm-daemon"), app_macos_dir.join("gm-daemon"))?;
@@ -371,7 +369,7 @@ fn create_app_bundles(
     <key>CFBundleIdentifier</key>
     <string>co.anysphere.grok-muse.ui</string>
     <key>CFBundleName</key>
-    <string>GrokMuse</string>
+    <string>DT</string>
     <key>CFBundleShortVersionString</key>
     <string>{pkg_version}</string>
     <key>CFBundleVersion</key>
@@ -381,22 +379,22 @@ fn create_app_bundles(
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>NSAccessibilityUsageDescription</key>
-    <string>Grok-Muse requires accessibility to inspect UI elements and execute actions.</string>
+    <string>DT requires accessibility to inspect UI elements and execute actions.</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Grok-Muse requires screen recording to ground vision model actions.</string>
+    <string>DT requires screen recording to ground vision model actions.</string>
     <key>NSCalendarsUsageDescription</key>
-    <string>Grok-Muse proactive engine requires Calendar access to patrol upcoming events.</string>
+    <string>DT proactive engine requires Calendar access to patrol upcoming events.</string>
     <key>NSRemindersUsageDescription</key>
-    <string>Grok-Muse proactive engine requires Reminders access to follow up on tasks.</string>
+    <string>DT proactive engine requires Reminders access to follow up on tasks.</string>
 </dict>
 </plist>
 "#
     );
-    fs::write("target/bundle/GrokMuse.app/Contents/Info.plist", app_plist)?;
+    fs::write("target/bundle/DT.app/Contents/Info.plist", app_plist)?;
 
     println!("==> Successfully created app bundles:");
-    println!("    target/bundle/GrokMuseCUHelper.app");
-    println!("    target/bundle/GrokMuse.app");
+    println!("    target/bundle/DTCUHelper.app");
+    println!("    target/bundle/DT.app");
     Ok(())
 }
 
@@ -450,12 +448,12 @@ fn assemble_dmg(
 
     // Packaging debug builds should not duplicate their symbol tables in the image.
     for executable in [
-        "target/bundle/GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper",
-        "target/bundle/GrokMuse.app/Contents/MacOS/gm-ui",
-        "target/bundle/GrokMuse.app/Contents/MacOS/gm-daemon",
-        "target/bundle/GrokMuse.app/Contents/MacOS/gm",
-        "target/bundle/GrokMuse.app/Contents/MacOS/dt",
-        "target/bundle/GrokMuse.app/Contents/MacOS/dt-doctor",
+        "target/bundle/DTCUHelper.app/Contents/MacOS/gm-cu-helper",
+        "target/bundle/DT.app/Contents/MacOS/gm-ui",
+        "target/bundle/DT.app/Contents/MacOS/gm-daemon",
+        "target/bundle/DT.app/Contents/MacOS/gm",
+        "target/bundle/DT.app/Contents/MacOS/dt",
+        "target/bundle/DT.app/Contents/MacOS/dt-doctor",
     ] {
         let status = Command::new("strip").args(["-S", executable]).status()?;
         if !status.success() {
@@ -467,11 +465,11 @@ fn assemble_dmg(
         "==> Signing bundles with hardened runtime (--options runtime) & entitlements.plist..."
     );
     sign_bundle(
-        "target/bundle/GrokMuseCUHelper.app",
+        "target/bundle/DTCUHelper.app",
         id,
         Some("entitlements.plist"),
     )?;
-    sign_bundle("target/bundle/GrokMuse.app", id, Some("entitlements.plist"))?;
+    sign_bundle("target/bundle/DT.app", id, Some("entitlements.plist"))?;
 
     // 3. Staging directory setup
     let staging = Path::new("target/dmg-staging");
@@ -482,43 +480,17 @@ fn assemble_dmg(
 
     println!("==> Copying signed app bundles into staging directory...");
     let cp_helper = Command::new("cp")
-        .args([
-            "-cR",
-            "target/bundle/GrokMuseCUHelper.app",
-            "target/dmg-staging/",
-        ])
+        .args(["-cR", "target/bundle/DTCUHelper.app", "target/dmg-staging/"])
         .status()?;
     if !cp_helper.success() {
-        return Err("Failed to copy GrokMuseCUHelper.app to staging".into());
+        return Err("Failed to copy DTCUHelper.app to staging".into());
     }
 
     let cp_ui = Command::new("cp")
-        .args(["-cR", "target/bundle/GrokMuse.app", "target/dmg-staging/"])
+        .args(["-cR", "target/bundle/DT.app", "target/dmg-staging/"])
         .status()?;
     if !cp_ui.success() {
-        return Err("Failed to copy GrokMuse.app to staging".into());
-    }
-
-    let cp_dt = Command::new("cp")
-        .args([
-            "-cR",
-            "target/bundle/GrokMuse.app",
-            "target/dmg-staging/DT.app",
-        ])
-        .status()?;
-    if !cp_dt.success() {
         return Err("Failed to copy DT.app to staging".into());
-    }
-
-    let cp_dt_helper = Command::new("cp")
-        .args([
-            "-cR",
-            "target/bundle/GrokMuseCUHelper.app",
-            "target/dmg-staging/DTCUHelper.app",
-        ])
-        .status()?;
-    if !cp_dt_helper.success() {
-        return Err("Failed to copy DTCUHelper.app to staging".into());
     }
 
     // Create /Applications symlink for drag-and-drop install UX
@@ -536,14 +508,14 @@ fn assemble_dmg(
         let _ = Command::new("cp")
             .args([
                 "-cR",
-                "target/bundle/GrokMuse.app",
+                "target/bundle/DT.app",
                 "target/dmg-pkg-root/Applications/DT.app",
             ])
             .status();
         let _ = Command::new("cp")
             .args([
                 "-cR",
-                "target/bundle/GrokMuseCUHelper.app",
+                "target/bundle/DTCUHelper.app",
                 "target/dmg-pkg-root/Applications/DTCUHelper.app",
             ])
             .status();
@@ -585,7 +557,7 @@ fn assemble_dmg(
         .args([
             "create",
             "-volname",
-            "Grok-Muse",
+            "DT",
             "-srcfolder",
             "target/dmg-staging",
             "-ov",
@@ -613,7 +585,7 @@ fn assemble_dmg(
     let dmg_filename = Path::new(output)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Grok-Muse.dmg".into());
+        .unwrap_or_else(|| "DT.dmg".into());
     let sha_path = format!("{output}.sha256");
     fs::write(&sha_path, format!("{sha256_digest}  {dmg_filename}\n"))?;
     println!("==> Release checksum file generated: {sha_path} ({sha256_digest})");
@@ -629,7 +601,7 @@ fn assemble_dmg(
     println!("╚══════════════════════════════════════════════════════════╝");
     println!("  Path               : {output}");
     println!("  Size               : {:.2} MB", size_mb);
-    println!("  Bundles Included   : GrokMuse.app, GrokMuseCUHelper.app");
+    println!("  Bundles Included   : DT.app, DTCUHelper.app");
     println!("  Install Symlink    : /Applications");
     println!("  Code Signature     : {id}");
     println!("  Hardened Runtime   : ENABLED (--options runtime)");
@@ -722,17 +694,17 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
         println!(
             "  [Step 4/5] Verifying code signatures on mounted app bundles and Install DT.pkg..."
         );
-        let ui_app = mp.join("GrokMuse.app");
-        let helper_app = mp.join("GrokMuseCUHelper.app");
+        let ui_app = mp.join("DT.app");
+        let helper_app = mp.join("DTCUHelper.app");
         let dt_app = mp.join("DT.app");
         let dt_helper_app = mp.join("DTCUHelper.app");
         let install_pkg = mp.join("Install DT.pkg");
 
         if !ui_app.exists() {
-            return Err("GrokMuse.app not found on mounted volume".into());
+            return Err("DT.app not found on mounted volume".into());
         }
         if !helper_app.exists() {
-            return Err("GrokMuseCUHelper.app not found on mounted volume".into());
+            return Err("DTCUHelper.app not found on mounted volume".into());
         }
         if !dt_app.exists() {
             return Err("DT.app not found on mounted volume".into());
@@ -744,16 +716,16 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
             return Err("Install DT.pkg not found on mounted volume".into());
         }
 
-        // Verify GrokMuse.app
+        // Verify DT.app
         let ui_verify = Command::new("codesign")
             .args(["--verify", "--deep", "--strict", ui_app.to_str().unwrap()])
             .status()?;
         if !ui_verify.success() {
-            return Err("codesign --verify failed for GrokMuse.app".into());
+            return Err("codesign --verify failed for DT.app".into());
         }
-        println!("    ✔ GrokMuse.app signature: VALID (--verify --deep --strict)");
+        println!("    ✔ DT.app signature: VALID (--verify --deep --strict)");
 
-        // Verify GrokMuseCUHelper.app
+        // Verify DTCUHelper.app
         let helper_verify = Command::new("codesign")
             .args([
                 "--verify",
@@ -763,14 +735,14 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
             ])
             .status()?;
         if !helper_verify.success() {
-            return Err("codesign --verify failed for GrokMuseCUHelper.app".into());
+            return Err("codesign --verify failed for DTCUHelper.app".into());
         }
-        println!("    ✔ GrokMuseCUHelper.app signature: VALID (--verify --deep --strict)");
+        println!("    ✔ DTCUHelper.app signature: VALID (--verify --deep --strict)");
 
         // Verify G1 Native compliance (no Chromium or Electron frameworks)
         let electron_fw = ui_app.join("Contents/Frameworks/Electron Framework.framework");
         if electron_fw.exists() {
-            return Err("G1 Native violation: Electron framework detected in GrokMuse.app".into());
+            return Err("G1 Native violation: Electron framework detected in DT.app".into());
         }
         println!("    ✔ G1 Native compliance verified: 0 Electron/Chromium frameworks");
 
@@ -800,7 +772,7 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
         println!("╚═════════════════════════════════════════════════════════════════════════════╝");
         println!("  DMG Path            : {dmg_path_str}");
         println!("  Image Integrity     : PASSED (hdiutil verify)");
-        println!("  Bundle Signatures   : PASSED (GrokMuse.app, GrokMuseCUHelper.app)");
+        println!("  Bundle Signatures   : PASSED (DT.app, DTCUHelper.app)");
         println!("  Strict Verification : codesign --verify --deep --strict");
         println!("  Symlink Target      : /Applications (verified)");
         println!("  G1 Native Arch      : Verified (Zero Electron/Chromium)");
@@ -951,7 +923,7 @@ async fn run_bench_llm(
     let g4_p95_pass = step_p95 < 4000.0;
 
     println!("\n╔═════════════════════════════════════════════════════════════════════════════╗");
-    println!("║             Grok-Muse LLM Benchmark & G4 Calibration Report                 ║");
+    println!("║             DT LLM Benchmark & G4 Calibration Report                 ║");
     println!("╚═════════════════════════════════════════════════════════════════════════════╝");
     println!("  Mode                : {mode_str}");
     println!("  Samples             : {iterations}");
@@ -1013,8 +985,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let id = identity.unwrap_or_else(detect_identity);
             println!("==> Signing artifacts with identity: {id}");
 
-            let helper_app = "target/bundle/GrokMuseCUHelper.app";
-            let main_app = "target/bundle/GrokMuse.app";
+            let helper_app = "target/bundle/DTCUHelper.app";
+            let main_app = "target/bundle/DT.app";
 
             if !Path::new(helper_app).exists() || !Path::new(main_app).exists() {
                 println!("App bundles not found. Building bundles first...");
@@ -1087,8 +1059,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             suite,
             json,
             allow_incomplete,
+            evidence_dir,
         } => {
-            run_certify(&suite, json, allow_incomplete).await?;
+            run_certify(&suite, json, allow_incomplete, evidence_dir.as_deref()).await?;
         }
 
         Commands::TestAll { identity } => {
@@ -1494,7 +1467,7 @@ fn run_simulate_dogfood(
         "Upcoming: Architecture Review: Local VLM / Metal",
         "Upcoming: Customer Feedback Debrief",
         "Upcoming: Weekly Security & Permissions Audit",
-        "Upcoming: Grok-Muse Release Planning Session",
+        "Upcoming: DT Release Planning Session",
         "Upcoming: Product Strategy & Roadmap Review",
     ];
 
@@ -1659,7 +1632,7 @@ fn run_simulate_dogfood(
     }
 
     println!("\n╔═════════════════════════════════════════════════════════════════════════════╗");
-    println!("║        Grok-Muse 14-Day Dogfood Simulation & G6 Fixture Report         ║");
+    println!("║        DT 14-Day Dogfood Simulation & G6 Fixture Report         ║");
     println!("╚═════════════════════════════════════════════════════════════════════════════╝");
     println!("  Output File                 : {output_path}");
     println!(
@@ -1728,7 +1701,7 @@ fn dirs_data_dir() -> PathBuf {
 async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let start_all = Instant::now();
     println!("\n===============================================================================");
-    println!("  Grok-Muse Automated Release Check Suite (xtask test-all)");
+    println!("  DT Automated Release Check Suite (xtask test-all)");
     println!("===============================================================================\n");
 
     let mut scorecard: Vec<(
@@ -1928,7 +1901,7 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
     println!("\n--> [Gate 8/8] Building and verifying distributable macOS DMG (G1 Gate)...");
     let t0 = Instant::now();
     let id = identity.unwrap_or_else(detect_identity);
-    let dmg_output = "target/dist/Grok-Muse.dmg";
+    let dmg_output = "target/dist/DT.dmg";
     let dmg_build_res = assemble_dmg(&id, dmg_output, false, None);
     let dmg_verify_res = if dmg_build_res.is_ok() {
         run_verify_dmg(dmg_output)
@@ -2079,7 +2052,7 @@ fn run_install(
     }
 
     println!("\n===============================================================================");
-    println!("  Grok-Muse System Installation (xtask install)");
+    println!("  DT System Installation (xtask install)");
     println!("===============================================================================\n");
 
     // 1. Compile & assemble app bundles
@@ -2090,15 +2063,11 @@ fn run_install(
         let id = identity.unwrap_or_else(detect_identity);
         println!("==> Signing app bundles with identity '{id}'...");
         sign_bundle(
-            "target/bundle/GrokMuseCUHelper.app",
+            "target/bundle/DTCUHelper.app",
             &id,
             Some("entitlements.plist"),
         )?;
-        sign_bundle(
-            "target/bundle/GrokMuse.app",
-            &id,
-            Some("entitlements.plist"),
-        )?;
+        sign_bundle("target/bundle/DT.app", &id, Some("entitlements.plist"))?;
     } else {
         println!("  [Install] Skipping code signing as requested by --no-sign flag");
     }
@@ -2121,8 +2090,8 @@ fn run_install(
     println!("==> Target application directory: {:?}", target_app_dir);
     fs::create_dir_all(&target_app_dir)?;
 
-    // 4. Install GrokMuse.app and GrokMuseCUHelper.app
-    for app_name in ["GrokMuse.app", "GrokMuseCUHelper.app"] {
+    // 4. Install DT.app and DTCUHelper.app
+    for app_name in ["DT.app", "DTCUHelper.app"] {
         let src = Path::new("target/bundle").join(app_name);
         let dest = target_app_dir.join(app_name);
 
@@ -2160,14 +2129,14 @@ fn run_install(
     fs::create_dir_all(&target_bin_dir)?;
 
     let symlinks = [
-        ("gm", target_app_dir.join("GrokMuse.app/Contents/MacOS/gm")),
+        ("gm", target_app_dir.join("DT.app/Contents/MacOS/gm")),
         (
             "gm-daemon",
-            target_app_dir.join("GrokMuse.app/Contents/MacOS/gm-daemon"),
+            target_app_dir.join("DT.app/Contents/MacOS/gm-daemon"),
         ),
         (
             "gm-cu-helper",
-            target_app_dir.join("GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper"),
+            target_app_dir.join("DTCUHelper.app/Contents/MacOS/gm-cu-helper"),
         ),
     ];
 
@@ -2186,8 +2155,8 @@ fn run_install(
     println!("║                   GROK-MUSE INSTALLATION COMPLETE                           ║");
     println!("╚═════════════════════════════════════════════════════════════════════════════╝");
     println!("  Applications installed to:");
-    println!("    • {}/GrokMuse.app", target_app_dir.display());
-    println!("    • {}/GrokMuseCUHelper.app", target_app_dir.display());
+    println!("    • {}/DT.app", target_app_dir.display());
+    println!("    • {}/DTCUHelper.app", target_app_dir.display());
     println!("  CLI symlinks created in:");
     println!("    • {}/gm", target_bin_dir.display());
     println!("    • {}/gm-daemon", target_bin_dir.display());
@@ -2199,7 +2168,7 @@ fn run_install(
     println!("    2. Register LaunchAgent background services:");
     println!("       gm service install");
     println!("    3. Launch the desktop tray application:");
-    println!("       open \"{}/GrokMuse.app\"", target_app_dir.display());
+    println!("       open \"{}/DT.app\"", target_app_dir.display());
     println!("═══════════════════════════════════════════════════════════════════════════════\n");
 
     Ok(())
@@ -2314,6 +2283,7 @@ async fn run_certify(
     suite: &str,
     json_out: bool,
     allow_incomplete: bool,
+    evidence_dir: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("GM_FORCE_MOCK_LLM").is_some() {
         return Err("xtask certify rejects mock mode (GM_FORCE_MOCK_LLM is set)".into());
@@ -2352,12 +2322,31 @@ async fn run_certify(
         .map(|arr| arr.iter().filter(|r| r["required"] == true).count())
         .unwrap_or(0);
 
-    let apple_id_present = std::env::var("GM_APPLE_SIGNING_IDENTITY")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty() && v.trim() != "-");
-    let pub_key_present = std::env::var("GM_RELEASE_PUBLIC_KEY_HEX")
-        .ok()
-        .is_some_and(|v| v.trim().len() == 64);
+    let fixtures = Command::new(std::env::current_exe()?)
+        .arg("eval")
+        .output()?;
+    if !fixtures.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&fixtures.stdout));
+        eprintln!("{}", String::from_utf8_lossy(&fixtures.stderr));
+        return Err("Automated fixture verification failed".into());
+    }
+
+    if let Some(directory) = evidence_dir {
+        let key = std::env::var("GM_EVIDENCE_PUBLIC_KEY_HEX")?;
+        let verified = Command::new("python3")
+            .arg("tools/verify-release-evidence.py")
+            .arg("--directory")
+            .arg(directory)
+            .args(["--commit", &commit, "--public-key-hex", &key])
+            .output()?;
+        if !verified.status.success() {
+            return Err(format!(
+                "Native evidence rejected: {}",
+                String::from_utf8_lossy(&verified.stderr)
+            )
+            .into());
+        }
+    }
 
     let checks = serde_json::json!({
         "schema": 1,
@@ -2367,17 +2356,18 @@ async fn run_certify(
         "suite": suite,
         "target": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
         "mock_mode_rejected": true,
+        "automated_fixtures": "passed",
+        "native_evidence": if evidence_dir.is_some() { "verified" } else { "missing" },
         "coverage_inventory_required_rows": required_rows,
         "budget_cap_usd": ledger.total_cap_usd,
         "budget_exposure_usd": ledger.total_exposure(),
-        "gates": {
-            "providers": if std::env::var_os("OPENAI_API_KEY").is_some() || std::env::var_os("XAI_API_KEY").is_some() { "ready_for_live" } else { "blocked_missing_access" },
-            "native": if apple_id_present { "ready_for_signed_native" } else { "blocked_missing_access" },
-            "ux": "local_tokens_and_web_mobile_verified_native_screenshots_pending",
-            "integrations": "blocked_missing_access",
-            "lifecycle": if pub_key_present { "ready_for_signed_lifecycle" } else { "blocked_missing_access" },
-            "soak": "blocked_requires_7_day_run"
-        }
+        "gates": if evidence_dir.is_some() { serde_json::json!({
+            "providers": "verified", "native": "verified", "ux": "verified",
+            "integrations": "verified", "lifecycle": "verified", "soak": "verified"
+        }) } else { serde_json::json!({
+            "providers": "evidence_required", "native": "evidence_required", "ux": "evidence_required",
+            "integrations": "evidence_required", "lifecycle": "evidence_required", "soak": "evidence_required"
+        }) }
     });
 
     if json_out {
@@ -2390,10 +2380,8 @@ async fn run_certify(
         println!("  Gates: {}", checks["gates"]);
     }
 
-    if !allow_incomplete {
-        return Err(
-            "Certification incomplete: missing signing identities, multi-OS native hardware, real accounts, and 7-day soak (re-run with --allow-incomplete for status JSON)".into(),
-        );
+    if !allow_incomplete && evidence_dir.is_none() {
+        return Err("Certification requires signed native evidence. Supply --evidence-dir or use --allow-incomplete for status JSON.".into());
     }
     Ok(())
 }
@@ -2438,12 +2426,12 @@ mod tests {
         let multiline_plist = r#"
         <dict>
             <key>mount-point</key>
-            <string>/Volumes/Grok-Muse</string>
+            <string>/Volumes/DT</string>
         </dict>
         "#;
         assert_eq!(
             extract_mount_point(multiline_plist),
-            Some(PathBuf::from("/Volumes/Grok-Muse"))
+            Some(PathBuf::from("/Volumes/DT"))
         );
 
         let inline_plist = "<key>mount-point</key><string>/Volumes/TestVolume 1</string>";
@@ -2503,16 +2491,12 @@ mod tests {
         );
         assert!(res.is_ok(), "run_install failed: {:?}", res.err());
 
-        assert!(test_apps.join("GrokMuse.app/Contents/MacOS/gm-ui").exists());
+        assert!(test_apps.join("DT.app/Contents/MacOS/gm-ui").exists());
+        assert!(test_apps.join("DT.app/Contents/MacOS/gm-daemon").exists());
+        assert!(test_apps.join("DT.app/Contents/MacOS/gm").exists());
         assert!(
             test_apps
-                .join("GrokMuse.app/Contents/MacOS/gm-daemon")
-                .exists()
-        );
-        assert!(test_apps.join("GrokMuse.app/Contents/MacOS/gm").exists());
-        assert!(
-            test_apps
-                .join("GrokMuseCUHelper.app/Contents/MacOS/gm-cu-helper")
+                .join("DTCUHelper.app/Contents/MacOS/gm-cu-helper")
                 .exists()
         );
 
@@ -2528,13 +2512,13 @@ mod tests {
     #[test]
     fn test_notarize_dry_run_and_command_builder() {
         let profile_args =
-            build_notarytool_args("Grok-Muse.dmg", Some("gm-notary"), None, None, None).unwrap();
+            build_notarytool_args("DT.dmg", Some("gm-notary"), None, None, None).unwrap();
         assert_eq!(
             profile_args,
             vec![
                 "notarytool",
                 "submit",
-                "Grok-Muse.dmg",
+                "DT.dmg",
                 "--wait",
                 "--keychain-profile",
                 "gm-notary"
@@ -2542,7 +2526,7 @@ mod tests {
         );
 
         let apple_id_args = build_notarytool_args(
-            "Grok-Muse.dmg",
+            "DT.dmg",
             None,
             Some("dev@example.com"),
             Some("TEAM123456"),
@@ -2550,7 +2534,7 @@ mod tests {
         )
         .unwrap();
         assert!(apple_id_args.contains(&"--team-id".to_string()));
-        assert!(build_notarytool_args("Grok-Muse.dmg", None, None, None, None).is_err());
+        assert!(build_notarytool_args("DT.dmg", None, None, None, None).is_err());
 
         let tmp_dmg = std::env::temp_dir().join("test_notarize_dry_run.dmg");
         fs::write(&tmp_dmg, b"dummy_dmg_header").unwrap();

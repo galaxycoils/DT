@@ -3,6 +3,10 @@ export type ApprovalAction = {
   approved: boolean;
 };
 
+export type DirectMessage = { id: string; author: string; content: string };
+export type Routine = { id: string; name: string; enabled: boolean };
+export type Task = { id: string; instruction: string; status: string };
+
 export interface DtV1ClientOptions {
   baseUrl?: string;
   workspaceId?: string;
@@ -73,6 +77,48 @@ export class DtV1Client {
       throw new Error(`HTTP ${resp.status}: ${msg}`);
     }
     return (await resp.json()) as T;
+  }
+
+  async restoreSession(): Promise<HostedSessionInfo> {
+    const session = await this.request<HostedSessionInfo>("/auth/session");
+    this.csrfToken = session.csrf_token;
+    this.workspaceId = session.ws_id;
+    return session;
+  }
+
+  listDirectMessages(botId: string, signal?: AbortSignal) {
+    return this.request<DirectMessage[]>(`/dm/${encodeURIComponent(botId)}/messages`, { signal });
+  }
+
+  listRoutines() {
+    return this.request<Routine[]>("/routines");
+  }
+
+  listActivity() {
+    return this.request<{ posts: Array<{ id: string; title?: string; content?: string }> }>("/activity");
+  }
+
+  listTasks() {
+    return this.request<Task[]>("/queue");
+  }
+
+  controlTask(taskId: string, action: "pause" | "resume" | "cancel" | "wheel-resume") {
+    return this.request<{ ok: boolean }>(
+      `/tasks/${encodeURIComponent(taskId)}/${action}`,
+      { method: "POST", body: "{}" },
+    );
+  }
+
+  listFiles(botId: string) {
+    return this.request<{ files: Array<{ path: string; size: number }> }>(
+      `/bots/${encodeURIComponent(botId)}/files`,
+    );
+  }
+
+  previewFile(botId: string, path: string) {
+    return this.request<{ data_url?: string; preview: { kind: string; text_snippet?: string; pdf_pages_estimate?: number } }>(
+      `/bots/${encodeURIComponent(botId)}/files/preview?path=${encodeURIComponent(path)}`,
+    );
   }
 
   async redeemEnrollment(enrollmentToken: string): Promise<HostedSessionInfo> {

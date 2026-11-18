@@ -22,7 +22,7 @@
       "spent_usd": 0.0,
       "uncertain_reserved_usd": 0.0
     },
-    "linux-x86_64": {
+    "linux-x86_64-x11": {
       "allocated_usd": 15.0,
       "reserved_usd": 0.0,
       "spent_usd": 0.0,
@@ -34,7 +34,7 @@
       "spent_usd": 0.0,
       "uncertain_reserved_usd": 0.0
     },
-    "unallocated-reserve": {
+    "linux-x86_64-wayland": {
       "allocated_usd": 15.0,
       "reserved_usd": 0.0,
       "spent_usd": 0.0,
@@ -43,5 +43,5 @@
   },
   "transfers": [],
   "entries": [],
-  "notes": "Enforces the US$100 release-wide inference cap (US$15 per desktop target, US$25 shared tests, US$15 reserve). Hardware, signing, hosting, and telephony expenses require separate authorization."
+  "notes": "Enforces the US$100 release-wide inference cap (US$15 per desktop target, US$25 shared tests). Hardware, signing, hosting, and telephony expenses require separate authorization."
 }

@@ -39,6 +39,10 @@ def main():
     expected = os.environ.get('GM_RELEASE_PUBLIC_KEY_HEX', '').lower()
     if not key_pem or len(bytes.fromhex(expected)) != 32:
         parser.error('Protected publisher key and independently pinned public key are required')
+    evidence = json.loads((args.directory / 'evidence/evidence.json').read_text())
+    if evidence.get('commit') != commit:
+        parser.error('Native evidence must certify this exact source commit')
+    certified = evidence['candidate_hashes']['installers']
     specs = []
     for os_name, arch in TARGETS:
         path = args.directory / asset_filename(version, os_name, arch)
@@ -46,8 +50,9 @@ def main():
             parser.error(f'Package must be a bounded regular file: {path}')
         receipt = json.loads(pathlib.Path(str(path) + '.build.json').read_text())
         with path.open('rb') as source:
-            if hashlib.file_digest(source, 'sha256').hexdigest() != receipt.get('sha256'):
-                parser.error('Package bytes differ from their native build receipt')
+            digest = hashlib.file_digest(source, 'sha256').hexdigest()
+            if digest != receipt.get('sha256') or digest != certified.get(path.name):
+                parser.error('Package bytes differ from verified certification evidence or the build receipt')
         if (receipt.get('commit'), receipt.get('version'), receipt.get('os'), receipt.get('architecture')) != (commit, version, os_name, arch):
             parser.error('All packages must be built from this exact commit/version/target')
         specs += ['--asset', f'{os_name}:{arch}:{path.resolve()}']

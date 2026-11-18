@@ -15,24 +15,13 @@ pub fn default_daemon_socket_path() -> PathBuf {
     }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home)
-            .join("Library/Application Support/GrokMuse")
-            .join("daemon.sock")
+        default_storage_dir().join("daemon.sock")
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let base = std::env::var("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let data = std::env::var("XDG_DATA_HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| {
-                        PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
-                            .join(".local/share")
-                    });
-                data.join("grok-muse")
-            });
+            .unwrap_or_else(|_| default_storage_dir());
         base.join("grok-muse-daemon.sock")
     }
 }
@@ -48,6 +37,7 @@ pub fn legacy_storage_dir() -> Option<PathBuf> {
     {
         std::env::var("APPDATA")
             .or_else(|_| std::env::var("LOCALAPPDATA"))
+            .or_else(|_| std::env::var("USERPROFILE"))
             .ok()
             .map(|a| PathBuf::from(a).join("GrokMuse"))
     }
@@ -64,23 +54,42 @@ pub fn legacy_storage_dir() -> Option<PathBuf> {
     }
 }
 
-pub fn default_config_path() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join("Library/Application Support/GrokMuse/config.json")
+pub fn default_storage_dir() -> PathBuf {
+    let Some(legacy) = legacy_storage_dir() else {
+        return PathBuf::from(if cfg!(target_os = "linux") {
+            "dt"
+        } else {
+            "DT"
+        });
+    };
+    let dt = legacy.with_file_name(if cfg!(target_os = "linux") {
+        "dt"
+    } else {
+        "DT"
+    });
+    if !dt.is_dir() && legacy.is_dir() {
+        legacy
+    } else {
+        dt
     }
-    #[cfg(target_os = "windows")]
+}
+
+pub fn default_config_path() -> PathBuf {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let app_data = std::env::var("APPDATA")
-            .or_else(|_| std::env::var("LOCALAPPDATA"))
-            .unwrap_or_else(|_| ".".into());
-        PathBuf::from(app_data).join("GrokMuse/config.json")
+        default_storage_dir().join("config.json")
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-        PathBuf::from(home).join(".config/grok-muse/config.json")
+        let config = PathBuf::from(home).join(".config");
+        let legacy = config.join("grok-muse/config.json");
+        let dt = config.join("dt/config.json");
+        if !dt.is_file() && legacy.is_file() {
+            legacy
+        } else {
+            dt
+        }
     }
 }
 
@@ -219,45 +228,16 @@ impl GmConfig {
 
 impl Default for GmConfig {
     fn default() -> Self {
+        let storage_dir = default_storage_dir();
         #[cfg(target_os = "windows")]
-        let (socket_path, storage_dir) = {
-            let app_data = std::env::var("APPDATA")
-                .or_else(|_| std::env::var("LOCALAPPDATA"))
-                .or_else(|_| std::env::var("USERPROFILE"))
-                .unwrap_or_else(|_| ".".into());
-            let storage = PathBuf::from(app_data).join("GrokMuse");
-            let socket = windows_pipe_for_current_user("dt-cu-helper");
-            (socket, storage)
-        };
-
+        let socket_path = windows_pipe_for_current_user("dt-cu-helper");
         #[cfg(target_os = "linux")]
-        let (socket_path, storage_dir) = {
-            let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-                format!("{home}/.local/share")
-            });
-            let storage = PathBuf::from(data_home).join("grok-muse");
-            let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| storage.clone());
-            let socket = runtime_dir.join("grok-muse-cu-helper.sock");
-            (socket, storage)
-        };
-
-        #[cfg(target_os = "macos")]
-        let (socket_path, storage_dir) = {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            let app_support = PathBuf::from(home).join("Library/Application Support/GrokMuse");
-            let socket = app_support.join("cu-helper.sock");
-            (socket, app_support)
-        };
-
-        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-        let (socket_path, storage_dir) = {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-            let base = PathBuf::from(home).join(".grok-muse");
-            (base.join("cu-helper.sock"), base)
-        };
+        let socket_path = std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| storage_dir.clone())
+            .join("grok-muse-cu-helper.sock");
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let socket_path = storage_dir.join("cu-helper.sock");
 
         let openbot = OpenBotConfig {
             bots_dir: storage_dir.join("bots"),

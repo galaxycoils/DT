@@ -3,8 +3,12 @@ on:
   workflow_dispatch:
     inputs:
       evidence_run_id:
-        description: Completed run containing publisher-signed native-release-evidence artifact for this exact commit
-        required: true
+        description: Completed run containing evidence-key-signed native-release-evidence artifact for this exact commit
+        required: false
+        type: string
+      package_run_id:
+        description: Completed packaging run for the exact artifacts certified by evidence_run_id
+        required: false
         type: string
 permissions:
   contents: read
@@ -13,7 +17,19 @@ concurrency:
   group: release-${{ github.sha }}
   cancel-in-progress: false
 jobs:
+  mode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release phase inputs
+        env:
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
+        run: |
+          if [[ -z "$EVIDENCE_RUN_ID" && -z "$PACKAGE_RUN_ID" ]]; then exit 0; fi
+          [[ "$EVIDENCE_RUN_ID" =~ ^[0-9]+$ && "$PACKAGE_RUN_ID" =~ ^[0-9]+$ ]]
   evidence:
+    needs: mode
+    if: inputs.evidence_run_id != ''
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -24,18 +40,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
-          GM_RELEASE_PUBLIC_KEY_HEX: ${{ vars.GM_RELEASE_PUBLIC_KEY_HEX }}
+          GM_EVIDENCE_PUBLIC_KEY_HEX: ${{ vars.GM_EVIDENCE_PUBLIC_KEY_HEX }}
         run: |
           [[ "$EVIDENCE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
           gh run download "$EVIDENCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name native-release-evidence --dir evidence
-          python3 tools/verify-release-evidence.py --directory evidence --commit "$GITHUB_SHA" --public-key-hex "$GM_RELEASE_PUBLIC_KEY_HEX"
+          python3 tools/verify-release-evidence.py --directory evidence --commit "$GITHUB_SHA" --public-key-hex "$GM_EVIDENCE_PUBLIC_KEY_HEX"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verified-native-evidence
           path: evidence/
           if-no-files-found: error
   package:
-    needs: evidence
+    needs: mode
+    if: inputs.package_run_id == ''
     environment: release
     strategy:
       fail-fast: false
@@ -99,7 +116,7 @@ jobs:
           path: grok-muse/target/release-candidate/
           if-no-files-found: error
   sign:
-    needs: package
+    needs: evidence
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -111,6 +128,8 @@ jobs:
           pattern: package-*
           path: release-candidate
           merge-multiple: true
+          run-id: ${{ inputs.package_run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: verified-native-evidence

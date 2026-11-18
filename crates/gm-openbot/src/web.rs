@@ -390,7 +390,9 @@ async fn api_v1_auth_and_csrf_middleware(
     let path = request.uri().path().to_string();
     let rel_path = path.strip_prefix("/api/v1").unwrap_or(&path);
     // Public/webhook/login endpoints handle their own verification.
-    if rel_path == "/auth/session" || rel_path == "/billing/webhooks/stripe" {
+    if (rel_path == "/auth/session" && request.method() == axum::http::Method::POST)
+        || rel_path == "/billing/webhooks/stripe"
+    {
         return next.run(request).await;
     }
 
@@ -414,7 +416,12 @@ async fn api_v1_auth_and_csrf_middleware(
             )
             .into_response();
         };
-        let session = match plane.authorize_session(&session_id, requested_ws.as_deref()) {
+        let workspace = if rel_path == "/auth/session" {
+            None
+        } else {
+            requested_ws.as_deref()
+        };
+        let session = match plane.authorize_session(&session_id, workspace) {
             Ok(s) => s,
             Err(err) => {
                 let code = if err.to_string().contains("Cross-tenant") {
@@ -2667,6 +2674,8 @@ async fn preview_bot_file_route(
         .map_err(map_gm_error)?
         .preview_shared_file(&q.path)
         .map_err(map_gm_error)?;
+    let preview =
+        crate::attachments::preview_attachment_bounded(&q.path, &bytes).map_err(map_gm_error)?;
     use base64::Engine as _;
     let mime = if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
@@ -2696,6 +2705,7 @@ async fn preview_bot_file_route(
         "text": text,
         "mime": mime,
         "data_url": data_url,
+        "preview": preview,
     })))
 }
 
@@ -4164,7 +4174,7 @@ async fn export_template_route(
     let name = body
         .get("name")
         .and_then(|v| v.as_str())
-        .unwrap_or("Grok-Muse Team");
+        .unwrap_or("DT Team");
     let desc = body
         .get("description")
         .and_then(|v| v.as_str())
@@ -4528,14 +4538,22 @@ async fn system_provider_oauth_route(
 fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
     Router::new()
         .route("/auth/enroll", post(auth_enroll_v1_route))
-        .route("/auth/session", post(auth_session_v1_route))
+        .route(
+            "/auth/session",
+            get(get_auth_session_v1_route).post(auth_session_v1_route),
+        )
         .route("/auth/logout", post(auth_logout_v1_route))
         .route("/auth/revoke", post(auth_revoke_v1_route))
         .route("/workspaces", get(list_workspaces_v1_route))
         .route("/doctor", get(doctor_status_v1_route))
         .route("/bootstrap", get(get_bootstrap_route))
+        .route("/activity", get(list_activity))
+        .route("/queue", get(list_queue))
+        .route("/tasks/:id/:action", post(control_task_route))
         .route("/workspaces/:ws_id/events", get(stream_workspace_events_v1))
         .route("/bots", get(list_bots).post(upsert_bot_route))
+        .route("/bots/:id/files", get(list_bot_files_route))
+        .route("/bots/:id/files/preview", get(preview_bot_file_route))
         .route(
             "/dm/:bot_id/messages",
             get(list_dm_messages_route).post(post_dm_message_route),
@@ -4635,6 +4653,27 @@ async fn auth_enroll_v1_route(
         .issue_enrollment(ws_id, user_id, role, ttl)
         .map_err(map_gm_error)?;
     Ok(Json(issued))
+}
+
+async fn get_auth_session_v1_route(
+    request: axum::extract::Request,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    let session = request
+        .extensions()
+        .get::<crate::hosted::HostedSessionIssued>()
+        .ok_or_else(|| ApiErr::msg(StatusCode::UNAUTHORIZED, "Sign in to DT"))?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "authenticated": true,
+            "user_id": session.user_id,
+            "ws_id": session.ws_id,
+            "tenant_id": session.tenant_id,
+            "role": session.role,
+            "csrf_token": session.csrf_token,
+            "expires_at": session.expires_at,
+        })),
+    ))
 }
 
 async fn auth_session_v1_route(
@@ -4769,7 +4808,7 @@ async fn doctor_status_v1_route(
     }
     Ok(Json(serde_json::json!({
         "schema": 1,
-        "installation_readiness": "ready",
+        "installation_readiness": "unavailable",
         "sanitized": true,
         "note": "Run `dt doctor check --json` locally for full diagnostics."
     })))
@@ -5991,6 +6030,20 @@ mod tests {
         let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
         let sess_json: serde_json::Value = sess_resp.json().await.unwrap();
         let csrf = sess_json["csrf_token"].as_str().unwrap().to_string();
+
+        let restored = client
+            .get(format!("{base}/api/v1/auth/session"))
+            .header(header::COOKIE, &cookie_pair)
+            .header("x-dt-workspace-id", "default")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(restored.status(), 200);
+        assert_eq!(restored.headers()[header::CACHE_CONTROL], "no-store");
+        let restored: serde_json::Value = restored.json().await.unwrap();
+        assert_eq!(restored["ws_id"], "ws_alpha");
+        assert_eq!(restored["csrf_token"], csrf);
+        assert!(restored.get("session_id").is_none());
 
         // 3. GET /api/v1/doctor succeeds with cookie and returns sanitized payload.
         let doc_ok = client

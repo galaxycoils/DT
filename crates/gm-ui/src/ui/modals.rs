@@ -696,7 +696,7 @@ pub fn draw_active_modal(
                                 if update["update_available"].as_bool()==Some(true)&&ui.button("Download & Verify Update").clicked(){send(DaemonRequest::ManageSystem {op:"install_update".into(),payload:serde_json::json!({"confirmed":true})});}}
                                 ui.checkbox(&mut settings_config.ui.auto_updates,"Automatic updates when idle");
                                 if ui.button("Save Update Preference").clicked(){send(DaemonRequest::SaveUiSettings {ui:serde_json::json!({"auto_updates":settings_config.ui.auto_updates})});}
-                                if ui.button("Helper Health").clicked(){send(DaemonRequest::ManageSystem {op:"health".into(),payload:Value::Null});}
+                                if ui.button("DT Doctor Check").clicked(){send(DaemonRequest::ManageSystem {op:"health".into(),payload:Value::Null});}
                                 if ui.button("Export Support Bundle").clicked(){send(DaemonRequest::ManageSystem {op:"support_bundle".into(),payload:Value::Null});}
                                 ui.text_edit_multiline(&mut ui_state.feedback_note);
                                 ui.checkbox(&mut ui_state.diagnostics_consent,"Include redacted diagnostics");

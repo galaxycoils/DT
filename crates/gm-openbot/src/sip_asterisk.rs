@@ -364,10 +364,26 @@ impl AsteriskSipClient {
     }
 
     pub async fn hangup_and_recover(&self, session: &mut SipCallSession) -> Result<()> {
+        let external = if let Some(media_id) = session.external_media_channel_id.as_deref() {
+            let result = self.hangup_channel(media_id).await;
+            if result.is_ok() {
+                session.external_media_channel_id = None;
+            }
+            result
+        } else {
+            Ok(())
+        };
+        let primary = self.hangup_channel(&session.channel_id).await;
+        primary.and(external)?;
+        session.state = VoiceSessionState::Ended;
+        session.updated_at = Utc::now().to_rfc3339();
+        Ok(())
+    }
+
+    async fn hangup_channel(&self, channel_id: &str) -> Result<()> {
         let url = format!(
-            "{}/channels/{}",
-            self.cfg.ari_base_url.trim_end_matches('/'),
-            session.channel_id
+            "{}/channels/{channel_id}",
+            self.cfg.ari_base_url.trim_end_matches('/')
         );
         let resp = self
             .client
@@ -382,8 +398,6 @@ impl AsteriskSipClient {
                 resp.status()
             )));
         }
-        session.state = VoiceSessionState::Ended;
-        session.updated_at = Utc::now().to_rfc3339();
         Ok(())
     }
 

@@ -18,7 +18,7 @@ pub fn linux_unit(binary: &Path, daemon: bool) -> std::result::Result<String, St
         .replace('%', "%%")
         .replace('$', "$$");
     Ok(format!(
-        "[Unit]\nDescription=DT {}\nPartOf=graphical-session.target\nAfter=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{}\"{}\nRestart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=graphical-session.target\n",
+        "[Unit]\nDescription=DT {}\nPartOf=graphical-session.target\n\n[Service]\nType=simple\nExecStart=\"{}\"{}\nRestart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=graphical-session.target\n",
         if daemon { "daemon" } else { "desktop helper" },
         escaped,
         if daemon { " daemon" } else { "" }
@@ -27,13 +27,6 @@ pub fn linux_unit(binary: &Path, daemon: bool) -> std::result::Result<String, St
 
 #[cfg(any(windows, test))]
 pub fn windows_task(binary: &Path, daemon: bool, sid: &str) -> std::result::Result<String, String> {
-    fn xml(text: &str) -> String {
-        text.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&apos;")
-    }
     if !sid.starts_with("S-1-")
         || !sid
             .bytes()
@@ -53,8 +46,8 @@ pub fn windows_task(binary: &Path, daemon: bool, sid: &str) -> std::result::Resu
 <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings>
 <Actions Context="User"><Exec><Command>{binary}</Command><Arguments>{arguments}</Arguments></Exec></Actions>
 </Task>"#,
-        sid = xml(sid),
-        binary = xml(path),
+        sid = crate::service::escape_xml(sid),
+        binary = crate::service::escape_xml(path),
         arguments = if daemon { "daemon" } else { "" }
     ))
 }
@@ -135,7 +128,7 @@ pub fn install_services(root: Option<&Path>) -> Result<()> {
         "gm-cu-helper.service",
         "gm-daemon.service",
     ]))?;
-    println!("Installed and started Grok Muse user services in this desktop session.");
+    println!("Installed and started DT user services in this desktop session.");
     Ok(())
 }
 #[cfg(target_os = "linux")]
@@ -168,14 +161,8 @@ pub fn show_services_status() -> Result<()> {
 
 #[cfg(windows)]
 fn task_names() -> Result<[String; 2]> {
-    let sid = checked(Command::new("powershell.exe").args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
-    ]))?;
-    let sid = sid.trim();
-    windows_task(Path::new("gm-daemon.exe"), true, sid).map_err(GmError::Config)?;
+    let sid = gm_core::ipc::windows_pipe_security::current_user_sid()?;
+    windows_task(Path::new("gm-daemon.exe"), true, &sid).map_err(GmError::Config)?;
     Ok([format!("DT-Daemon-{sid}"), format!("DT-Helper-{sid}")])
 }
 #[cfg(windows)]

@@ -25,16 +25,16 @@ See [coverage inventory](release/coverage-inventory.md) and [inference budget le
 
 ## Distribution and signing
 
-`tools/package-release.py --version VERSION --output-dir target/release-candidate` packages four native binaries, documentation, license/notices and source-commit metadata. A clean committed checkout is mandatory. macOS requires a preconfigured Developer ID identity and notary profile, signs binaries/bundles/DMG and validates the stapled ticket. Windows requires an installed signing certificate and validates every executable signature. Linux archives include a runtime dependency inventory; system runtime libraries are prerequisites, **not yet a self-contained dependency bundle**.
+`tools/package-release.py --version VERSION --output-dir target/release-candidate` packages six native executables from a clean committed checkout. macOS requires Developer ID Application and Installer identities plus a notarization profile. Windows requires a preconfigured Authenticode signing certificate. Ubuntu uses declared system runtime dependencies.
 
-`tools/sign-release.py --directory release-candidate` requires protected `GM_RELEASE_SIGNING_KEY_PEM` and independently pinned `GM_RELEASE_PUBLIC_KEY_HEX`. It checks all four build receipts against this commit/version/target, signs the canonical manifest and archives, and never creates or falls back to a development publisher key. Production builds embed the same public key. Names are:
+- `DT-VERSION-macos-aarch64.dmg`
+- `DT-VERSION-macos-x86_64.dmg`
+- `DT-VERSION-windows-x86_64-setup.exe`
+- `dt_VERSION_amd64.deb`
 
-- `GrokMuse-VERSION-macos-aarch64.dmg`
-- `GrokMuse-VERSION-macos-x86_64.dmg`
-- `GrokMuse-VERSION-windows-x86_64.zip`
-- `GrokMuse-VERSION-linux-x86_64.tar.gz`
+Dispatch the signed release workflow with both run IDs empty to package a candidate on the protected `dt-release` runners. Certify those exact artifacts, then dispatch at the same commit with the packaging and evidence run IDs. Verification uses `GM_EVIDENCE_PUBLIC_KEY_HEX`. Publisher signing uses `GM_RELEASE_SIGNING_KEY_PEM` and `GM_RELEASE_PUBLIC_KEY_HEX`, matching the public key compiled into the release binaries. Signing compares all four installer SHA-256 digests against both the build receipts and verified certification evidence. The workflow uploads a signed candidate for publication.
 
-`.github/workflows/release.yml` is manually dispatched, produces reviewable candidate artifacts, and does not publish a GitHub release. Its protected `release` environment must provide publisher variables/secrets, signing identities and dedicated authorized `grok-muse-release` runners for each target. All checkouts use the same source commit and pinned Darius revision. Native evidence must pass before packaging starts.
+The updater reads signed metadata from the `update-metadata` branch and remembers the highest verified sequence for each repository. The renewal workflow verifies the frozen tag, release signatures, installer hashes, and previous metadata before publishing a higher sequence.
 
 The manual update procedure is: stop UI/services; close all writers; retain the old package and a complete closed-app data backup; install the verified matching package; restart services/UI; run diagnostics. If recovery is needed, stop all writers again and restore the old package **with its compatible data backup**. Never run an older binary against a newer schema. Clean-machine install/update/recovery/uninstall evidence remains outstanding.
 

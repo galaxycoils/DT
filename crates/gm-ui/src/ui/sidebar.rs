@@ -60,7 +60,7 @@ pub fn draw_adaptive_sidebar(
                 }
                 if !mini {
                     ui.add_space(4.0);
-                    ui.strong("Grok Muse");
+                    ui.strong("DT");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         let plus = icons::button(ui, Icon::Plus, "Create", palette.text_secondary);
                         egui::Popup::menu(&plus).show(|ui| {

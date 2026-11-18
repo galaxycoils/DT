@@ -35,7 +35,6 @@ cat > "$PKG_ROOT/usr/lib/systemd/user/gm-cu-helper.service" <<'EOF'
 [Unit]
 Description=DT desktop helper
 PartOf=graphical-session.target
-After=graphical-session.target
 
 [Service]
 Type=simple
@@ -52,7 +51,7 @@ cat > "$PKG_ROOT/usr/lib/systemd/user/gm-daemon.service" <<'EOF'
 [Unit]
 Description=DT daemon
 PartOf=graphical-session.target
-After=graphical-session.target gm-cu-helper.service
+After=gm-cu-helper.service
 
 [Service]
 Type=simple

@@ -1,14 +1,14 @@
 ; DT Windows Installer (NSIS 3.13)
 ; Installs under Program Files, registers Start Menu & Installed Apps entries,
-; configures per-user isolation, checks redistributables, and resumes WHPX setup via `dt doctor resume`.
+; offers DT and Doctor shortcuts for the signed-in user.
 
 !include "MUI2.nsh"
 !include "x64.nsh"
+!include "LogicLib.nsh"
 
 Name "DT ${VERSION}"
 OutFile "${OUT_FILE}"
 InstallDir "$PROGRAMFILES64\DT"
-InstallDirRegKey HKLM "Software\DT" "InstallDir"
 RequestExecutionLevel admin
 
 !define MUI_ABORTWARNING
@@ -22,7 +22,17 @@ RequestExecutionLevel admin
 
 !insertmacro MUI_LANGUAGE "English"
 
+Function .onInit
+  SetRegView 64
+  ReadRegStr $0 HKLM "Software\DT" "InstallDir"
+  ${If} $0 != ""
+    StrCpy $INSTDIR $0
+  ${EndIf}
+FunctionEnd
+
 Section "DT Core" SecCore
+  SetRegView 64
+  SetShellVarContext all
   SetOutPath "$INSTDIR\bin"
   File "${BIN_DIR}\dt.exe"
   File "${BIN_DIR}\gm.exe"
@@ -55,19 +65,22 @@ Section "DT Core" SecCore
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\DT" "NoRepair" 0
 SectionEnd
 
-Section "Optional WHPX Check & Resume Hook" SecWhpx
-  ; Run interactive-user setup check via dt-doctor without leaving elevated context in control of user profile.
-  ExecWait '"$INSTDIR\bin\dt-doctor.exe" check --json'
-SectionEnd
-
 Section "Uninstall"
+  SetRegView 64
+  SetShellVarContext all
   ; Remove DT-owned program files and registrations while preserving user data (%APPDATA%\GrokMuse / %APPDATA%\DT) by default.
   Delete "$SMPROGRAMS\DT\DT.lnk"
   Delete "$SMPROGRAMS\DT\DT Doctor.lnk"
   Delete "$SMPROGRAMS\DT\Uninstall DT.lnk"
   RMDir "$SMPROGRAMS\DT"
 
-  RMDir /r "$INSTDIR\bin"
+  Delete "$INSTDIR\bin\dt.exe"
+  Delete "$INSTDIR\bin\gm.exe"
+  Delete "$INSTDIR\bin\dt-doctor.exe"
+  Delete "$INSTDIR\bin\gm-daemon.exe"
+  Delete "$INSTDIR\bin\gm-cu-helper.exe"
+  Delete "$INSTDIR\bin\gm-ui.exe"
+  RMDir "$INSTDIR\bin"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
   Delete "$INSTDIR\README.md"

@@ -416,6 +416,7 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
     assert_eq!(sip_sess.reconnect_attempts, 1);
     sip.hangup_and_recover(&mut sip_sess).await.unwrap();
     assert_eq!(sip_sess.state, VoiceSessionState::Ended);
+    assert!(sip_sess.external_media_channel_id.is_none());
 
     // 5. Zoom RTMS: HMAC signature + consent gate + WS transcript + handoff + recover + leave
     let zoom = ZoomRtmsClient::new(ZoomRtmsConfig {

@@ -39,6 +39,14 @@ pub fn helper_short_plist_path() -> PathBuf {
     launch_agents_dir().join("helper.plist")
 }
 
+pub(crate) fn escape_xml(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace(char::from(39), "&apos;")
+}
+
 pub fn generate_daemon_plist(daemon_bin: &Path, log_stdout: &Path, log_stderr: &Path) -> String {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     format!(
@@ -69,10 +77,10 @@ pub fn generate_daemon_plist(daemon_bin: &Path, log_stdout: &Path, log_stderr: &
 </plist>
 "#,
         DAEMON_LABEL,
-        daemon_bin.display(),
-        home,
-        log_stdout.display(),
-        log_stderr.display()
+        escape_xml(&daemon_bin.to_string_lossy()),
+        escape_xml(&home),
+        escape_xml(&log_stdout.to_string_lossy()),
+        escape_xml(&log_stderr.to_string_lossy())
     )
 }
 
@@ -105,10 +113,10 @@ pub fn generate_helper_plist(helper_bin: &Path, log_stdout: &Path, log_stderr: &
 </plist>
 "#,
         HELPER_LABEL,
-        helper_bin.display(),
-        home,
-        log_stdout.display(),
-        log_stderr.display()
+        escape_xml(&helper_bin.to_string_lossy()),
+        escape_xml(&home),
+        escape_xml(&log_stdout.to_string_lossy()),
+        escape_xml(&log_stderr.to_string_lossy())
     )
 }
 
@@ -315,7 +323,7 @@ pub fn install_services(custom_bin_dir: Option<&Path>) -> Result<()> {
 
     let (daemon_bin, helper_bin) = resolve_binaries(custom_bin_dir);
 
-    println!("==> Installing Grok-Muse LaunchAgents...");
+    println!("==> Installing DT LaunchAgents...");
     println!("  Daemon binary: {:?}", daemon_bin);
     println!("  Helper binary: {:?}", helper_bin);
     println!("  Logs dir:      {:?}", log_dir);
@@ -328,7 +336,7 @@ pub fn install_services(custom_bin_dir: Option<&Path>) -> Result<()> {
     fs::write(&d_path, &d_plist_content).map_err(GmError::Io)?;
     println!("  ✔ Generated: {:?}", d_path);
 
-    // 2. Helper Plist (both standard bundle label path and short helper.plist)
+    // 2. Helper Plist
     let h_stdout = log_dir.join("helper.stdout.log");
     let h_stderr = log_dir.join("helper.stderr.log");
     let h_plist_content = generate_helper_plist(&helper_bin, &h_stdout, &h_stderr);
@@ -337,8 +345,11 @@ pub fn install_services(custom_bin_dir: Option<&Path>) -> Result<()> {
     println!("  ✔ Generated: {:?}", h_path);
 
     let h_short_path = helper_short_plist_path();
-    let _ = fs::write(&h_short_path, &h_plist_content);
-    println!("  ✔ Generated: {:?}", h_short_path);
+    if fs::read_to_string(&h_short_path)
+        .is_ok_and(|plist| plist.contains(&format!("<string>{HELPER_LABEL}</string>")))
+    {
+        fs::remove_file(&h_short_path)?;
+    }
 
     // 3. Launchctl bootstrap
     println!("==> Bootstrapping services into launchd...");
@@ -363,13 +374,13 @@ pub fn install_services(custom_bin_dir: Option<&Path>) -> Result<()> {
     );
 
     println!("\n🎉 LaunchAgents successfully installed and bootstrapped!");
-    println!("Use 'gm service status' to check live status.");
+    println!("Use 'dt service status' to check live status.");
     Ok(())
 }
 
 #[cfg(target_os = "macos")]
 pub fn uninstall_services() -> Result<()> {
-    println!("==> Uninstalling Grok-Muse LaunchAgents...");
+    println!("==> Uninstalling DT LaunchAgents...");
     let d_path = daemon_plist_path();
     let h_path = helper_plist_path();
     let h_short_path = helper_short_plist_path();
@@ -400,7 +411,7 @@ pub fn show_services_status() -> Result<()> {
     let h_status = inspect_service(HELPER_LABEL, helper_plist_path());
 
     println!("\n============================================================");
-    println!("             Grok-Muse Service Management Status            ");
+    println!("             DT Service Management Status            ");
     println!("============================================================");
 
     let print_row = |name: &str, status: &ServiceStatus| {
@@ -452,11 +463,12 @@ mod tests {
     #[test]
     fn test_plist_generation() {
         let d_bin = Path::new("/Applications/GrokMuse.app/Contents/MacOS/gm-daemon");
-        let stdout = Path::new("/tmp/out.log");
+        let stdout = Path::new("/tmp/out & <stdout>.log");
         let stderr = Path::new("/tmp/err.log");
 
         let plist = generate_daemon_plist(d_bin, stdout, stderr);
         assert!(plist.contains(DAEMON_LABEL));
+        assert!(plist.contains("/tmp/out &amp; &lt;stdout&gt;.log"));
         assert!(plist.contains("/Applications/GrokMuse.app/Contents/MacOS/gm-daemon"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<true/>"));

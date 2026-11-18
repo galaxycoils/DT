@@ -5,8 +5,10 @@ import datetime
 import hashlib
 import json
 import pathlib
+import re
 import subprocess
 import tempfile
+import tomllib
 
 TARGETS = {
     ('macos', 'aarch64', 'native'),
@@ -63,10 +65,22 @@ def validate(data, commit, root):
         if any(attested_rows[r] is not True for r in required_rows):
             raise ValueError('One or more required coverage-inventory rows did not pass')
 
-    # Verify candidate installer/container/component hashes are bound if provided in candidate_hashes.
-    candidate = data.get('candidate_hashes', {})
-    if candidate is not None and not isinstance(candidate, dict):
-        raise ValueError('Invalid candidate_hashes block')
+    version = tomllib.loads((docs_dir.parent.parent / 'Cargo.toml').read_text())['workspace']['package']['version']
+    candidate = data.get('candidate_hashes')
+    if not isinstance(candidate, dict) or set(candidate) != {'installers', 'container', 'components', 'mobile'}:
+        raise ValueError('Evidence requires candidate installer, container, component, and mobile hashes')
+    installer_names = {f'DT-{version}-macos-aarch64.dmg', f'DT-{version}-macos-x86_64.dmg',
+                       f'DT-{version}-windows-x86_64-setup.exe', f'dt_{version}_amd64.deb'}
+    component_names = {'qwen2-vl-2b', 'smolvlm', 'smolvlm2', 'vlm_worker', 'whisper-stt-base-en',
+                       'speech_tts', 'vm_image', 'vm_firmware'}
+    for key, expected in [('installers', installer_names), ('components', component_names), ('mobile', {'ios', 'android'})]:
+        hashes = candidate[key]
+        if not isinstance(hashes, dict) or set(hashes) != expected:
+            raise ValueError(f'Evidence requires exact candidate {key}')
+        if not all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) for value in hashes.values()):
+            raise ValueError(f'Invalid SHA-256 digest in candidate {key}')
+    if not isinstance(candidate['container'], str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', candidate['container']):
+        raise ValueError('Invalid candidate container digest')
 
     targets = set()
     for report in data.get('targets', []):
@@ -76,6 +90,18 @@ def validate(data, commit, root):
         targets.add(target)
         if set(report.get('checks', {})) != CHECKS or any(v is not True for v in report['checks'].values()):
             raise ValueError(f'Missing or failed native checks for {target}')
+        soak = report.get('soak')
+        if not isinstance(soak, dict):
+            raise ValueError(f'Missing proactive soak for {target}')
+        started = datetime.datetime.fromisoformat(soak['started_at'].replace('Z', '+00:00'))
+        ended = datetime.datetime.fromisoformat(soak['ended_at'].replace('Z', '+00:00'))
+        if started.tzinfo is None or ended.tzinfo is None or ended > recorded or ended - started < datetime.timedelta(days=7):
+            raise ValueError(f'Proactive soak must span at least seven days before evidence was recorded: {target}')
+        ratings, useful, daily_peak = (soak.get(key) for key in ('ratings', 'useful', 'max_notices_per_day'))
+        if any(type(value) is not int for value in (ratings, useful, daily_peak)) or ratings < 20 or not 0 <= daily_peak <= 3 or not 0 <= useful <= ratings or useful * 5 < ratings * 4:
+            raise ValueError(f'Proactive usefulness or notice-rate gate failed for {target}')
+        if any(soak.get(key) is not True for key in ('quiet_hours', 'opt_out', 'budget')):
+            raise ValueError(f'Proactive quiet hours, opt-out, or budget gate failed for {target}')
         runs = report.get('runs', [])
         if len(runs) != 3:
             raise ValueError('Three consecutive native runs are required')

@@ -33,11 +33,23 @@ class EvidenceTests(unittest.TestCase):
         coverage_rows = {row['id']: True for row in inventory['rows'] if row.get('required')}
         metrics = dict(samples=30, idle_tree_mib=30, ui_tree_mib=100, capture_p99_ms=1, ax_p95_ms=10, jpeg_p95_ms=5,
                        dispatch_p95_ms=1, kill_ms=10, step_p50_ms=100, step_p95_ms=500)
+        recorded = datetime.datetime.now(datetime.timezone.utc)
+        soak = dict(started_at=(recorded - datetime.timedelta(days=7)).isoformat(),
+                    ended_at=recorded.isoformat(), ratings=20, useful=16,
+                    max_notices_per_day=3, quiet_hours=True, opt_out=True, budget=True)
         reports = [dict(os=os_name, architecture=arch, session=session, checks={key: True for key in EVIDENCE['CHECKS']},
-                        runs=[dict(tasks=copy.deepcopy(tasks)) for _ in range(3)], measurements=metrics,
+                        runs=[dict(tasks=copy.deepcopy(tasks)) for _ in range(3)], measurements=metrics, soak=soak,
                         artifacts=[dict(path='log.txt', sha256=checksum)]) for os_name, arch, session in EVIDENCE['TARGETS']]
-        return dict(schema=1, commit='a' * 40, source='native', recorded_at=datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                    coverage_rows=coverage_rows, targets=reports)
+        return dict(schema=1, commit='a' * 40, source='native', recorded_at=recorded.isoformat(),
+                    coverage_rows=coverage_rows, targets=reports, candidate_hashes={
+                        'installers': {PACKAGE['archive_name']('1.0.0', os_name, arch): checksum
+                                       for os_name, arch, _ in EVIDENCE['TARGETS']},
+                        'container': 'sha256:' + checksum,
+                        'mobile': {'ios': checksum, 'android': checksum},
+                        'components': {name: checksum for name in (
+                            'qwen2-vl-2b', 'smolvlm', 'smolvlm2', 'vlm_worker',
+                            'whisper-stt-base-en', 'speech_tts', 'vm_image', 'vm_firmware')},
+                    })
 
     def test_required_targets_catalog_safety_and_metrics(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -46,6 +58,8 @@ class EvidenceTests(unittest.TestCase):
             EVIDENCE['validate'](data, 'a' * 40, root)
             mutations = [
                 lambda d: d.update(source='fixture'),
+                lambda d: d.pop('candidate_hashes'),
+                lambda d: d['candidate_hashes']['installers'].popitem(),
                 lambda d: d.update(commit='b' * 40),
                 lambda d: d['targets'].pop(),
                 lambda d: d['targets'][0]['runs'].pop(),
@@ -54,6 +68,7 @@ class EvidenceTests(unittest.TestCase):
                 lambda d: d['targets'][0]['runs'][0]['tasks'][0].update(id='unknown-task'),
                 lambda d: d['targets'][0]['checks'].update(vm_cli_boot=False),
                 lambda d: d['targets'][0]['measurements'].update(kill_ms=150),
+                lambda d: d['targets'][0]['soak'].update(useful=15),
                 lambda d: d['targets'][0]['artifacts'][0].update(path='../outside'),
                 lambda d: d['coverage_rows'].popitem(),
             ]

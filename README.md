@@ -168,14 +168,14 @@ shasum -a 256 -c GrokMuse-0.7.0-macos-aarch64-adhoc.dmg.sha256
 
 ### Building the DMG
 ```bash
-# Build binaries, bundle .app packages, codesign, and create target/dist/Grok-Muse.dmg
+# Build binaries, bundle .app packages, codesign, and create target/dist/DT.dmg
 cargo run --locked --package xtask -- dmg --release --identity - --output target/dist/GrokMuse-0.7.0-macos-aarch64-adhoc.dmg
 ```
 
 ### Installing on macOS
 1. Open `GrokMuse-0.7.0-macos-aarch64-adhoc.dmg` from your download or build directory.
 2. Drag `GrokMuse.app` to `/Applications`.
-3. Launch `Grok-Muse` or run the CLI onboarding:
+3. Launch `DT` or run the CLI onboarding:
    ```bash
    gm onboard
    ```
@@ -185,7 +185,7 @@ cargo run --locked --package xtask -- dmg --release --identity - --output target
 
 ## LaunchAgent Service Management
 
-Grok-Muse registers separate LaunchAgents for `gm-daemon` and `gm-cu-helper` to maintain independent lifecycles without requiring persistent Terminal windows:
+DT registers separate LaunchAgents for `gm-daemon` and `gm-cu-helper` to maintain independent lifecycles without requiring persistent Terminal windows:
 
 ```bash
 # Install and bootstrap user LaunchAgents
@@ -206,7 +206,7 @@ Plists are installed in `~/Library/LaunchAgents/`:
 
 ## macOS Onboarding & Permissions
 
-Grok-Muse provides automated inspection and deep links into macOS System Settings for all required privacy permissions:
+DT provides automated inspection and deep links into macOS System Settings for all required privacy permissions:
 
 ```bash
 # Check all permissions and print live status table
@@ -244,7 +244,7 @@ security add-generic-password -s "grok-muse" -a "xai_api_key" -w "your-xai-key" 
 ```
 
 ### Environment Fallbacks (CI / Headless)
-If Keychain entries are absent (e.g., in automated CI environments), Grok-Muse automatically falls back to environment variables:
+If Keychain entries are absent (e.g., in automated CI environments), DT automatically falls back to environment variables:
 - `GROK_MUSE_META_KEY` or `META_API_KEY`
 - `GROK_MUSE_XAI_KEY` or `XAI_API_KEY`
 
@@ -372,7 +372,7 @@ A high-contrast, floating HUD overlay positioned on the frontmost screen indicat
 
 ## Benchmarking & Evaluation (`xtask`)
 
-Grok-Muse includes an `xtask` binary implementing rigorous quality and performance gates:
+DT includes an `xtask` binary implementing rigorous quality and performance gates:
 
 ```bash
 # 1. Benchmark G3 local hot-path budgets (< 2ms capture, < 30ms AX, < 15ms JPEG, < 5ms dispatch)
@@ -395,7 +395,7 @@ cargo run --package xtask -- eval
 
 ## Interactive Terminal REPL (`gm chat`)
 
-Direct conversational interaction with Grok-Muse supporting SQLite personal memory retrieval, live status inspection, and inline computer-use task dispatch:
+Direct conversational interaction with DT supporting SQLite personal memory retrieval, live status inspection, and inline computer-use task dispatch:
 
 ```bash
 # Start interactive REPL
@@ -418,7 +418,7 @@ gm chat --system "You are an automated coding reviewer."
 
 ## Local Vision-Language Model Interface (Action A12 Prep)
 
-Grok-Muse provides a pluggable `LocalVlmBackend` trait in `crates/gm-llm` for offline local model grounding and visual triage (Candle/MLX ready):
+DT provides a pluggable `LocalVlmBackend` trait in `crates/gm-llm` for offline local model grounding and visual triage (Candle/MLX ready):
 
 ```bash
 # Compile and test with local-vlm feature flag enabled

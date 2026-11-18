@@ -197,7 +197,7 @@ fn handle_daemon_event(ev: DaemonEvent) {
                 "stopped" | "kill" => 3,
                 _ => 1,
             };
-            let status_text = format!("Grok-Muse: {state} (${daily_spend_usd:.2})");
+            let status_text = format!("DT: {state} (${daily_spend_usd:.2})");
             let c_status = CString::new(status_text.replace('\0', "")).unwrap_or_default();
             let c_detail = CString::new(detail.replace('\0', "")).unwrap_or_default();
             unsafe {
@@ -219,7 +219,7 @@ fn handle_daemon_event(ev: DaemonEvent) {
             action_summary,
             ..
         } => {
-            let c_status = CString::new("⚡️ Grok-Muse: Acting").unwrap_or_default();
+            let c_status = CString::new("⚡️ DT: Acting").unwrap_or_default();
             let c_detail =
                 CString::new(format!("Step {step}: {}", action_summary.replace('\0', "")))
                     .unwrap_or_default();
@@ -241,9 +241,9 @@ fn handle_daemon_event(ev: DaemonEvent) {
         }
         DaemonEvent::TaskFinished { ok, message, .. } => {
             let (code, status) = if ok {
-                (0, "Grok-Muse: Finished")
+                (0, "DT: Finished")
             } else {
-                (3, "Grok-Muse: Stopped")
+                (3, "DT: Stopped")
             };
             let c_status = CString::new(status).unwrap_or_default();
             let clean_msg = message.replace('\0', "");
@@ -274,7 +274,7 @@ fn handle_daemon_event(ev: DaemonEvent) {
             }
         }
         DaemonEvent::WheelHandoffResumed { task_id, bot_id } => {
-            let c_status = CString::new("⚡️ Grok-Muse: Resumed").unwrap_or_default();
+            let c_status = CString::new("⚡️ DT: Resumed").unwrap_or_default();
             let c_detail =
                 CString::new(format!("Resumed @{bot_id} task {task_id}")).unwrap_or_default();
             unsafe {
@@ -536,7 +536,7 @@ async fn main() -> Result<()> {
         unsafe {
             gm_ui_set_hud_state(
                 3,
-                CString::new("🛑 Grok-Muse: Stopped").unwrap().as_ptr(),
+                CString::new("🛑 DT: Stopped").unwrap().as_ptr(),
                 CString::new("CLI Kill Signal").unwrap().as_ptr(),
             );
         }
@@ -557,7 +557,7 @@ async fn main() -> Result<()> {
     match cmd {
         Commands::Native => unreachable!(),
         Commands::Tray => {
-            info!("Launching Grok-Muse tray desktop shell");
+            info!("Launching DT tray desktop shell");
             #[cfg(target_os = "macos")]
             unsafe {
                 gm_mac_ui_set_callbacks(
@@ -571,7 +571,7 @@ async fn main() -> Result<()> {
                     info!("Native macOS AppKit NSStatusItem & Action Overlay initialized");
                 }
             }
-            println!("Grok-Muse system tray active.");
+            println!("DT system tray active.");
             println!("  • Instant Summon: Cmd+Shift+Space");
             println!("  • Emergency Kill Switch: Cmd+Alt+Escape");
             println!("  • Tray menu: Summon, Pause/Resume, Run Task, Permissions, Quit");
@@ -592,7 +592,7 @@ async fn main() -> Result<()> {
                 }
                 gm_mac_ui_show_chat_window();
             }
-            println!("Grok-Muse chat interface initialized.");
+            println!("DT chat interface initialized.");
         }
         Commands::Onboard => {
             info!("Opening Onboarding & Permissions dialog");
@@ -603,7 +603,7 @@ async fn main() -> Result<()> {
                     info!("Native macOS AppKit onboarding dialog initialized");
                 }
             }
-            println!("Grok-Muse permissions & onboarding dialog active.");
+            println!("DT permissions & onboarding dialog active.");
         }
         Commands::Overlay { state, detail } => {
             info!("Initializing floating visual action overlay (state={state})");
