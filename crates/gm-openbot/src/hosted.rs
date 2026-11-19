@@ -127,6 +127,10 @@ END
 $$;
 "#;
 
+pub const POSTGRES_MIGRATION_V4: &str = r#"
+ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS token_sha256 TEXT NOT NULL DEFAULT '';
+"#;
+
 /// Combined PostgreSQL schema exported for reference and deployment bootstrap.
 pub const POSTGRES_CONTROL_PLANE_SCHEMA: &str = const_str_concat_placeholder();
 
@@ -327,6 +331,223 @@ pub struct PostgresHostedStore {
     pool: PgPool,
     workers_root: PathBuf,
     master_key: [u8; 32],
+    revocation_tx: tokio::sync::broadcast::Sender<(String, String)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SqliteToPostgresMigrationReport {
+    pub backup_path: String,
+    pub backup_sha256: String,
+    pub workspaces_migrated: usize,
+    pub memberships_migrated: usize,
+    pub enrollments_migrated: usize,
+    pub sessions_migrated: usize,
+    pub secrets_migrated: usize,
+}
+
+pub type HostedWorkspaceRow = (String, String, String, String, String, String);
+pub type HostedMembershipRow = (String, String, String, String, Option<String>, String);
+pub type HostedEnrollmentRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+pub type HostedSessionRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    String,
+);
+pub type HostedSecretRow = (String, String, String, String, String);
+
+#[derive(Debug, Clone, Default)]
+pub struct HostedSqliteExport {
+    pub workspaces: Vec<HostedWorkspaceRow>,
+    pub memberships: Vec<HostedMembershipRow>,
+    pub enrollments: Vec<HostedEnrollmentRow>,
+    pub sessions: Vec<HostedSessionRow>,
+    pub secrets: Vec<HostedSecretRow>,
+}
+
+/// Take a verified, consistent SQLite backup of an existing hosted control-plane DB
+/// before exporting rows for migration into PostgreSQL.
+pub fn export_sqlite_snapshot_with_backup(
+    sqlite_path: &Path,
+) -> Result<(PathBuf, String, HostedSqliteExport)> {
+    if !sqlite_path.is_file() {
+        return Err(GmError::Config(format!(
+            "Hosted SQLite database does not exist at {}",
+            sqlite_path.display()
+        )));
+    }
+    let stamp = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let backup_path = sqlite_path.with_file_name(format!(
+        "{}.pre-pg-migration-{stamp}.bak",
+        sqlite_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("hosted-control.sqlite")
+    ));
+    let src = Connection::open(sqlite_path)
+        .map_err(|e| GmError::Platform(format!("Open hosted SQLite for migration failed: {e}")))?;
+    let backup_str = backup_path.display().to_string();
+    src.execute("VACUUM INTO ?1", params![backup_str])
+        .map_err(|e| {
+            GmError::Platform(format!(
+                "Consistent SQLite backup (VACUUM INTO) failed: {e}"
+            ))
+        })?;
+    drop(src);
+    let backup_conn = Connection::open(&backup_path)
+        .map_err(|e| GmError::Platform(format!("Verify SQLite backup open failed: {e}")))?;
+    let integrity: String = backup_conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|e| GmError::Platform(format!("SQLite backup integrity_check failed: {e}")))?;
+    if !integrity.eq_ignore_ascii_case("ok") {
+        return Err(GmError::SafetyViolation(format!(
+            "SQLite backup integrity check failed: {integrity}"
+        )));
+    }
+    let backup_bytes = std::fs::read(&backup_path)?;
+    let backup_sha256 = hex::encode(Sha256::digest(&backup_bytes));
+
+    let mut export = HostedSqliteExport::default();
+    let table_exists = |name: &str| -> bool {
+        backup_conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                params![name],
+                |_| Ok(()),
+            )
+            .is_ok()
+    };
+
+    if table_exists("hosted_workspaces_v1") {
+        let mut stmt = backup_conn
+            .prepare("SELECT ws_id, tenant_id, name, worker_dir, token_sha256, created_at FROM hosted_workspaces_v1")
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        for r in rows {
+            export
+                .workspaces
+                .push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+        }
+    }
+
+    if table_exists("hosted_memberships_v1") {
+        let mut stmt = backup_conn
+            .prepare("SELECT ws_id, user_id, tenant_id, role, revoked_at, created_at FROM hosted_memberships_v1")
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        for r in rows {
+            export
+                .memberships
+                .push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+        }
+    }
+
+    if table_exists("hosted_enrollments_v1") {
+        let mut stmt = backup_conn
+            .prepare("SELECT token_sha256, user_id, ws_id, tenant_id, role, expires_at, redeemed_at, revoked_at, created_at FROM hosted_enrollments_v1")
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        for r in rows {
+            export
+                .enrollments
+                .push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+        }
+    }
+
+    if table_exists("hosted_sessions_v1") {
+        let mut stmt = backup_conn
+            .prepare("SELECT session_sha256, user_id, ws_id, tenant_id, role, csrf_token, expires_at, revoked_at, created_at FROM hosted_sessions_v1")
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                    r.get(7)?,
+                    r.get(8)?,
+                ))
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        for r in rows {
+            export
+                .sessions
+                .push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+        }
+    }
+
+    if table_exists("hosted_encrypted_secrets_v1") {
+        let mut stmt = backup_conn
+            .prepare("SELECT ws_id, account, nonce_b64, ciphertext_b64, updated_at FROM hosted_encrypted_secrets_v1")
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        for r in rows {
+            export
+                .secrets
+                .push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+        }
+    }
+
+    Ok((backup_path, backup_sha256, export))
 }
 
 impl PostgresHostedStore {
@@ -344,13 +565,19 @@ impl PostgresHostedStore {
             .await
             .map_err(|e| GmError::Platform(format!("PostgreSQL connect failed: {e}")))?;
         let key: [u8; 32] = Sha256::digest(master_key).into();
+        let (revocation_tx, _) = tokio::sync::broadcast::channel(64);
         let store = Self {
             pool,
             workers_root: workers_root.as_ref().to_path_buf(),
             master_key: key,
+            revocation_tx,
         };
         store.run_migrations().await?;
         Ok(store)
+    }
+
+    pub fn subscribe_revocations(&self) -> tokio::sync::broadcast::Receiver<(String, String)> {
+        self.revocation_tx.subscribe()
     }
 
     pub async fn run_migrations(&self) -> Result<()> {
@@ -368,6 +595,7 @@ impl PostgresHostedStore {
                 (1_i32, POSTGRES_MIGRATION_V1),
                 (2_i32, POSTGRES_MIGRATION_V2),
                 (3_i32, POSTGRES_MIGRATION_V3),
+                (4_i32, POSTGRES_MIGRATION_V4),
             ] {
                 sqlx::raw_sql(sql).execute(&mut *conn).await.map_err(|e| {
                     GmError::Platform(format!("PostgreSQL migration v{version} failed: {e}"))
@@ -396,7 +624,7 @@ impl PostgresHostedStore {
             .fetch_one(&self.pool)
             .await
             .map_err(|e| GmError::Platform(format!("PostgreSQL readiness check failed: {e}")))?;
-        if applied < 3 {
+        if applied < 4 {
             return Err(GmError::Platform(
                 "PostgreSQL hosted migrations are incomplete".into(),
             ));
@@ -418,9 +646,27 @@ impl PostgresHostedStore {
         name: &str,
         owner_user_id: &str,
     ) -> Result<WorkspaceRecord> {
+        self.provision_workspace_with_token(ws_id, tenant_id, owner_email, name, owner_user_id, "")
+            .await
+    }
+
+    pub async fn provision_workspace_with_token(
+        &self,
+        ws_id: &str,
+        tenant_id: &str,
+        owner_email: &str,
+        name: &str,
+        owner_user_id: &str,
+        bearer_token: &str,
+    ) -> Result<WorkspaceRecord> {
         let clean_ws = validate_workspace_slug(ws_id)?;
         let dir = workspace_worker_dir(&self.workers_root, &clean_ws)?;
         let dir_str = dir.display().to_string();
+        let token_sha = if bearer_token.trim().is_empty() {
+            String::new()
+        } else {
+            sha256_hex(bearer_token)
+        };
         sqlx::query(
             "INSERT INTO tenants (tenant_id, owner_email) VALUES ($1, $2) ON CONFLICT (tenant_id) DO NOTHING",
         )
@@ -431,13 +677,15 @@ impl PostgresHostedStore {
         .map_err(|e| GmError::Platform(e.to_string()))?;
 
         sqlx::query(
-            "INSERT INTO workspaces (ws_id, tenant_id, name, worker_dir) VALUES ($1, $2, $3, $4)
-             ON CONFLICT (ws_id) DO UPDATE SET name = EXCLUDED.name, worker_dir = EXCLUDED.worker_dir",
+            "INSERT INTO workspaces (ws_id, tenant_id, name, worker_dir, token_sha256) VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (ws_id) DO UPDATE SET name = EXCLUDED.name, worker_dir = EXCLUDED.worker_dir,
+               token_sha256 = CASE WHEN EXCLUDED.token_sha256 <> '' THEN EXCLUDED.token_sha256 ELSE workspaces.token_sha256 END",
         )
         .bind(&clean_ws)
         .bind(tenant_id)
         .bind(name)
         .bind(&dir_str)
+        .bind(&token_sha)
         .execute(&self.pool)
         .await
         .map_err(|e| GmError::Platform(e.to_string()))?;
@@ -461,6 +709,505 @@ impl PostgresHostedStore {
             worker_dir: dir_str,
             created_at: Utc::now().to_rfc3339(),
         })
+    }
+
+    pub async fn get_workspace(&self, ws_id: &str) -> Result<Option<WorkspaceRecord>> {
+        let clean_ws = validate_workspace_slug(ws_id)?;
+        let row = sqlx::query(
+            "SELECT ws_id, tenant_id, name, worker_dir, created_at::text AS created_at
+             FROM workspaces WHERE ws_id = $1",
+        )
+        .bind(&clean_ws)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        Ok(row.map(|r| WorkspaceRecord {
+            ws_id: r.get("ws_id"),
+            tenant_id: r.get("tenant_id"),
+            name: r.get("name"),
+            worker_dir: r.get("worker_dir"),
+            created_at: r.get("created_at"),
+        }))
+    }
+
+    pub async fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
+        let rows = sqlx::query(
+            "SELECT ws_id, tenant_id, name, worker_dir, created_at::text AS created_at
+             FROM workspaces ORDER BY ws_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| WorkspaceRecord {
+                ws_id: r.get("ws_id"),
+                tenant_id: r.get("tenant_id"),
+                name: r.get("name"),
+                worker_dir: r.get("worker_dir"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn list_user_workspaces(&self, user_id: &str) -> Result<Vec<WorkspaceRecord>> {
+        let rows = sqlx::query(
+            "SELECT w.ws_id, w.tenant_id, w.name, w.worker_dir, w.created_at::text AS created_at
+             FROM workspaces w
+             JOIN workspace_memberships m ON m.ws_id = w.ws_id
+             WHERE m.user_id = $1 AND m.revoked_at IS NULL
+             ORDER BY w.ws_id",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| WorkspaceRecord {
+                ws_id: r.get("ws_id"),
+                tenant_id: r.get("tenant_id"),
+                name: r.get("name"),
+                worker_dir: r.get("worker_dir"),
+                created_at: r.get("created_at"),
+            })
+            .collect())
+    }
+
+    pub async fn grant_membership(
+        &self,
+        ws_id: &str,
+        user_id: &str,
+        role: &str,
+    ) -> Result<HostedMembership> {
+        let clean_ws = validate_workspace_slug(ws_id)?;
+        let tenant_id: Option<String> =
+            sqlx::query_scalar("SELECT tenant_id FROM workspaces WHERE ws_id = $1")
+                .bind(&clean_ws)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| GmError::Platform(e.to_string()))?;
+        let Some(tenant_id) = tenant_id else {
+            return Err(GmError::Config(format!("Unknown workspace '{ws_id}'")));
+        };
+        sqlx::query(
+            "INSERT INTO workspace_memberships (ws_id, user_id, tenant_id, role, revoked_at)
+             VALUES ($1, $2, $3, $4, NULL)
+             ON CONFLICT (ws_id, user_id) DO UPDATE SET role = EXCLUDED.role, revoked_at = NULL",
+        )
+        .bind(&clean_ws)
+        .bind(user_id)
+        .bind(&tenant_id)
+        .bind(role)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        Ok(HostedMembership {
+            ws_id: clean_ws,
+            user_id: user_id.to_string(),
+            tenant_id,
+            role: role.to_string(),
+        })
+    }
+
+    pub async fn revoke_membership(&self, ws_id: &str, user_id: &str) -> Result<()> {
+        let clean_ws = validate_workspace_slug(ws_id)?;
+        sqlx::query(
+            "UPDATE workspace_memberships SET revoked_at = NOW() WHERE ws_id = $1 AND user_id = $2",
+        )
+        .bind(&clean_ws)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        sqlx::query(
+            "UPDATE hosted_sessions SET revoked_at = NOW() WHERE ws_id = $1 AND user_id = $2",
+        )
+        .bind(&clean_ws)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        let _ = self.revocation_tx.send((clean_ws, user_id.to_string()));
+        Ok(())
+    }
+
+    pub async fn issue_enrollment(
+        &self,
+        ws_id: &str,
+        user_id: &str,
+        role: &str,
+        ttl_seconds: i64,
+    ) -> Result<HostedEnrollmentIssued> {
+        let membership = self.grant_membership(ws_id, user_id, role).await?;
+        let token = random_secret_token("dtenroll");
+        let token_sha = sha256_hex(&token);
+        let expires_str = (Utc::now() + Duration::seconds(ttl_seconds.max(60))).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO hosted_enrollments (token_sha256, user_id, ws_id, tenant_id, role, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6::timestamptz)",
+        )
+        .bind(&token_sha)
+        .bind(&membership.user_id)
+        .bind(&membership.ws_id)
+        .bind(&membership.tenant_id)
+        .bind(&membership.role)
+        .bind(&expires_str)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        Ok(HostedEnrollmentIssued {
+            enrollment_token: token,
+            user_id: membership.user_id,
+            ws_id: membership.ws_id,
+            expires_at: expires_str,
+        })
+    }
+
+    pub async fn redeem_enrollment(
+        &self,
+        enrollment_token: &str,
+        session_ttl_seconds: i64,
+    ) -> Result<HostedSessionIssued> {
+        let token_sha = sha256_hex(enrollment_token);
+        let row = sqlx::query(
+            "SELECT user_id, ws_id, tenant_id, role,
+                    to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at,
+                    (redeemed_at IS NOT NULL) AS is_redeemed,
+                    (revoked_at IS NOT NULL) AS is_revoked,
+                    (expires_at <= NOW()) AS is_expired
+             FROM hosted_enrollments WHERE token_sha256 = $1",
+        )
+        .bind(&token_sha)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        let Some(row) = row else {
+            return Err(GmError::SafetyViolation("Invalid enrollment token".into()));
+        };
+        let is_redeemed: bool = row.get("is_redeemed");
+        let is_revoked: bool = row.get("is_revoked");
+        if is_redeemed || is_revoked {
+            return Err(GmError::SafetyViolation(
+                "Enrollment token has already been used or revoked".into(),
+            ));
+        }
+        let is_expired: bool = row.get("is_expired");
+        if is_expired {
+            return Err(GmError::SafetyViolation(
+                "Enrollment token has expired".into(),
+            ));
+        }
+        let user_id: String = row.get("user_id");
+        let ws_id: String = row.get("ws_id");
+        let tenant_id: String = row.get("tenant_id");
+        let role: String = row.get("role");
+
+        self.authorize_membership(&ws_id, &user_id).await?;
+
+        sqlx::query("UPDATE hosted_enrollments SET redeemed_at = NOW() WHERE token_sha256 = $1")
+            .bind(&token_sha)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+
+        let session_id = random_secret_token("dtsess");
+        let csrf_token = random_secret_token("dtcsrf");
+        let session_sha = sha256_hex(&session_id);
+        let session_expires =
+            (Utc::now() + Duration::seconds(session_ttl_seconds.max(300))).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO hosted_sessions (session_sha256, user_id, ws_id, tenant_id, role, csrf_token, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)",
+        )
+        .bind(&session_sha)
+        .bind(&user_id)
+        .bind(&ws_id)
+        .bind(&tenant_id)
+        .bind(&role)
+        .bind(&csrf_token)
+        .bind(&session_expires)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+
+        Ok(HostedSessionIssued {
+            session_id,
+            csrf_token,
+            user_id,
+            ws_id,
+            tenant_id,
+            role,
+            expires_at: session_expires,
+        })
+    }
+
+    pub async fn authorize_session(
+        &self,
+        session_id: &str,
+        ws_id: Option<&str>,
+    ) -> Result<HostedSessionIssued> {
+        let session_sha = sha256_hex(session_id);
+        let row = sqlx::query(
+            "SELECT s.user_id, s.ws_id, s.tenant_id, m.role, s.csrf_token,
+                    to_char(s.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS expires_at,
+                    (s.revoked_at IS NOT NULL) AS is_revoked,
+                    (s.expires_at <= NOW()) AS is_expired
+             FROM hosted_sessions s
+             JOIN workspace_memberships m ON m.ws_id = s.ws_id AND m.user_id = s.user_id
+             WHERE s.session_sha256 = $1 AND m.revoked_at IS NULL",
+        )
+        .bind(&session_sha)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        let Some(row) = row else {
+            return Err(GmError::SafetyViolation(
+                "Session is invalid or workspace membership was revoked".into(),
+            ));
+        };
+        let is_revoked: bool = row.get("is_revoked");
+        if is_revoked {
+            return Err(GmError::SafetyViolation("Session has been revoked".into()));
+        }
+        let is_expired: bool = row.get("is_expired");
+        if is_expired {
+            return Err(GmError::SafetyViolation("Session has expired".into()));
+        }
+        let user_id: String = row.get("user_id");
+        let sess_ws: String = row.get("ws_id");
+        let tenant_id: String = row.get("tenant_id");
+        let role: String = row.get("role");
+        let csrf_token: String = row.get("csrf_token");
+        let expires_at: String = row.get("expires_at");
+        if let Some(requested_ws) = ws_id {
+            let clean = validate_workspace_slug(requested_ws)?;
+            let member = sqlx::query(
+                "SELECT tenant_id, role FROM workspace_memberships
+                 WHERE ws_id = $1 AND user_id = $2 AND revoked_at IS NULL",
+            )
+            .bind(&clean)
+            .bind(&user_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+            let Some(member) = member else {
+                return Err(GmError::SafetyViolation(format!(
+                    "Cross-tenant access denied for workspace '{clean}'"
+                )));
+            };
+            return Ok(HostedSessionIssued {
+                session_id: session_id.to_string(),
+                csrf_token,
+                user_id,
+                ws_id: clean,
+                tenant_id: member.get("tenant_id"),
+                role: member.get("role"),
+                expires_at,
+            });
+        }
+        Ok(HostedSessionIssued {
+            session_id: session_id.to_string(),
+            csrf_token,
+            user_id,
+            ws_id: sess_ws,
+            tenant_id,
+            role,
+            expires_at,
+        })
+    }
+
+    pub async fn revoke_session(&self, session_id: &str) -> Result<()> {
+        let session_sha = sha256_hex(session_id);
+        sqlx::query("UPDATE hosted_sessions SET revoked_at = NOW() WHERE session_sha256 = $1")
+            .bind(&session_sha)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        Ok(())
+    }
+
+    pub async fn authorize_workspace(
+        &self,
+        ws_id: &str,
+        bearer_token: &str,
+    ) -> Result<WorkspaceRecord> {
+        let clean_ws = validate_workspace_slug(ws_id)?;
+        let candidate_hash = sha256_hex(bearer_token);
+        let row = sqlx::query(
+            "SELECT ws_id, tenant_id, name, worker_dir, token_sha256, created_at::text AS created_at
+             FROM workspaces WHERE ws_id = $1",
+        )
+        .bind(&clean_ws)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| GmError::Platform(e.to_string()))?;
+        let Some(row) = row else {
+            return Err(GmError::SafetyViolation(format!(
+                "Workspace '{ws_id}' not found or access denied"
+            )));
+        };
+        let expected_hash: String = row.get("token_sha256");
+        if expected_hash.is_empty()
+            || !crate::bridges::constant_time_eq(
+                candidate_hash.as_bytes(),
+                expected_hash.as_bytes(),
+            )
+        {
+            return Err(GmError::SafetyViolation(format!(
+                "Cross-tenant access denied for workspace '{ws_id}'"
+            )));
+        }
+        Ok(WorkspaceRecord {
+            ws_id: row.get("ws_id"),
+            tenant_id: row.get("tenant_id"),
+            name: row.get("name"),
+            worker_dir: row.get("worker_dir"),
+            created_at: row.get("created_at"),
+        })
+    }
+
+    /// Back up an existing hosted SQLite control-plane DB and migrate all records idempotently into PostgreSQL.
+    pub async fn migrate_from_sqlite_with_backup(
+        &self,
+        sqlite_path: &Path,
+    ) -> Result<SqliteToPostgresMigrationReport> {
+        let (backup_path, backup_sha256, export) = export_sqlite_snapshot_with_backup(sqlite_path)?;
+        let mut tx =
+            self.pool.begin().await.map_err(|e| {
+                GmError::Platform(format!("Begin PostgreSQL migration tx failed: {e}"))
+            })?;
+
+        let mut workspaces_migrated = 0usize;
+        for (ws_id, tenant_id, name, worker_dir, token_sha, _created) in &export.workspaces {
+            sqlx::query(
+                "INSERT INTO tenants (tenant_id, owner_email) VALUES ($1, $2) ON CONFLICT (tenant_id) DO NOTHING",
+            )
+            .bind(tenant_id)
+            .bind(format!("owner@{tenant_id}.local"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+            let res = sqlx::query(
+                "INSERT INTO workspaces (ws_id, tenant_id, name, worker_dir, token_sha256)
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (ws_id) DO NOTHING",
+            )
+            .bind(ws_id)
+            .bind(tenant_id)
+            .bind(name)
+            .bind(worker_dir)
+            .bind(token_sha)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+            workspaces_migrated += res.rows_affected() as usize;
+        }
+
+        let mut memberships_migrated = 0usize;
+        for (ws_id, user_id, tenant_id, role, revoked_at, _created) in &export.memberships {
+            let res = sqlx::query(
+                "INSERT INTO workspace_memberships (ws_id, user_id, tenant_id, role, revoked_at)
+                 VALUES ($1, $2, $3, $4, $5::timestamptz) ON CONFLICT (ws_id, user_id) DO NOTHING",
+            )
+            .bind(ws_id)
+            .bind(user_id)
+            .bind(tenant_id)
+            .bind(role)
+            .bind(revoked_at.as_deref())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+            memberships_migrated += res.rows_affected() as usize;
+        }
+
+        let mut enrollments_migrated = 0usize;
+        for (
+            token_sha,
+            user_id,
+            ws_id,
+            tenant_id,
+            role,
+            expires_raw,
+            redeemed,
+            revoked,
+            _created,
+        ) in &export.enrollments
+        {
+            let res = sqlx::query(
+                "INSERT INTO hosted_enrollments (token_sha256, user_id, ws_id, tenant_id, role, expires_at, redeemed_at, revoked_at)
+                 VALUES ($1, $2, $3, $4, $5, $6::timestamptz, $7::timestamptz, $8::timestamptz) ON CONFLICT (token_sha256) DO NOTHING",
+            )
+            .bind(token_sha)
+            .bind(user_id)
+            .bind(ws_id)
+            .bind(tenant_id)
+            .bind(role)
+            .bind(expires_raw)
+            .bind(redeemed.as_deref())
+            .bind(revoked.as_deref())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+            enrollments_migrated += res.rows_affected() as usize;
+        }
+
+        let mut sessions_migrated = 0usize;
+        for (sess_sha, user_id, ws_id, tenant_id, role, csrf, expires_raw, revoked, _created) in
+            &export.sessions
+        {
+            let res = sqlx::query(
+                "INSERT INTO hosted_sessions (session_sha256, user_id, ws_id, tenant_id, role, csrf_token, expires_at, revoked_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz, $8::timestamptz) ON CONFLICT (session_sha256) DO NOTHING",
+            )
+            .bind(sess_sha)
+            .bind(user_id)
+            .bind(ws_id)
+            .bind(tenant_id)
+            .bind(role)
+            .bind(csrf)
+            .bind(expires_raw)
+            .bind(revoked.as_deref())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+            sessions_migrated += res.rows_affected() as usize;
+        }
+
+        let mut secrets_migrated = 0usize;
+        for (ws_id, account, nonce_b64, ct_b64, _updated) in &export.secrets {
+            let res = sqlx::query(
+                "INSERT INTO encrypted_secrets (ws_id, account, nonce_b64, ciphertext_b64)
+                 VALUES ($1, $2, $3, $4) ON CONFLICT (ws_id, account) DO NOTHING",
+            )
+            .bind(ws_id)
+            .bind(account)
+            .bind(nonce_b64)
+            .bind(ct_b64)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+            secrets_migrated += res.rows_affected() as usize;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| GmError::Platform(format!("Commit PostgreSQL migration failed: {e}")))?;
+
+        let report = SqliteToPostgresMigrationReport {
+            backup_path: backup_path.display().to_string(),
+            backup_sha256,
+            workspaces_migrated,
+            memberships_migrated,
+            enrollments_migrated,
+            sessions_migrated,
+            secrets_migrated,
+        };
+        let marker = sqlite_path.with_extension("migrated-to-postgres.json");
+        let _ = gm_core::storage::atomic_write_private(
+            &marker,
+            &serde_json::to_vec_pretty(&report).unwrap_or_default(),
+        );
+        Ok(report)
     }
 
     pub async fn authorize_membership(
@@ -1049,6 +1796,53 @@ impl HostedControlPlane {
         Ok(out)
     }
 
+    pub fn get_workspace(&self, ws_id: &str) -> Result<Option<WorkspaceRecord>> {
+        let clean_ws = validate_workspace_slug(ws_id)?;
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT ws_id, tenant_id, name, worker_dir, created_at
+             FROM hosted_workspaces_v1 WHERE ws_id = ?1",
+            params![clean_ws],
+            |r| {
+                Ok(WorkspaceRecord {
+                    ws_id: r.get(0)?,
+                    tenant_id: r.get(1)?,
+                    name: r.get(2)?,
+                    worker_dir: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(|e| GmError::Platform(e.to_string()))
+    }
+
+    pub fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT ws_id, tenant_id, name, worker_dir, created_at
+                 FROM hosted_workspaces_v1 ORDER BY ws_id",
+            )
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(WorkspaceRecord {
+                    ws_id: r.get(0)?,
+                    tenant_id: r.get(1)?,
+                    name: r.get(2)?,
+                    worker_dir: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            })
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(|e| GmError::Platform(e.to_string()))?);
+        }
+        Ok(out)
+    }
+
     pub fn revoke_session(&self, session_id: &str) -> Result<()> {
         let session_sha = sha256_hex(session_id);
         let now = Utc::now().to_rfc3339();
@@ -1192,6 +1986,166 @@ impl HostedControlPlane {
             std::fs::write(dir.join(name), content)?;
         }
         Ok(bundle.files.len())
+    }
+}
+
+#[derive(Clone)]
+pub enum HostedPlaneBackend {
+    Sqlite(Arc<HostedControlPlane>),
+    Postgres(Arc<PostgresHostedStore>),
+}
+
+impl HostedPlaneBackend {
+    pub fn backend_kind(&self) -> &'static str {
+        match self {
+            Self::Sqlite(_) => "sqlite",
+            Self::Postgres(_) => "postgres",
+        }
+    }
+
+    pub fn subscribe_revocations(&self) -> tokio::sync::broadcast::Receiver<(String, String)> {
+        match self {
+            Self::Sqlite(p) => p.subscribe_revocations(),
+            Self::Postgres(p) => p.subscribe_revocations(),
+        }
+    }
+
+    pub async fn ready_check(&self) -> Result<()> {
+        match self {
+            Self::Sqlite(p) => p.ready_check(),
+            Self::Postgres(p) => p.ready_check().await,
+        }
+    }
+
+    pub async fn provision_workspace(
+        &self,
+        ws_id: &str,
+        tenant_id: &str,
+        owner_email: &str,
+        name: &str,
+        owner_user_id: &str,
+        bearer_token: &str,
+    ) -> Result<WorkspaceRecord> {
+        match self {
+            Self::Sqlite(p) => {
+                let tok = if bearer_token.trim().is_empty() {
+                    random_secret_token("dtws")
+                } else {
+                    bearer_token.to_string()
+                };
+                let rec = p.provision_workspace(ws_id, tenant_id, name, &tok)?;
+                if !owner_user_id.trim().is_empty() {
+                    let _ = p.grant_membership(&rec.ws_id, owner_user_id.trim(), "owner")?;
+                }
+                Ok(rec)
+            }
+            Self::Postgres(p) => {
+                p.provision_workspace_with_token(
+                    ws_id,
+                    tenant_id,
+                    owner_email,
+                    name,
+                    owner_user_id,
+                    bearer_token,
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn get_workspace(&self, ws_id: &str) -> Result<Option<WorkspaceRecord>> {
+        match self {
+            Self::Sqlite(p) => p.get_workspace(ws_id),
+            Self::Postgres(p) => p.get_workspace(ws_id).await,
+        }
+    }
+
+    pub async fn list_workspaces(&self) -> Result<Vec<WorkspaceRecord>> {
+        match self {
+            Self::Sqlite(p) => p.list_workspaces(),
+            Self::Postgres(p) => p.list_workspaces().await,
+        }
+    }
+
+    pub async fn list_user_workspaces(&self, user_id: &str) -> Result<Vec<WorkspaceRecord>> {
+        match self {
+            Self::Sqlite(p) => p.list_user_workspaces(user_id),
+            Self::Postgres(p) => p.list_user_workspaces(user_id).await,
+        }
+    }
+
+    pub async fn issue_enrollment(
+        &self,
+        ws_id: &str,
+        user_id: &str,
+        role: &str,
+        ttl_seconds: i64,
+    ) -> Result<HostedEnrollmentIssued> {
+        match self {
+            Self::Sqlite(p) => p.issue_enrollment(ws_id, user_id, role, ttl_seconds),
+            Self::Postgres(p) => p.issue_enrollment(ws_id, user_id, role, ttl_seconds).await,
+        }
+    }
+
+    pub async fn redeem_enrollment(
+        &self,
+        enrollment_token: &str,
+        session_ttl_seconds: i64,
+    ) -> Result<HostedSessionIssued> {
+        match self {
+            Self::Sqlite(p) => p.redeem_enrollment(enrollment_token, session_ttl_seconds),
+            Self::Postgres(p) => {
+                p.redeem_enrollment(enrollment_token, session_ttl_seconds)
+                    .await
+            }
+        }
+    }
+
+    pub async fn authorize_session(
+        &self,
+        session_id: &str,
+        ws_id: Option<&str>,
+    ) -> Result<HostedSessionIssued> {
+        match self {
+            Self::Sqlite(p) => p.authorize_session(session_id, ws_id),
+            Self::Postgres(p) => p.authorize_session(session_id, ws_id).await,
+        }
+    }
+
+    pub async fn authorize_membership(
+        &self,
+        ws_id: &str,
+        user_id: &str,
+    ) -> Result<HostedMembership> {
+        match self {
+            Self::Sqlite(p) => p.authorize_membership(ws_id, user_id),
+            Self::Postgres(p) => p.authorize_membership(ws_id, user_id).await,
+        }
+    }
+
+    pub async fn authorize_workspace(
+        &self,
+        ws_id: &str,
+        bearer_token: &str,
+    ) -> Result<WorkspaceRecord> {
+        match self {
+            Self::Sqlite(p) => p.authorize_workspace(ws_id, bearer_token),
+            Self::Postgres(p) => p.authorize_workspace(ws_id, bearer_token).await,
+        }
+    }
+
+    pub async fn revoke_session(&self, session_id: &str) -> Result<()> {
+        match self {
+            Self::Sqlite(p) => p.revoke_session(session_id),
+            Self::Postgres(p) => p.revoke_session(session_id).await,
+        }
+    }
+
+    pub async fn revoke_membership(&self, ws_id: &str, user_id: &str) -> Result<()> {
+        match self {
+            Self::Sqlite(p) => p.revoke_membership(ws_id, user_id),
+            Self::Postgres(p) => p.revoke_membership(ws_id, user_id).await,
+        }
     }
 }
 
@@ -1366,5 +2320,40 @@ mod tests {
             std::fs::read_to_string(Path::new(&ws_a.worker_dir).join("SOUL.md")).unwrap(),
             "# Alpha Bot"
         );
+    }
+
+    #[test]
+    fn sqlite_to_postgres_migration_creates_verified_backup_and_exports_all_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("hosted-control.sqlite");
+        let workers = dir.path().join("workers");
+        let plane =
+            HostedControlPlane::open(&db_path, &workers, b"super-strong-master-key-32bytes!")
+                .unwrap();
+        plane
+            .provision_workspace("ws_acme", "t_acme", "Acme Workspace", "tok-acme")
+            .unwrap();
+        let enroll = plane
+            .issue_enrollment("ws_acme", "alice", "owner", 600)
+            .unwrap();
+        let _sess = plane
+            .redeem_enrollment(&enroll.enrollment_token, 3600)
+            .unwrap();
+        plane
+            .tenant_secret_backend("ws_acme")
+            .unwrap()
+            .set_secret("api_key", "sk-secret")
+            .unwrap();
+        drop(plane);
+
+        let (backup_path, sha, export) = export_sqlite_snapshot_with_backup(&db_path).unwrap();
+        assert!(backup_path.is_file());
+        assert_eq!(sha.len(), 64);
+        assert_eq!(export.workspaces.len(), 1);
+        assert_eq!(export.workspaces[0].0, "ws_acme");
+        assert!(export.memberships.len() >= 2);
+        assert_eq!(export.enrollments.len(), 1);
+        assert_eq!(export.sessions.len(), 1);
+        assert_eq!(export.secrets.len(), 1);
     }
 }

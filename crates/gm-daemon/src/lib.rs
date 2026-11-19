@@ -1760,21 +1760,26 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
             let bridges_cfg = config.openbot.bridges.clone();
             let (token, slack_secret) = companion_web_credentials(&config)?;
             let bridge = gm_openbot::BridgeRouter::new(sup.clone(), bridges_cfg);
-            let web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
-                .with_sanitized_doctor(doctor_status_snapshot(&config).await)
-                .with_updates(Arc::new(updater::CompanionUpdateService {
-                    download_dir: config.storage_dir.join("updates"),
-                }))
-                .with_runtime_deps(
-                    control_server.interactions(),
-                    control_server.shared_config(),
-                    config_path.clone(),
-                    Some(Arc::clone(&budget)),
-                    Some(Arc::clone(&llm_client)),
-                    Some(router.clone()),
-                    Some(kill_switch.clone()),
-                    Some(Arc::clone(&platform) as Arc<dyn gm_platform::Platform>),
-                );
+            let mut web =
+                gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
+                    .with_sanitized_doctor(doctor_status_snapshot(&config).await)
+                    .with_updates(Arc::new(updater::CompanionUpdateService {
+                        download_dir: config.storage_dir.join("updates"),
+                    }))
+                    .with_voice_manager(control_server.voice_manager())
+                    .with_runtime_deps(
+                        control_server.interactions(),
+                        control_server.shared_config(),
+                        config_path.clone(),
+                        Some(Arc::clone(&budget)),
+                        Some(Arc::clone(&llm_client)),
+                        Some(router.clone()),
+                        Some(kill_switch.clone()),
+                        Some(Arc::clone(&platform) as Arc<dyn gm_platform::Platform>),
+                    );
+            if let Some(comp_mgr) = control_server.components() {
+                web = web.with_components(comp_mgr);
+            }
             match web.bind_and_serve(&bind_addr).await {
                 Ok((comp_addr, comp_handle)) => {
                     let sp_handle = if config.muse.enable_spaces {
@@ -3007,7 +3012,8 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
                 .filter(|s| s.len() >= 16)
         })
         .unwrap_or_else(|| "dt-local-hosted-default-key".to_string());
-    let mut hosted_plane_opt = None;
+    let mut hosted_backend_opt: Option<gm_openbot::HostedPlaneBackend> = None;
+    let sqlite_hosted_path = config.storage_dir.join("hosted-control.sqlite");
     if let Some(db_url) = std::env::var("DT_DATABASE_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
         .ok()
@@ -3021,27 +3027,41 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
         )
         .await?;
         pg.ready_check().await?;
-        let plane = Arc::new(gm_openbot::HostedControlPlane::open(
-            config.storage_dir.join("hosted-control.sqlite"),
-            &workers_root,
-            master_key_bytes.as_bytes(),
-        )?);
-        hosted_plane_opt = Some(plane);
+        if sqlite_hosted_path.is_file()
+            && !sqlite_hosted_path
+                .with_extension("migrated-to-postgres.json")
+                .is_file()
+        {
+            let report = pg
+                .migrate_from_sqlite_with_backup(&sqlite_hosted_path)
+                .await?;
+            tracing::info!(
+                "Migrated hosted SQLite store to PostgreSQL (backup={}, workspaces={}, memberships={}, sessions={})",
+                report.backup_path,
+                report.workspaces_migrated,
+                report.memberships_migrated,
+                report.sessions_migrated
+            );
+        }
+        hosted_backend_opt = Some(gm_openbot::HostedPlaneBackend::Postgres(Arc::new(pg)));
     } else if std::env::var("DT_HOSTED_ENABLED")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
     {
         let plane = Arc::new(gm_openbot::HostedControlPlane::open(
-            config.storage_dir.join("hosted-control.sqlite"),
+            &sqlite_hosted_path,
             &workers_root,
             master_key_bytes.as_bytes(),
         )?);
-        hosted_plane_opt = Some(plane);
+        hosted_backend_opt = Some(gm_openbot::HostedPlaneBackend::Sqlite(plane));
     }
     let mut web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
         .with_sanitized_doctor(doctor_status_snapshot(&config).await)
         .with_updates(Arc::new(updater::CompanionUpdateService {
             download_dir: config.storage_dir.join("updates"),
         }))
+        .with_voice_manager(gm_openbot::VoiceSessionManager::new(
+            config.storage_dir.clone(),
+        ))
         .with_runtime_deps(
             interactions,
             shared_config,
@@ -3052,8 +3072,11 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
             Some(kill_switch),
             Some(platform as Arc<dyn gm_platform::Platform>),
         );
-    if let Some(plane) = hosted_plane_opt {
-        web = web.with_hosted_plane(plane);
+    if let Ok(comp_mgr) = components::ComponentManager::open(&config.storage_dir) {
+        web = web.with_components(Arc::new(comp_mgr));
+    }
+    if let Some(backend) = hosted_backend_opt {
+        web = web.with_hosted_backend(backend);
     }
     let (comp_addr, comp_handle) = match web.bind_and_serve(bind).await {
         Ok(server) => server,

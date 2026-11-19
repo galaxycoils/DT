@@ -23,6 +23,22 @@ test("web client uses cookie sessions with CSRF, targets /api/v1, and carries Ra
   }
   assert.ok(cssSrc.includes('[data-theme="dark"]'));
   assert.ok(cssSrc.includes('[data-theme="light"]'));
+
+  assert.match(apiSrc, /normalizeRoutine/);
+  assert.match(apiSrc, /normalizeActivityPost/);
+  assert.match(apiSrc, /parseMessageCard/);
+  assert.match(apiSrc, /abortAllRequests/);
+  assert.match(apiSrc, /client_msg_id/);
+
+  const appSrc = fs.readFileSync(path.join(root, "src/App.tsx"), "utf8");
+  assert.match(appSrc, /clearWorkspaceState/);
+  assert.match(appSrc, /Message saved, reply failed/);
+  assert.match(appSrc, /Retry reply/);
+  assert.match(appSrc, /Open Provider Setup/);
+  assert.match(appSrc, /dt-drawer-backdrop/);
+  const layoutSrc = fs.readFileSync(path.join(root, "src/layout.css"), "utf8");
+  assert.match(layoutSrc, /box-sizing:\s*border-box/);
+  assert.match(layoutSrc, /overflow-x:\s*hidden/);
 });
 
 test("web client session sign-in, message send, SSE reconnect cursor recovery, and sign-out journey", async () => {

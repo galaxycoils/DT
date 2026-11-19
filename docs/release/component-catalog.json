@@ -1,129 +1,339 @@
 {
   "schema": 1,
-  "sequence": 2,
-  "published_at": "2026-11-18T00:00:00Z",
-  "expires_at": "2027-05-18T00:00:00Z",
+  "sequence": 3,
+  "published_at": "2026-11-19T00:00:00Z",
+  "expires_at": "2027-11-19T00:00:00Z",
   "origin": "https://github.com/galaxycoils/DT",
   "components": [
     {
       "id": "qwen2-vl-2b",
       "kind": "vlm_model",
       "version": "2.0.0",
-      "revision": "qwen2-vl-2b-instruct-q4_k_m-r1",
+      "revision": "qwen2-vl-2b-instruct-q4_k_m-r2",
       "os": "any",
       "architecture": "any",
-      "worker_compatibility": ["vlm_worker>=1.0.1"],
-      "includes": ["weights", "mmproj", "tokenizer.json", "preprocessor_config.json"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
+      "worker_compatibility": ["vlm_worker>=1.0.2"],
+      "includes": ["Qwen2-VL-2B-Instruct-Q4_K_M.gguf"],
+      "total_size_bytes": 986046944,
+      "sha256": "5745685d2e607a82a0696c1118e56a2a1ae0901da450fd9cd4f161c6b62867d7",
       "license": "Apache-2.0",
-      "source": "https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct",
-      "parts": []
+      "source": "https://huggingface.co/ggml-org/Qwen2-VL-2B-Instruct-GGUF",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://huggingface.co/ggml-org/Qwen2-VL-2B-Instruct-GGUF/resolve/main/Qwen2-VL-2B-Instruct-Q4_K_M.gguf",
+          "size_bytes": 986046944,
+          "sha256": "5745685d2e607a82a0696c1118e56a2a1ae0901da450fd9cd4f161c6b62867d7"
+        }
+      ]
     },
     {
       "id": "smolvlm",
       "kind": "vlm_model",
       "version": "1.0.0",
-      "revision": "smolvlm-instruct-q4_k_m-r1",
+      "revision": "smolvlm-500m-instruct-q8_0-r2",
       "os": "any",
       "architecture": "any",
-      "worker_compatibility": ["vlm_worker>=1.0.1"],
-      "includes": ["weights", "mmproj", "tokenizer.json", "preprocessor_config.json"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
+      "worker_compatibility": ["vlm_worker>=1.0.2"],
+      "includes": ["SmolVLM-500M-Instruct-Q8_0.gguf"],
+      "total_size_bytes": 436806912,
+      "sha256": "9d4612de6a42214499e301494a3ecc2be0abdd9de44e663bda63f1152fad1bf4",
       "license": "Apache-2.0",
-      "source": "https://huggingface.co/HuggingFaceTB/SmolVLM-Instruct",
-      "parts": []
+      "source": "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/SmolVLM-500M-Instruct-Q8_0.gguf",
+          "size_bytes": 436806912,
+          "sha256": "9d4612de6a42214499e301494a3ecc2be0abdd9de44e663bda63f1152fad1bf4"
+        }
+      ]
     },
     {
       "id": "smolvlm2",
       "kind": "vlm_model",
       "version": "2.2.0",
-      "revision": "smolvlm2-2.2b-instruct-q4_k_m-r1",
+      "revision": "smolvlm2-2.2b-instruct-q4_k_m-r2",
       "os": "any",
       "architecture": "any",
-      "worker_compatibility": ["vlm_worker>=1.0.1"],
-      "includes": ["weights", "mmproj", "tokenizer.json", "preprocessor_config.json"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
+      "worker_compatibility": ["vlm_worker>=1.0.2"],
+      "includes": ["SmolVLM2-2.2B-Instruct-Q4_K_M.gguf"],
+      "total_size_bytes": 1112602656,
+      "sha256": "0cf76814555b8665149075b74ab6b5c1d428ea1d3d01c1918c12012e8d7c9f58",
       "license": "Apache-2.0",
-      "source": "https://huggingface.co/HuggingFaceTB/SmolVLM2-2.2B-Instruct",
-      "parts": []
+      "source": "https://huggingface.co/ggml-org/SmolVLM2-2.2B-Instruct-GGUF",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://huggingface.co/ggml-org/SmolVLM2-2.2B-Instruct-GGUF/resolve/main/SmolVLM2-2.2B-Instruct-Q4_K_M.gguf",
+          "size_bytes": 1112602656,
+          "sha256": "0cf76814555b8665149075b74ab6b5c1d428ea1d3d01c1918c12012e8d7c9f58"
+        }
+      ]
     },
     {
       "id": "vlm_worker",
       "kind": "vlm_worker",
-      "version": "1.0.1",
-      "revision": "llama-mtmd-directml-r1",
-      "os": "any",
-      "architecture": "any",
-      "worker_compatibility": ["dt>=1.0.1"],
-      "includes": ["llama-mtmd-worker", "onnxruntime-directml-bridge"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
+      "version": "b12546",
+      "revision": "llama-cpp-b12546-macos-arm64",
+      "os": "macos",
+      "architecture": "aarch64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["llama-server", "llama-mtmd-cli"],
+      "total_size_bytes": 16449069,
+      "sha256": "1ec575bd263bd691e42ccc2a8584cf83c64aaffcdb1fa4e3ade43356e5c51422",
       "license": "MIT",
-      "source": "https://github.com/galaxycoils/DT/releases/tag/v1.0.1",
-      "parts": []
+      "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b12546",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12546/llama-b12546-bin-macos-arm64.tar.gz",
+          "size_bytes": 16449069,
+          "sha256": "1ec575bd263bd691e42ccc2a8584cf83c64aaffcdb1fa4e3ade43356e5c51422"
+        }
+      ]
+    },
+    {
+      "id": "vlm_worker",
+      "kind": "vlm_worker",
+      "version": "b12546",
+      "revision": "llama-cpp-b12546-macos-x64",
+      "os": "macos",
+      "architecture": "x86_64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["llama-server", "llama-mtmd-cli"],
+      "total_size_bytes": 12221288,
+      "sha256": "a54704f494b2d3cbeeabb111a304e678dcf44c119a592be76f063774a1bd1a14",
+      "license": "MIT",
+      "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b12546",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12546/llama-b12546-bin-macos-x64.tar.gz",
+          "size_bytes": 12221288,
+          "sha256": "a54704f494b2d3cbeeabb111a304e678dcf44c119a592be76f063774a1bd1a14"
+        }
+      ]
+    },
+    {
+      "id": "vlm_worker",
+      "kind": "vlm_worker",
+      "version": "b12546",
+      "revision": "llama-cpp-b12546-linux-x64",
+      "os": "linux",
+      "architecture": "x86_64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["llama-server", "llama-mtmd-cli"],
+      "total_size_bytes": 23009767,
+      "sha256": "d35fad6a4d4d886005ece765c78ad61b5c859a467bc06a6257a796a4487947e9",
+      "license": "MIT",
+      "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b12546",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12546/llama-b12546-bin-ubuntu-x64.tar.gz",
+          "size_bytes": 23009767,
+          "sha256": "d35fad6a4d4d886005ece765c78ad61b5c859a467bc06a6257a796a4487947e9"
+        }
+      ]
+    },
+    {
+      "id": "vlm_worker",
+      "kind": "vlm_worker",
+      "version": "b12546",
+      "revision": "llama-cpp-b12546-linux-arm64",
+      "os": "linux",
+      "architecture": "aarch64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["llama-server", "llama-mtmd-cli"],
+      "total_size_bytes": 18565264,
+      "sha256": "d8475c1962b7bca15dc039bb0e9973edfbd3129c870f9c8eb6be54672e038567",
+      "license": "MIT",
+      "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b12546",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12546/llama-b12546-bin-ubuntu-arm64.tar.gz",
+          "size_bytes": 18565264,
+          "sha256": "d8475c1962b7bca15dc039bb0e9973edfbd3129c870f9c8eb6be54672e038567"
+        }
+      ]
+    },
+    {
+      "id": "vlm_worker",
+      "kind": "vlm_worker",
+      "version": "b12546",
+      "revision": "llama-cpp-b12546-win-x64",
+      "os": "windows",
+      "architecture": "x86_64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["llama-server.exe", "llama-mtmd-cli.exe"],
+      "total_size_bytes": 24813630,
+      "sha256": "d91a0687ad055ec953e4fd5ad6a19bddb7e52cc7eae0bd4d1bbfacbd8a78f155",
+      "license": "MIT",
+      "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b12546",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12546/llama-b12546-bin-win-cpu-x64.zip",
+          "size_bytes": 24813630,
+          "sha256": "d91a0687ad055ec953e4fd5ad6a19bddb7e52cc7eae0bd4d1bbfacbd8a78f155"
+        }
+      ]
+    },
+    {
+      "id": "vlm_worker",
+      "kind": "vlm_worker",
+      "version": "b12546",
+      "revision": "llama-cpp-b12546-win-arm64",
+      "os": "windows",
+      "architecture": "aarch64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["llama-server.exe", "llama-mtmd-cli.exe"],
+      "total_size_bytes": 12997138,
+      "sha256": "b74d3311f6627bc69301986990a9eacab2f84ff005bb656642566edfe85354c0",
+      "license": "MIT",
+      "source": "https://github.com/ggml-org/llama.cpp/releases/tag/b12546",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12546/llama-b12546-bin-win-cpu-arm64.zip",
+          "size_bytes": 12997138,
+          "sha256": "b74d3311f6627bc69301986990a9eacab2f84ff005bb656642566edfe85354c0"
+        }
+      ]
     },
     {
       "id": "whisper-stt-base-en",
       "kind": "speech_stt",
       "version": "1.7.4",
-      "revision": "ggml-base.en-r1",
+      "revision": "ggml-base.en-r2",
       "os": "any",
       "architecture": "any",
-      "worker_compatibility": ["dt>=1.0.1"],
-      "includes": ["ggml-base.en.bin", "whisper-server"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["ggml-base.en.bin"],
+      "total_size_bytes": 147964211,
+      "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
       "license": "MIT",
       "source": "https://huggingface.co/ggerganov/whisper.cpp",
-      "parts": []
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
+          "size_bytes": 147964211,
+          "sha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"
+        }
+      ]
     },
     {
       "id": "speech_tts",
       "kind": "speech_tts",
-      "version": "1.0.1",
-      "revision": "piper-en-us-r1",
+      "version": "1.0.2",
+      "revision": "piper-en-us-lessac-medium-r2",
       "os": "any",
       "architecture": "any",
-      "worker_compatibility": ["dt>=1.0.1"],
-      "includes": ["voice-en_US-lessac-medium.onnx", "voice-en_US-lessac-medium.onnx.json", "local-tts-server"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["en_US-lessac-medium.onnx"],
+      "total_size_bytes": 63201294,
+      "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",
       "license": "MIT",
-      "source": "https://github.com/rhasspy/piper",
-      "parts": []
+      "source": "https://huggingface.co/rhasspy/piper-voices",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/en_US-lessac-medium.onnx",
+          "size_bytes": 63201294,
+          "sha256": "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"
+        }
+      ]
     },
     {
       "id": "vm_image",
       "kind": "vm_image",
-      "version": "1.0.1",
-      "revision": "dt-ubuntu-24.04-guest-r1",
+      "version": "24.04",
+      "revision": "ubuntu-24.04-cloudimg-arm64",
       "os": "any",
-      "architecture": "any",
-      "worker_compatibility": ["dt>=1.0.1"],
-      "includes": ["rootfs.qcow2", "workspace-guest-agent"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
-      "license": "MIT",
-      "source": "https://github.com/galaxycoils/DT/releases/tag/v1.0.1",
-      "parts": []
+      "architecture": "aarch64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["ubuntu-24.04-server-cloudimg-arm64.img"],
+      "total_size_bytes": 616522752,
+      "sha256": "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
+      "license": "Ubuntu-License",
+      "source": "https://cloud-images.ubuntu.com/releases/noble/release/",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img",
+          "size_bytes": 616522752,
+          "sha256": "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e"
+        }
+      ]
+    },
+    {
+      "id": "vm_image",
+      "kind": "vm_image",
+      "version": "24.04",
+      "revision": "ubuntu-24.04-cloudimg-amd64",
+      "os": "any",
+      "architecture": "x86_64",
+      "worker_compatibility": ["dt>=1.0.2"],
+      "includes": ["ubuntu-24.04-server-cloudimg-amd64.img"],
+      "total_size_bytes": 621284352,
+      "sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
+      "license": "Ubuntu-License",
+      "source": "https://cloud-images.ubuntu.com/releases/noble/release/",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img",
+          "size_bytes": 621284352,
+          "sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94"
+        }
+      ]
     },
     {
       "id": "vm_firmware",
       "kind": "vm_firmware",
-      "version": "1.0.1",
-      "revision": "edk2-ovmf-aavmf-r1",
+      "version": "edk2-nightly",
+      "revision": "edk2-aavmf-aarch64",
       "os": "any",
-      "architecture": "any",
-      "worker_compatibility": ["vm_image>=1.0.1"],
-      "includes": ["QEMU_EFI.fd", "OVMF_CODE.fd"],
-      "total_size_bytes": 0,
-      "sha256": "pending_pinned_catalog_hash",
+      "architecture": "aarch64",
+      "worker_compatibility": ["vm_image>=24.04"],
+      "includes": ["RELEASEAARCH64_QEMU_EFI.fd"],
+      "total_size_bytes": 3145728,
+      "sha256": "d12f54d442c62963e107573bbebd9e714db9cfafb7c5a411d3bf759555080ed6",
       "license": "BSD-2-Clause-Patent",
       "source": "https://github.com/tianocore/edk2",
-      "parts": []
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://retrage.github.io/edk2-nightly/bin/RELEASEAARCH64_QEMU_EFI.fd",
+          "size_bytes": 3145728,
+          "sha256": "d12f54d442c62963e107573bbebd9e714db9cfafb7c5a411d3bf759555080ed6"
+        }
+      ]
+    },
+    {
+      "id": "vm_firmware",
+      "kind": "vm_firmware",
+      "version": "edk2-nightly",
+      "revision": "edk2-ovmf-x86_64",
+      "os": "any",
+      "architecture": "x86_64",
+      "worker_compatibility": ["vm_image>=24.04"],
+      "includes": ["RELEASEX64_OVMF.fd"],
+      "total_size_bytes": 4194304,
+      "sha256": "90a1f21fafb839cd73859c999b78091ca9da03996182c184cb17ebec1cdc17b7",
+      "license": "BSD-2-Clause-Patent",
+      "source": "https://github.com/tianocore/edk2",
+      "parts": [
+        {
+          "index": 0,
+          "url": "https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd",
+          "size_bytes": 4194304,
+          "sha256": "90a1f21fafb839cd73859c999b78091ca9da03996182c184cb17ebec1cdc17b7"
+        }
+      ]
     }
   ]
 }

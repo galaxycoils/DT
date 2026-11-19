@@ -40,25 +40,57 @@ pub fn draw_adaptive_sidebar(
                 .inner_margin(egui::Margin::symmetric(12, 14)),
         )
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if icons::button(
-                    ui,
-                    Icon::Sidebar,
-                    if mini {
-                        "Expand sidebar"
-                    } else {
-                        "Collapse sidebar"
-                    },
-                    palette.text_secondary,
-                )
-                .clicked()
-                {
-                    ui_state.sidebar_manual_override = Some(collapsed);
-                    send(DaemonRequest::SaveUiSettings {
-                        ui: serde_json::json!({"sidebar_collapsed":!collapsed}),
+            if mini {
+                ui.vertical_centered(|ui| {
+                    if icons::button(ui, Icon::Sidebar, "Expand sidebar", palette.text_secondary)
+                        .clicked()
+                    {
+                        ui_state.sidebar_manual_override = Some(true);
+                        send(DaemonRequest::SaveUiSettings {
+                            ui: serde_json::json!({"sidebar_collapsed": false}),
+                        });
+                    }
+                    ui.add_space(4.0);
+                    let plus = icons::button(ui, Icon::Plus, "Create", palette.text_secondary);
+                    egui::Popup::menu(&plus).show(|ui| {
+                        for (label, modal) in [
+                            ("New bot", ActiveModal::CreateBot),
+                            ("New group", ActiveModal::CreateChannel),
+                            ("Studio · skills & routines", ActiveModal::Studio),
+                        ] {
+                            if ui.button(label).clicked() {
+                                ui_state.active_modal = Some(modal);
+                                ui.close();
+                            }
+                        }
                     });
-                }
-                if !mini {
+                    if icons::button(
+                        ui,
+                        Icon::Search,
+                        "Search conversations",
+                        palette.text_secondary,
+                    )
+                    .clicked()
+                    {
+                        ui_state.sidebar_manual_override = Some(true);
+                        ui_state.sidebar_search_open = true;
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    if icons::button(
+                        ui,
+                        Icon::Sidebar,
+                        "Collapse sidebar",
+                        palette.text_secondary,
+                    )
+                    .clicked()
+                    {
+                        ui_state.sidebar_manual_override = Some(false);
+                        send(DaemonRequest::SaveUiSettings {
+                            ui: serde_json::json!({"sidebar_collapsed": true}),
+                        });
+                    }
                     ui.add_space(4.0);
                     ui.strong("DT");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -86,9 +118,9 @@ pub fn draw_adaptive_sidebar(
                             ui_state.sidebar_search_open = !ui_state.sidebar_search_open;
                         }
                     });
-                }
-            });
-            ui.add_space(18.0);
+                });
+            }
+            ui.add_space(12.0);
             if ui_state.sidebar_search_open && !mini {
                 ui.add(
                     egui::TextEdit::singleline(&mut ui_state.sidebar_search)
@@ -97,8 +129,8 @@ pub fn draw_adaptive_sidebar(
                 );
                 ui.add_space(10.0);
             }
-            ui.horizontal(|ui| {
-                if mini {
+            if mini {
+                ui.vertical_centered(|ui| {
                     let activity =
                         icons::button(ui, Icon::Activity, "Activity", palette.text_secondary);
                     egui::Popup::menu(&activity).show(|ui| {
@@ -138,7 +170,12 @@ pub fn draw_adaptive_sidebar(
                             ui.close();
                         }
                     });
-                } else {
+                    if icons::button(ui, Icon::Pages, "Pages", palette.text_secondary).clicked() {
+                        select_section(ui_state, WorkspaceSection::Spaces, &mut send);
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
                     let activity = icons::labeled_button(
                         ui,
                         Icon::Activity,
@@ -189,44 +226,41 @@ pub fn draw_adaptive_sidebar(
                             select_section(ui_state, WorkspaceSection::Spaces, &mut send);
                         }
                     });
-                }
-            });
-            ui.add_space(12.0);
+                });
+            }
+            ui.add_space(10.0);
             // Footer remains visible while conversations scroll.
             egui::TopBottomPanel::bottom("grok_sidebar_account")
                 .frame(egui::Frame::NONE)
                 .show_inside(ui, |ui| {
-                    ui.add_space(10.0);
-                    if !mini
-                        && ui
-                            .add_sized(
-                                [ui.available_width(), 36.0],
-                                egui::Button::new("Connect apps")
-                                    .fill(palette.bg_elevated)
-                                    .corner_radius(12),
-                            )
-                            .clicked()
-                    {
-                        ui_state.active_modal = Some(ActiveModal::ConnectApps);
-                    }
-                    ui.horizontal(|ui| {
-                        let settings_resp = if mini {
-                            icons::button(ui, Icon::Settings, "Settings", palette.text_secondary)
-                        } else {
-                            icons::labeled_button(
+                    ui.add_space(8.0);
+                    if mini {
+                        ui.vertical_centered(|ui| {
+                            if icons::button(
                                 ui,
-                                Icon::Settings,
-                                "Settings",
+                                Icon::Plus,
+                                "Connect apps & marketplace",
                                 palette.text_secondary,
                             )
-                        };
-                        if settings_resp.clicked() {
-                            ui_state.active_modal = Some(ActiveModal::Settings);
-                        }
-                        if !mini {
-                            ui.menu_button("Workspace", |ui| {
+                            .clicked()
+                            {
+                                ui_state.active_modal = Some(ActiveModal::ConnectApps);
+                            }
+                            if icons::button(ui, Icon::Settings, "Settings", palette.text_secondary)
+                                .clicked()
+                            {
+                                ui_state.active_modal = Some(ActiveModal::Settings);
+                            }
+                            let ws_btn =
+                                icons::button(ui, Icon::More, "Workspace", palette.text_secondary);
+                            egui::Popup::menu(&ws_btn).show(|ui| {
                                 if ui.button("Providers & models").clicked() {
                                     ui_state.settings_pane = SettingsPane::Providers;
+                                    ui_state.active_modal = Some(ActiveModal::Settings);
+                                    ui.close();
+                                }
+                                if ui.button("Local components & updates").clicked() {
+                                    ui_state.settings_pane = SettingsPane::SystemAndUpdates;
                                     ui_state.active_modal = Some(ActiveModal::Settings);
                                     ui.close();
                                 }
@@ -239,8 +273,52 @@ pub fn draw_adaptive_sidebar(
                                     ui.close();
                                 }
                             });
+                        });
+                    } else {
+                        if ui
+                            .add_sized(
+                                [ui.available_width(), 36.0],
+                                egui::Button::new("Connect apps")
+                                    .fill(palette.bg_elevated)
+                                    .corner_radius(12),
+                            )
+                            .clicked()
+                        {
+                            ui_state.active_modal = Some(ActiveModal::ConnectApps);
                         }
-                    });
+                        ui.horizontal(|ui| {
+                            if icons::labeled_button(
+                                ui,
+                                Icon::Settings,
+                                "Settings",
+                                palette.text_secondary,
+                            )
+                            .clicked()
+                            {
+                                ui_state.active_modal = Some(ActiveModal::Settings);
+                            }
+                            ui.menu_button("Workspace", |ui| {
+                                if ui.button("Providers & models").clicked() {
+                                    ui_state.settings_pane = SettingsPane::Providers;
+                                    ui_state.active_modal = Some(ActiveModal::Settings);
+                                    ui.close();
+                                }
+                                if ui.button("Local components & updates").clicked() {
+                                    ui_state.settings_pane = SettingsPane::SystemAndUpdates;
+                                    ui_state.active_modal = Some(ActiveModal::Settings);
+                                    ui.close();
+                                }
+                                if ui.button("Keyboard shortcuts").clicked() {
+                                    ui_state.active_modal = Some(ActiveModal::Shortcuts);
+                                    ui.close();
+                                }
+                                if ui.button("Command palette").clicked() {
+                                    ui_state.active_modal = Some(ActiveModal::CommandPalette);
+                                    ui.close();
+                                }
+                            });
+                        });
+                    }
                 });
             let needle = ui_state.sidebar_search.trim().to_ascii_lowercase();
             let mut visible: Vec<_> = bots
@@ -369,6 +447,63 @@ pub fn draw_adaptive_sidebar(
                                         &mut send,
                                     );
                                 }
+                            }
+                        }
+                    }
+                    if mini && !channels.is_empty() {
+                        ui.separator();
+                        for ch in channels {
+                            let id = ch["id"].as_str().unwrap_or("general");
+                            let name = ch["name"].as_str().unwrap_or(id).trim_start_matches('#');
+                            let count =
+                                unread_counts[format!("channel:{id}")].as_u64().unwrap_or(0);
+                            let selected = ui_state.section == WorkspaceSection::Bots
+                                && ui_state.active_chat_kind == "channel"
+                                && active_channel == id;
+                            let (rect, resp) =
+                                ui.allocate_exact_size(Vec2::splat(44.0), Sense::click());
+                            if selected || resp.hovered() {
+                                ui.painter().rect_filled(rect, 12, palette.bg_hover);
+                            }
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                format!(
+                                    "#{}",
+                                    name.chars().next().unwrap_or('g').to_ascii_uppercase()
+                                ),
+                                egui::FontId::proportional(14.0),
+                                if selected {
+                                    palette.accent
+                                } else {
+                                    palette.text_secondary
+                                },
+                            );
+                            if count > 0 {
+                                ui.painter().circle_filled(
+                                    rect.right_top() + Vec2::new(-7.0, 7.0),
+                                    4.0,
+                                    palette.accent,
+                                );
+                            }
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(
+                                    egui::WidgetType::Button,
+                                    true,
+                                    format!("#{name}"),
+                                )
+                            });
+                            if resp.on_hover_text(format!("#{name}")).clicked() {
+                                *active_channel = id.into();
+                                ui_state.active_chat_kind = "channel".into();
+                                ui_state.section = WorkspaceSection::Bots;
+                                send(DaemonRequest::ChannelHistory {
+                                    channel_id: id.into(),
+                                });
+                                send(DaemonRequest::MarkChatRead {
+                                    chat_kind: "channel".into(),
+                                    chat_id: id.into(),
+                                });
                             }
                         }
                     }

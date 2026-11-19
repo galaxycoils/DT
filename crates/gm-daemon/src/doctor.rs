@@ -900,22 +900,83 @@ async fn run_doctor_inner(
 
     // Optional feature capabilities (separate from installation_readiness!)
     let mut capabilities = vec![check_hypervisor_capability()];
+    let component_mgr = crate::components::ComponentManager::open(storage_dir).ok();
+    let vlm_models = component_mgr
+        .as_ref()
+        .map(|m| m.installed_components_for_kind(crate::components::ComponentKind::VlmModel))
+        .unwrap_or_default();
+    let vlm_workers = component_mgr
+        .as_ref()
+        .map(|m| m.installed_components_for_kind(crate::components::ComponentKind::VlmWorker))
+        .unwrap_or_default();
+    let (vlm_readiness, vlm_summary, vlm_next) = if !vlm_models.is_empty()
+        && !vlm_workers.is_empty()
+    {
+        let ids: Vec<&str> = vlm_models.iter().map(|c| c.id.as_str()).collect();
+        (
+            ReadinessState::Ready,
+            format!("Verified local VLM assets installed: {}", ids.join(", ")),
+            None,
+        )
+    } else if !vlm_models.is_empty() || !vlm_workers.is_empty() {
+        (
+            ReadinessState::NeedsAction,
+            format!(
+                "Partial local VLM install ({} model(s), {} worker(s))",
+                vlm_models.len(),
+                vlm_workers.len()
+            ),
+            Some(
+                "Install both a local VLM model and vlm_worker in Settings -> Local Components."
+                    .into(),
+            ),
+        )
+    } else {
+        (
+            ReadinessState::Unconfigured,
+            "Local multimodal assets are downloaded on demand when enabled".into(),
+            Some("Install a local VLM model and worker in Settings -> Local Components.".into()),
+        )
+    };
     capabilities.push(CapabilityStatus {
         id: "local_vlm".into(),
         name: "Local VLM Workers (Qwen2-VL-2B / SmolVLM / SmolVLM2)".into(),
-        readiness: ReadinessState::Unconfigured,
-        summary: "Local multimodal assets are downloaded on demand when enabled".into(),
-        next_action: Some(
-            "Enable a local model in Settings -> Models to download signed checkpoints.".into(),
-        ),
+        readiness: vlm_readiness,
+        summary: vlm_summary,
+        next_action: vlm_next,
     });
+
+    let stt_installed = component_mgr
+        .as_ref()
+        .map(|m| m.installed_components_for_kind(crate::components::ComponentKind::SpeechStt))
+        .unwrap_or_default();
+    let tts_installed = component_mgr
+        .as_ref()
+        .map(|m| m.installed_components_for_kind(crate::components::ComponentKind::SpeechTts))
+        .unwrap_or_default();
+    let (voice_readiness, voice_summary, voice_next) = if !stt_installed.is_empty() {
+        (
+            ReadinessState::Ready,
+            format!(
+                "Local speech assets installed (STT: {}, TTS: {})",
+                stt_installed.len(),
+                tts_installed.len()
+            ),
+            None,
+        )
+    } else {
+        (
+            ReadinessState::Unconfigured,
+            "Speech assets are downloaded and started on demand when voice mode is enabled".into(),
+            Some("Install whisper-stt-base-en in Settings -> Local Components to enable offline voice.".into()),
+        )
+    };
     capabilities.push(CapabilityStatus {
         id: "voice_runtime".into(),
         name: "Managed Whisper STT & Local TTS".into(),
-        readiness: ReadinessState::Unconfigured,
-        summary: "Speech assets are downloaded and started on demand when voice mode is enabled"
-            .into(),
-        next_action: Some("Enable Voice in Settings -> Voice & Meetings.".into()),
+        readiness: voice_readiness,
+        summary: voice_summary,
+        next_action: voice_next,
     });
 
     for check in &checks {

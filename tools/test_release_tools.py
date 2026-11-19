@@ -96,8 +96,8 @@ class EvidenceTests(unittest.TestCase):
             mutations = [
                 lambda d: d.update(source='fixture'),
                 lambda d: d.pop('candidate_hashes'),
-                lambda d: d['candidate_hashes']['installers'].pop('DT-1.0.1-windows-aarch64-setup.exe'),
-                lambda d: d['candidate_hashes']['installers'].pop('dt_1.0.1_arm64.deb'),
+                lambda d: d['candidate_hashes']['installers'].pop('DT-1.0.2-windows-aarch64-setup.exe'),
+                lambda d: d['candidate_hashes']['installers'].pop('dt_1.0.2_arm64.deb'),
                 lambda d: d.update(commit='b' * 40),
                 lambda d: d['targets'].pop(),
                 lambda d: d.update(targets=[t for t in d['targets'] if t['session'] != 'wayland']),

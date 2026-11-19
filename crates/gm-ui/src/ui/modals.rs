@@ -231,14 +231,17 @@ pub fn draw_active_modal(
                 .show(ctx, |ui| {
                     let shortcuts = [
                         ("Cmd/Ctrl + K", "Open Command Palette"),
-                        ("Cmd/Ctrl + ,", "Open 5-Pane Settings Modal"),
+                        ("Cmd/Ctrl + ,", "Open Settings Modal"),
+                        ("Cmd/Ctrl + B", "Toggle Sidebar Collapse"),
+                        ("Cmd/Ctrl + Shift + F", "Expand Sidebar & Search Conversations"),
                         ("Cmd/Ctrl + Shift + M", "Open Studio (Templates, Skills, Routines)"),
                         ("Cmd/Ctrl + /", "Open Keyboard Shortcuts Cheat-Sheet"),
                         ("Cmd/Ctrl + Alt + B", "Toggle 340px Bot Details Drawer"),
                         ("Cmd/Ctrl + F", "Toggle Two-Stage FTS5 Message Search"),
-                        ("Cmd/Ctrl + D", "Toggle Dictation Mode"),
+                        ("Cmd/Ctrl + D", "Start / Stop Dictation Session"),
                         ("Cmd/Ctrl + Enter", "Send Message / Task"),
-                        ("Cmd/Ctrl + 1..9", "Switch to Bot 1..9"),
+                        ("Cmd/Ctrl + 1..5", "Switch Section (Bots, Feed, Goals, Pages, Audit)"),
+                        ("Cmd/Ctrl + 6..9", "Switch to Bot 6..9"),
                         ("-> then Backspace", "Auto-replace with → and single-Backspace undo"),
                         ("Escape", "5-Tier Dismissal (Popover → Modal → Split/Computer → Drawer → Reply/Search)"),
                     ];
@@ -290,6 +293,12 @@ pub fn draw_active_modal(
                                     }
                                     SettingsPane::UsageAndBudget => {
                                         send(DaemonRequest::GetUsageBreakdown { days: Some(7) });
+                                    }
+                                    SettingsPane::SystemAndUpdates => {
+                                        send(DaemonRequest::ManageSystem {
+                                            op: "components_list".into(),
+                                            payload: Value::Null,
+                                        });
                                     }
                                     _ => {}
                                 }
@@ -689,19 +698,151 @@ pub fn draw_active_modal(
 
                             SettingsPane::SystemAndUpdates => {
                                 ui.strong("Configuration & System");
-                                ui.label(format!("Version {}",env!("CARGO_PKG_VERSION")));
-                                if ui.button("Check for Updates").clicked(){send(DaemonRequest::CheckUpdates);}
-                                let update=ui_state.responses["updates"].clone();
-                                if !update.is_null(){ui.monospace(serde_json::to_string_pretty(&update).unwrap_or_default());if let Some(url)=update["release_url"].as_str(){ui.hyperlink_to("Release notes",url);}
-                                if update["update_available"].as_bool()==Some(true)&&ui.button("Download & Verify Update").clicked(){send(DaemonRequest::ManageSystem {op:"install_update".into(),payload:serde_json::json!({"confirmed":true})});}}
-                                ui.checkbox(&mut settings_config.ui.auto_updates,"Automatic updates when idle");
-                                if ui.button("Save Update Preference").clicked(){send(DaemonRequest::SaveUiSettings {ui:serde_json::json!({"auto_updates":settings_config.ui.auto_updates})});}
-                                if ui.button("DT Doctor Check").clicked(){send(DaemonRequest::ManageSystem {op:"health".into(),payload:Value::Null});}
-                                if ui.button("Export Support Bundle").clicked(){send(DaemonRequest::ManageSystem {op:"support_bundle".into(),payload:Value::Null});}
+                                ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+                                ui.horizontal_wrapped(|ui| {
+                                    if ui.button("Check for Updates").clicked() {
+                                        send(DaemonRequest::CheckUpdates);
+                                    }
+                                    if ui.button("DT Doctor Check").clicked() {
+                                        send(DaemonRequest::ManageSystem {
+                                            op: "health".into(),
+                                            payload: Value::Null,
+                                        });
+                                    }
+                                    if ui.button("Export Support Bundle").clicked() {
+                                        send(DaemonRequest::ManageSystem {
+                                            op: "support_bundle".into(),
+                                            payload: Value::Null,
+                                        });
+                                    }
+                                    if ui.button("Refresh Local Components").clicked() {
+                                        send(DaemonRequest::ManageSystem {
+                                            op: "components_list".into(),
+                                            payload: Value::Null,
+                                        });
+                                    }
+                                });
+                                let update = ui_state.responses["updates"].clone();
+                                if !update.is_null() {
+                                    ui.monospace(
+                                        serde_json::to_string_pretty(&update).unwrap_or_default(),
+                                    );
+                                    if let Some(url) = update["release_url"].as_str() {
+                                        ui.hyperlink_to("Release notes", url);
+                                    }
+                                    if update["update_available"].as_bool() == Some(true)
+                                        && ui.button("Download & Verify Update").clicked()
+                                    {
+                                        send(DaemonRequest::ManageSystem {
+                                            op: "install_update".into(),
+                                            payload: serde_json::json!({"confirmed": true}),
+                                        });
+                                    }
+                                }
+                                ui.checkbox(
+                                    &mut settings_config.ui.auto_updates,
+                                    "Automatic updates when idle",
+                                );
+                                if ui.button("Save Update Preference").clicked() {
+                                    send(DaemonRequest::SaveUiSettings {
+                                        ui: serde_json::json!({"auto_updates": settings_config.ui.auto_updates}),
+                                    });
+                                }
+
+                                ui.separator();
+                                ui.strong("Local Components (On-Demand Models, Speech & VM)");
+                                ui.small("Pinned by SHA-256 and downloaded on demand with resumable verification.");
+                                let comp_list = ui_state.responses["components_list"]["components"]
+                                    .as_array()
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if comp_list.is_empty() {
+                                    ui.small("Click 'Refresh Local Components' to inspect catalog status.");
+                                } else {
+                                    for comp in &comp_list {
+                                        let cid = comp["id"].as_str().unwrap_or("");
+                                        let ver = comp["version"].as_str().unwrap_or("");
+                                        let status = comp["status"].as_str().unwrap_or("not_installed");
+                                        let total_b = comp["total_size_bytes"].as_u64().unwrap_or(0);
+                                        let dl_b = comp["bytes_downloaded"].as_u64().unwrap_or(0);
+                                        let size_mb = total_b as f64 / (1024.0 * 1024.0);
+                                        let summary = comp["check_summary"].as_str().unwrap_or("");
+                                        let err = comp["last_error"].as_str().unwrap_or("");
+                                        ui.group(|ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.strong(cid);
+                                                ui.small(format!("v{ver} · {size_mb:.1} MB"));
+                                                let status_color = match status {
+                                                    "verified" => palette.status_ok,
+                                                    "failed" => palette.status_danger,
+                                                    _ => palette.text_secondary,
+                                                };
+                                                ui.colored_label(status_color, status);
+                                                if status != "verified" && status != "downloading" {
+                                                    let btn_label = if status == "failed" {
+                                                        "Retry"
+                                                    } else if status == "installed" {
+                                                        "Re-verify"
+                                                    } else {
+                                                        "Install"
+                                                    };
+                                                    if ui.small_button(btn_label).clicked() {
+                                                        send(DaemonRequest::ManageSystem {
+                                                            op: if status == "installed" {
+                                                                "components_verify".into()
+                                                            } else {
+                                                                "components_install".into()
+                                                            },
+                                                            payload: serde_json::json!({ "id": cid }),
+                                                        });
+                                                    }
+                                                }
+                                                if matches!(status, "installed" | "verified")
+                                                    && ui.small_button("Verify").clicked()
+                                                {
+                                                    send(DaemonRequest::ManageSystem {
+                                                        op: "components_verify".into(),
+                                                        payload: serde_json::json!({ "id": cid }),
+                                                    });
+                                                }
+                                            });
+                                            if status == "downloading" && total_b > 0 {
+                                                let frac = (dl_b as f32 / total_b as f32).clamp(0.0, 1.0);
+                                                ui.add(egui::ProgressBar::new(frac).show_percentage());
+                                            }
+                                            if !summary.is_empty() {
+                                                ui.small(summary);
+                                            }
+                                            if !err.is_empty() {
+                                                ui.colored_label(palette.status_danger, err);
+                                            }
+                                        });
+                                    }
+                                }
+
+                                ui.separator();
                                 ui.text_edit_multiline(&mut ui_state.feedback_note);
-                                ui.checkbox(&mut ui_state.diagnostics_consent,"Include redacted diagnostics");
-                                if ui.button("Send Feedback").clicked(){send(DaemonRequest::ManageSystem {op:"feedback".into(),payload:serde_json::json!({"note":ui_state.feedback_note,"include_diagnostics":ui_state.diagnostics_consent})});}
-                                for key in ["health","support_bundle","feedback","install_update"]{if !ui_state.responses[key].is_null(){ui.monospace(serde_json::to_string_pretty(&ui_state.responses[key]).unwrap_or_default());}}
+                                ui.checkbox(
+                                    &mut ui_state.diagnostics_consent,
+                                    "Include redacted diagnostics",
+                                );
+                                if ui.button("Send Feedback").clicked() {
+                                    send(DaemonRequest::ManageSystem {
+                                        op: "feedback".into(),
+                                        payload: serde_json::json!({
+                                            "note": ui_state.feedback_note,
+                                            "include_diagnostics": ui_state.diagnostics_consent,
+                                        }),
+                                    });
+                                }
+                                for key in ["health", "support_bundle", "feedback", "install_update"] {
+                                    if !ui_state.responses[key].is_null() {
+                                        ui.monospace(
+                                            serde_json::to_string_pretty(&ui_state.responses[key])
+                                                .unwrap_or_default(),
+                                        );
+                                    }
+                                }
 
                                 if ui.button("Save Config File").clicked() {
                                     save_config_disk();
@@ -960,13 +1101,104 @@ pub fn draw_active_modal(
                     ui.collapsing("Built-in Integrations", |ui| {
                         if let Some(integrations) = connectors_data["integrations"].as_array() {
                             for app in integrations {
+                                let aid = app["id"].as_str().unwrap_or("");
                                 ui.group(|ui| {
-                                    ui.strong(app["name"].as_str().unwrap_or("Integration"));
-                                    ui.label(app["status"].as_str().unwrap_or("Setup required"));
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.strong(app["name"].as_str().unwrap_or("Integration"));
+                                        ui.label(app["status"].as_str().unwrap_or("Setup required"));
+                                        if !aid.is_empty() && ui.small_button("Probe").clicked() {
+                                            send(DaemonRequest::ManageSystem {
+                                                op: "connector_probe".into(),
+                                                payload: serde_json::json!({ "id": aid }),
+                                            });
+                                        }
+                                    });
                                     ui.small(app["account_summary"].as_str().unwrap_or_default());
                                     ui.small(app["setup_hint"].as_str().unwrap_or("Setup / Connect bridge required"));
                                 });
                             }
+                        }
+                        if !ui_state.responses["connector_probe"].is_null() {
+                            ui.monospace(
+                                serde_json::to_string_pretty(&ui_state.responses["connector_probe"])
+                                    .unwrap_or_default(),
+                            );
+                        }
+                    });
+                    ui.collapsing("Marketplace Plugins", |ui| {
+                        if ui.small_button("Refresh Marketplace").clicked() {
+                            send(DaemonRequest::ManageSystem {
+                                op: "marketplace_list".into(),
+                                payload: Value::Null,
+                            });
+                        }
+                        let catalog = ui_state.responses["marketplace_list"]["catalog"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        let installed = ui_state.responses["marketplace_list"]["installed"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        for item in &catalog {
+                            let pid = item["id"].as_str().unwrap_or("");
+                            let pname = item["name"].as_str().unwrap_or(pid);
+                            let pver = item["version"].as_str().unwrap_or("");
+                            let pdesc = item["description"].as_str().unwrap_or("");
+                            let scopes: Vec<&str> = item["requested_scopes"]
+                                .as_array()
+                                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                                .unwrap_or_default();
+                            let is_installed = installed
+                                .iter()
+                                .any(|ins| ins["id"].as_str() == Some(pid));
+                            ui.group(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.strong(pname);
+                                    ui.small(format!("v{pver}"));
+                                    if is_installed {
+                                        ui.colored_label(palette.status_ok, "Installed");
+                                        if ui.small_button("Remove").clicked() {
+                                            send(DaemonRequest::ManageSystem {
+                                                op: "marketplace_remove".into(),
+                                                payload: serde_json::json!({ "id": pid }),
+                                            });
+                                        }
+                                    } else if ui.small_button("Confirm Scopes & Install").clicked() {
+                                        send(DaemonRequest::ManageSystem {
+                                            op: "marketplace_install".into(),
+                                            payload: serde_json::json!({
+                                                "id": pid,
+                                                "confirm_scopes": true,
+                                            }),
+                                        });
+                                    }
+                                });
+                                ui.small(pdesc);
+                                if !scopes.is_empty() {
+                                    ui.small(format!("Requested scopes: {}", scopes.join(", ")));
+                                }
+                            });
+                        }
+                    });
+                    ui.collapsing("Plan & Billing", |ui| {
+                        if ui.small_button("Refresh Plan Status").clicked() {
+                            send(DaemonRequest::ManageSystem {
+                                op: "billing_status".into(),
+                                payload: Value::Null,
+                            });
+                        }
+                        if !ui_state.responses["billing_status"].is_null() {
+                            let plan = ui_state.responses["billing_status"]["plan"]
+                                .as_str()
+                                .unwrap_or("free_self_hosted");
+                            let byok = ui_state.responses["billing_status"]["byok_allowed"]
+                                .as_bool()
+                                .unwrap_or(true);
+                            ui.label(format!(
+                                "Plan: {plan} · BYOK enabled: {}",
+                                if byok { "Yes" } else { "No" }
+                            ));
                         }
                     });
                     if ui.button("Skills Library & Studio").clicked() { ui_state.studio_tab = "skills".into(); ui_state.active_modal = Some(ActiveModal::Studio); }

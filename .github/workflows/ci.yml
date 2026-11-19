@@ -81,6 +81,9 @@ jobs:
           npm ci --prefix clients/mobile
           npm run typecheck --prefix clients/mobile
           npm test --prefix clients/mobile
+          npm run export:ios --prefix clients/mobile
+          npm run export:android --prefix clients/mobile
+          rm -rf clients/mobile/dist
 
       - name: Verify release tools, coverage inventory, and budget ledger (Linux)
         if: runner.os == 'Linux'

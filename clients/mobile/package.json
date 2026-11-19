@@ -1,10 +1,13 @@
 {
   "name": "@dt/mobile",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "license": "Apache-2.0",
   "private": true,
+  "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
+    "export:ios": "expo export --platform ios --output-dir dist/ios",
+    "export:android": "expo export --platform android --output-dir dist/android",
     "test": "node --test tests/mobile-contract.test.mjs",
     "typecheck": "tsc --noEmit"
   },

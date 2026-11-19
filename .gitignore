@@ -18,3 +18,4 @@ __pycache__/
 
 node_modules/
 clients/web/dist/
+clients/mobile/dist/

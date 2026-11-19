@@ -101,6 +101,34 @@ pub trait CompanionUpdates: Send + Sync {
     async fn download_verified(&self) -> gm_core::error::Result<serde_json::Value>;
 }
 
+#[async_trait::async_trait]
+pub trait CompanionComponents: Send + Sync {
+    async fn list(&self) -> gm_core::error::Result<serde_json::Value>;
+    async fn install(&self, id: &str) -> gm_core::error::Result<serde_json::Value>;
+    async fn verify(&self, id: &str) -> gm_core::error::Result<serde_json::Value>;
+}
+
+#[derive(Clone)]
+pub struct WorkspaceSupervisor(pub OpenBotSupervisor);
+
+struct ActiveSupervisor(OpenBotSupervisor);
+
+#[async_trait::async_trait]
+impl axum::extract::FromRequestParts<CompanionWebState> for ActiveSupervisor {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &CompanionWebState,
+    ) -> std::result::Result<Self, Self::Rejection> {
+        if let Some(WorkspaceSupervisor(sup)) = parts.extensions.get::<WorkspaceSupervisor>() {
+            Ok(Self(sup.clone()))
+        } else {
+            Ok(Self(state.supervisor.clone()))
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CompanionWebState {
     pub supervisor: OpenBotSupervisor,
@@ -116,8 +144,57 @@ pub struct CompanionWebState {
     pub kill_switch: Option<gm_safety::KillSwitch>,
     pub platform: Option<Arc<dyn gm_platform::Platform>>,
     pub updates: Option<Arc<dyn CompanionUpdates>>,
-    pub hosted_plane: Option<Arc<crate::hosted::HostedControlPlane>>,
+    pub components: Option<Arc<dyn CompanionComponents>>,
+    pub voice_manager: crate::voice::VoiceSessionManager,
+    pub hosted_plane: Option<crate::hosted::HostedPlaneBackend>,
+    pub workspace_supervisors:
+        Arc<parking_lot::RwLock<std::collections::HashMap<String, OpenBotSupervisor>>>,
     pub sanitized_doctor: Option<Arc<parking_lot::RwLock<Option<serde_json::Value>>>>,
+}
+
+impl CompanionWebState {
+    pub async fn supervisor_for_workspace(
+        &self,
+        ws_id: &str,
+    ) -> gm_core::error::Result<OpenBotSupervisor> {
+        let clean = crate::hosted::validate_workspace_slug(ws_id)?;
+        let Some(ref plane) = self.hosted_plane else {
+            return Ok(self.supervisor.clone());
+        };
+        if let Some(existing) = self.workspace_supervisors.read().get(&clean).cloned() {
+            return Ok(existing);
+        }
+        let Some(record) = plane.get_workspace(&clean).await? else {
+            let expected_local =
+                std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+            if clean == expected_local || clean == "local" {
+                return Ok(self.supervisor.clone());
+            }
+            return Err(GmError::Config(format!("Unknown workspace '{clean}'")));
+        };
+        let mut ws_cfg = self.shared_config.read().clone();
+        ws_cfg.storage_dir = PathBuf::from(&record.worker_dir);
+        ws_cfg.openbot.bots_dir = ws_cfg.storage_dir.join("bots");
+        let audit = Arc::new(gm_safety::AuditLogger::with_file(
+            ws_cfg.storage_dir.join("audit.jsonl"),
+        )?);
+        let secret_backend: Arc<dyn crate::vault::SecretBackend> = match plane {
+            crate::hosted::HostedPlaneBackend::Sqlite(sqlite) => {
+                Arc::new(sqlite.tenant_secret_backend(&clean)?)
+            }
+            crate::hosted::HostedPlaneBackend::Postgres(_) => {
+                Arc::new(crate::vault::InMemorySecretBackend::default())
+            }
+        };
+        let ws_sup = OpenBotSupervisor::open_with_secret_backend(
+            ws_cfg,
+            audit,
+            self.supervisor.daemon_event_sender(),
+            secret_backend,
+        )?;
+        let mut map = self.workspace_supervisors.write();
+        Ok(map.entry(clean).or_insert(ws_sup).clone())
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -418,12 +495,12 @@ async fn api_v1_auth_and_csrf_middleware(
             )
             .into_response();
         };
-        let workspace = if rel_path == "/auth/session" {
+        let workspace = if rel_path == "/auth/session" || rel_path == "/workspaces" {
             None
         } else {
             requested_ws.as_deref()
         };
-        let session = match plane.authorize_session(&session_id, workspace) {
+        let session = match plane.authorize_session(&session_id, workspace).await {
             Ok(s) => s,
             Err(err) => {
                 let code = if err.to_string().contains("Cross-tenant") {
@@ -449,6 +526,10 @@ async fn api_v1_auth_and_csrf_middleware(
                     .into_response();
             }
         }
+        let active_ws = session.ws_id.clone();
+        if let Ok(ws_sup) = state.supervisor_for_workspace(&active_ws).await {
+            request.extensions_mut().insert(WorkspaceSupervisor(ws_sup));
+        }
         request.extensions_mut().insert(session);
         request
             .headers_mut()
@@ -467,13 +548,24 @@ async fn api_v1_auth_and_csrf_middleware(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
             .unwrap_or("");
+        let is_operator = state.bearer_token.as_deref().is_some_and(|expected| {
+            crate::bridges::constant_time_eq(token.as_bytes(), expected.as_bytes())
+        });
         let expected_local = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
-        if ws != expected_local && ws != "local" && plane.authorize_workspace(ws, token).is_err() {
+        let workspace_exists = plane.get_workspace(ws).await.ok().flatten().is_some();
+        if !is_operator
+            && ws != expected_local
+            && ws != "local"
+            && plane.authorize_workspace(ws, token).await.is_err()
+        {
             return ApiErr::msg(
                 StatusCode::FORBIDDEN,
                 format!("Workspace access denied for '{ws}'"),
             )
             .into_response();
+        }
+        if workspace_exists && let Ok(ws_sup) = state.supervisor_for_workspace(ws).await {
+            request.extensions_mut().insert(WorkspaceSupervisor(ws_sup));
         }
     }
     next.run(request).await
@@ -658,6 +750,25 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
         .route("/api/system/kill", post(system_kill_route))
         .route("/api/system/updates/check", post(system_updates_check_route))
         .route("/api/system/updates/download", post(system_updates_download_route))
+        .route("/api/system/components", get(system_components_list_route))
+        .route(
+            "/api/system/components/:id/install",
+            post(system_components_install_route),
+        )
+        .route(
+            "/api/system/components/:id/verify",
+            post(system_components_verify_route),
+        )
+        .route("/api/voice/status", get(voice_status_route))
+        .route("/api/voice/start", post(voice_start_route))
+        .route("/api/voice/consent", post(voice_consent_route))
+        .route(
+            "/api/voice/transcribe",
+            post(voice_transcribe_route).route_layer(DefaultBodyLimit::max(24 * 1024 * 1024)),
+        )
+        .route("/api/voice/speak", post(voice_speak_route))
+        .route("/api/voice/barge_in", post(voice_barge_in_route))
+        .route("/api/voice/stop", post(voice_stop_route))
         .route("/api/system/providers", get(system_providers_get_route))
         .route("/api/system/providers/profile", post(system_provider_profile_route))
         .route("/api/system/providers/:id/discover-models", post(system_provider_discover_models_route))
@@ -727,6 +838,8 @@ impl CompanionWebServer {
         slack_signing_secret: Option<String>,
     ) -> Self {
         let shared_config = Arc::new(parking_lot::RwLock::new(supervisor.config().clone()));
+        let voice_manager =
+            crate::voice::VoiceSessionManager::new(supervisor.config().storage_dir.clone());
         Self {
             state: CompanionWebState {
                 supervisor,
@@ -742,14 +855,24 @@ impl CompanionWebServer {
                 kill_switch: None,
                 platform: None,
                 updates: None,
+                components: None,
+                voice_manager,
                 hosted_plane: None,
+                workspace_supervisors: Arc::new(parking_lot::RwLock::new(
+                    std::collections::HashMap::new(),
+                )),
                 sanitized_doctor: None,
             },
         }
     }
 
     pub fn with_hosted_plane(mut self, plane: Arc<crate::hosted::HostedControlPlane>) -> Self {
-        self.state.hosted_plane = Some(plane);
+        self.state.hosted_plane = Some(crate::hosted::HostedPlaneBackend::Sqlite(plane));
+        self
+    }
+
+    pub fn with_hosted_backend(mut self, backend: crate::hosted::HostedPlaneBackend) -> Self {
+        self.state.hosted_plane = Some(backend);
         self
     }
 
@@ -763,6 +886,16 @@ impl CompanionWebServer {
 
     pub fn with_updates(mut self, updates: Arc<dyn CompanionUpdates>) -> Self {
         self.state.updates = Some(updates);
+        self
+    }
+
+    pub fn with_components(mut self, components: Arc<dyn CompanionComponents>) -> Self {
+        self.state.components = Some(components);
+        self
+    }
+
+    pub fn with_voice_manager(mut self, voice_manager: crate::voice::VoiceSessionManager) -> Self {
+        self.state.voice_manager = voice_manager;
         self
     }
 
@@ -883,19 +1016,20 @@ async fn replay_events(
 
 async fn list_bots(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    Ok(Json(state.supervisor.roster().list_bots()))
+    Ok(Json(sup.roster().list_bots()))
 }
 
 async fn list_queue(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let tasks = state
-        .supervisor
+    let tasks = sup
         .queue()
         .list_tasks(None)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -956,25 +1090,22 @@ async fn get_a2a_task(
 async fn control_task_route(
     headers: HeaderMap,
     Path((id, action)): Path<(String, String)>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     body: Option<Json<serde_json::Value>>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let ok = match action.as_str() {
-        "pause" => state
-            .supervisor
+        "pause" => sup
             .control_task(&id, &QueueControlAction::Pause)
             .map_err(|_| StatusCode::BAD_REQUEST)?,
-        "resume" => state
-            .supervisor
+        "resume" => sup
             .control_task(&id, &QueueControlAction::Resume)
             .map_err(|_| StatusCode::BAD_REQUEST)?,
-        "retry" => state
-            .supervisor
+        "retry" => sup
             .control_task(&id, &QueueControlAction::Retry)
             .map_err(|_| StatusCode::BAD_REQUEST)?,
-        "cancel" => state
-            .supervisor
+        "cancel" => sup
             .control_task(&id, &QueueControlAction::Cancel)
             .map_err(|_| StatusCode::BAD_REQUEST)?,
         "wheel-resume" => {
@@ -982,16 +1113,14 @@ async fn control_task_route(
                 .as_ref()
                 .and_then(|b| b.get("note"))
                 .and_then(|v| v.as_str());
-            let bot_id = state
-                .supervisor
+            let bot_id = sup
                 .queue()
                 .get_task(&id)
                 .ok()
                 .flatten()
                 .map(|t| t.bot_id)
                 .unwrap_or_else(|| "muse".into());
-            let resumed = state
-                .supervisor
+            let resumed = sup
                 .queue()
                 .resume_from_human(&id, note)
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -1001,19 +1130,18 @@ async fn control_task_route(
                 .resolve_approval(&wheel_req_id, true)
                 .await;
             update_web_dm_card_status(
-                &state.supervisor,
+                &sup,
                 &wheel_req_id,
                 "resumed",
                 note.map(|n| serde_json::json!({ "note": n })),
             );
-            let _ = state
-                .supervisor
+            let _ = sup
                 .daemon_event_sender()
                 .send(DaemonEvent::WheelHandoffResumed {
                     task_id: id.clone(),
                     bot_id: bot_id.clone(),
                 });
-            state.supervisor.broadcast_queue_state(&bot_id);
+            sup.broadcast_queue_state(&bot_id);
             resumed
         }
         "reassign" => {
@@ -1022,19 +1150,17 @@ async fn control_task_route(
                 .and_then(|b| b.get("target_bot_id"))
                 .and_then(|v| v.as_str())
                 .ok_or(StatusCode::BAD_REQUEST)?;
-            state
-                .supervisor
-                .control_task(
-                    &id,
-                    &QueueControlAction::Reassign {
-                        target_bot_id: target.to_string(),
-                    },
-                )
-                .map_err(|_| StatusCode::BAD_REQUEST)?
+            sup.control_task(
+                &id,
+                &QueueControlAction::Reassign {
+                    target_bot_id: target.to_string(),
+                },
+            )
+            .map_err(|_| StatusCode::BAD_REQUEST)?
         }
         _ => return Err(StatusCode::BAD_REQUEST),
     };
-    state.supervisor.emit_agui(
+    sup.emit_agui(
         "TASK_UPDATED",
         &id,
         "",
@@ -1045,11 +1171,11 @@ async fn control_task_route(
 
 async fn list_channels(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let chans = state
-        .supervisor
+    let chans = sup
         .channels()
         .list_channels(false)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1058,12 +1184,12 @@ async fn list_channels(
 
 async fn create_channel(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<CreateChannelBody>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    if state
-        .supervisor
+    if sup
         .channels()
         .get_channel(&body.id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -1071,8 +1197,7 @@ async fn create_channel(
     {
         return Err(StatusCode::CONFLICT);
     }
-    let channel = state
-        .supervisor
+    let channel = sup
         .create_channel(
             &body.id,
             &body.topic,
@@ -1086,17 +1211,15 @@ async fn create_channel(
 async fn list_channel_messages(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    state
-        .supervisor
-        .channels()
+    sup.channels()
         .get_channel(&id)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    let msgs = state
-        .supervisor
+    let msgs = sup
         .channels()
         .list_messages(&id, 100)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1106,13 +1229,13 @@ async fn list_channel_messages(
 async fn post_channel_message(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<ChannelPostBody>,
 ) -> std::result::Result<impl IntoResponse, StatusCode> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let author = body.author.as_deref().unwrap_or("operator");
-    let (msg, spawned) = state
-        .supervisor
+    let (msg, spawned) = sup
         .post_channel_message(&id, author, None, &body.content)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(Json(serde_json::json!({
@@ -1336,20 +1459,13 @@ async fn post_message_reaction(
 async fn list_activity(
     headers: HeaderMap,
     Query(q): Query<ActivityQuery>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
-    let posts = state
-        .supervisor
-        .feed_store()
-        .list_posts(limit)
-        .map_err(map_gm_error)?;
-    let brief_prompt = state
-        .supervisor
-        .feed_store()
-        .get_brief_prompt()
-        .map_err(map_gm_error)?;
+    let posts = sup.feed_store().list_posts(limit).map_err(map_gm_error)?;
+    let brief_prompt = sup.feed_store().get_brief_prompt().map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({
         "posts": posts,
         "brief_prompt": brief_prompt,
@@ -1358,6 +1474,7 @@ async fn list_activity(
 
 async fn create_activity_post(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<CreateActivityBody>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -1392,13 +1509,8 @@ async fn create_activity_post(
         user_prompt: body.user_prompt,
         created_at: chrono::Utc::now(),
     };
-    state
-        .supervisor
-        .feed_store()
-        .upsert_post(&post)
-        .map_err(map_gm_error)?;
-    let _ = state
-        .supervisor
+    sup.feed_store().upsert_post(&post).map_err(map_gm_error)?;
+    let _ = sup
         .daemon_event_sender()
         .send(DaemonEvent::ActivityUpdated {
             reason: "feed_post_created".into(),
@@ -1699,10 +1811,11 @@ async fn dismiss_idea_route(
 
 async fn list_goals_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let mgr = state.supervisor.goal_manager();
+    let mgr = sup.goal_manager();
     let goals = mgr.list_goals().map_err(map_gm_error)?;
     let mut enriched = Vec::with_capacity(goals.len());
     for goal in goals {
@@ -1714,11 +1827,12 @@ async fn list_goals_route(
 
 async fn create_goal_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<CreateGoalBody>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let mgr = state.supervisor.goal_manager();
+    let mgr = sup.goal_manager();
     let parent = body
         .parent_slug
         .as_deref()
@@ -1738,8 +1852,7 @@ async fn create_goal_route(
             )
             .map_err(map_gm_error)?,
     };
-    let _ = state
-        .supervisor
+    let _ = sup
         .daemon_event_sender()
         .send(DaemonEvent::ActivityUpdated {
             reason: "goal_created".into(),
@@ -1749,6 +1862,7 @@ async fn create_goal_route(
 
 async fn patch_goal_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<PatchGoalBody>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -1760,7 +1874,7 @@ async fn patch_goal_route(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Goal slug or id is required"))?;
-    let mgr = state.supervisor.goal_manager();
+    let mgr = sup.goal_manager();
     let result = match body.action.as_deref() {
         Some("complete") => {
             let g = mgr
@@ -1801,8 +1915,7 @@ async fn patch_goal_route(
             ));
         }
     };
-    let _ = state
-        .supervisor
+    let _ = sup
         .daemon_event_sender()
         .send(DaemonEvent::ActivityUpdated {
             reason: "goal_updated".into(),
@@ -1813,10 +1926,11 @@ async fn patch_goal_route(
 async fn get_goal_file_route(
     headers: HeaderMap,
     Path((slug, rel_path)): Path<(String, String)>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let mgr = state.supervisor.goal_manager();
+    let mgr = sup.goal_manager();
     let text = mgr.read_goal_file(&slug, &rel_path).map_err(map_gm_error)?;
     let ctype = if rel_path.ends_with(".json") {
         "application/json; charset=utf-8"
@@ -1828,24 +1942,22 @@ async fn get_goal_file_route(
 
 async fn list_spaces_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let spaces = state
-        .supervisor
-        .spaces()
-        .list_spaces()
-        .map_err(map_gm_error)?;
+    let spaces = sup.spaces().list_spaces().map_err(map_gm_error)?;
     Ok(Json(spaces))
 }
 
 async fn create_space_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<CreateSpaceBody>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    if !state.supervisor.config().muse.enable_spaces {
+    if !sup.config().muse.enable_spaces {
         return Err(ApiErr::msg(
             StatusCode::FORBIDDEN,
             "Spaces feature is disabled in MuseConfig",
@@ -1869,13 +1981,11 @@ async fn create_space_route(
         }
     };
     let initial = body.html.as_deref().or(body.content.as_deref());
-    let created = state
-        .supervisor
+    let created = sup
         .spaces()
         .create_space(&body.slug, body.title.as_deref(), kind, initial)
         .map_err(map_gm_error)?;
-    let _ = state
-        .supervisor
+    let _ = sup
         .daemon_event_sender()
         .send(DaemonEvent::ActivityUpdated {
             reason: "space_created".into(),
@@ -1886,18 +1996,18 @@ async fn create_space_route(
 async fn get_space_url_route(
     headers: HeaderMap,
     Path(slug): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    if !state.supervisor.config().muse.enable_spaces {
+    if !sup.config().muse.enable_spaces {
         return Err(ApiErr::msg(
             StatusCode::FORBIDDEN,
             "Spaces feature is disabled in MuseConfig",
         ));
     }
     let sp_port = state.supervisor.spaces_port();
-    let url = state
-        .supervisor
+    let url = sup
         .spaces()
         .mint_url_for_slug(&slug, sp_port)
         .map_err(map_gm_error)?;
@@ -2410,6 +2520,7 @@ async fn check_platform_connected(platform: &Option<Arc<dyn gm_platform::Platfor
 
 async fn get_bootstrap_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
@@ -2419,16 +2530,11 @@ async fn get_bootstrap_route(
         .as_ref()
         .map(|b| b.get_daily_spent())
         .unwrap_or(0.0);
-    let paused = state
-        .supervisor
-        .runtime_paused
-        .load(std::sync::atomic::Ordering::SeqCst);
-    let mut snap = state
-        .supervisor
-        .bootstrap_snapshot(daily_spend, paused, helper_connected);
+    let paused = sup.runtime_paused.load(std::sync::atomic::Ordering::SeqCst);
+    let mut snap = sup.bootstrap_snapshot(daily_spend, paused, helper_connected);
     if let Some(obj) = snap.as_object_mut() {
         let ui_settings =
-            crate::get_ui_settings_snapshot(&state.shared_config.read().clone(), &state.supervisor);
+            crate::get_ui_settings_snapshot(&state.shared_config.read().clone(), &sup);
         obj.insert("ui_settings".into(), ui_settings);
     }
     Ok(Json(snap))
@@ -2462,25 +2568,17 @@ async fn put_ui_settings_route(
 
 async fn upsert_bot_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(profile): Json<crate::roster::BotProfile>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let saved = state
-        .supervisor
-        .roster()
-        .upsert_bot(profile)
-        .map_err(map_gm_error)?;
+    let saved = sup.roster().upsert_bot(profile).map_err(map_gm_error)?;
     let val = serde_json::to_value(&saved).unwrap_or_default();
-    let _ = state
-        .supervisor
-        .daemon_event_sender()
-        .send(DaemonEvent::BotUpdated {
-            bot_id: saved.id.clone(),
-        });
-    state
-        .supervisor
-        .emit_agui("BOT_UPDATED", &saved.id, &saved.id, val);
+    let _ = sup.daemon_event_sender().send(DaemonEvent::BotUpdated {
+        bot_id: saved.id.clone(),
+    });
+    sup.emit_agui("BOT_UPDATED", &saved.id, &saved.id, val);
     Ok((StatusCode::CREATED, Json(saved)))
 }
 
@@ -2640,11 +2738,11 @@ async fn post_bot_avatar_route(
 async fn list_bot_files_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let files = state
-        .supervisor
+    let files = sup
         .roster()
         .workspace_sandbox(&id)
         .map_err(map_gm_error)?
@@ -2666,11 +2764,11 @@ async fn preview_bot_file_route(
     headers: HeaderMap,
     Path(id): Path<String>,
     Query(q): Query<PreviewBotFileQuery>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let bytes = state
-        .supervisor
+    let bytes = sup
         .roster()
         .workspace_sandbox(&id)
         .map_err(map_gm_error)?
@@ -2963,11 +3061,11 @@ async fn list_dm_messages_route(
     headers: HeaderMap,
     Path(bot_id): Path<String>,
     Query(q): Query<DmListQuery>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let msgs = state
-        .supervisor
+    let msgs = sup
         .direct_chat()
         .list_messages(&bot_id, q.before_seq, q.limit.unwrap_or(50))
         .map_err(map_gm_error)?;
@@ -2985,14 +3083,14 @@ struct PostDmBody {
 async fn post_dm_message_route(
     headers: HeaderMap,
     Path(bot_id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<PostDmBody>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     if let (Some(llm), Some(router)) = (state.llm_client.as_ref(), state.router.as_ref()) {
         let cfg = state.shared_config.read().clone();
-        let outcome = state
-            .supervisor
+        let outcome = sup
             .dispatch_direct_chat(
                 &bot_id,
                 &body.content,
@@ -3010,9 +3108,44 @@ async fn post_dm_message_route(
         return Ok(Json(serde_json::to_value(outcome).unwrap_or_default()));
     }
     let trimmed = body.content.trim();
-    let user_msg = state
-        .supervisor
-        .post_direct_chat(
+    let clean_client_id = body
+        .client_msg_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let user_msg = if let Some(cid) = clean_client_id {
+        if let Some((existing_user, existing_reply)) = sup
+            .direct_chat()
+            .find_turn_by_client_id(&bot_id, cid)
+            .map_err(map_gm_error)?
+        {
+            if let Some(reply) = existing_reply {
+                return Ok(Json(serde_json::json!({
+                    "mode": "chat",
+                    "user_message": existing_user,
+                    "assistant_message": reply,
+                    "queued_task": null,
+                    "reply_error": null,
+                    "provider_setup_required": false,
+                })));
+            }
+            existing_user
+        } else {
+            sup.post_direct_chat_with_id(
+                &bot_id,
+                "user",
+                "You",
+                &body.content,
+                body.reply_to_id.as_deref(),
+                body.thread_id.as_deref(),
+                None,
+                Some(cid),
+                Some(cid),
+            )
+            .map_err(map_gm_error)?
+        }
+    } else {
+        sup.post_direct_chat(
             &bot_id,
             "user",
             "You",
@@ -3022,15 +3155,15 @@ async fn post_dm_message_route(
             None,
             None,
         )
-        .map_err(map_gm_error)?;
+        .map_err(map_gm_error)?
+    };
     if let Some(inst) = trimmed
         .strip_prefix("/do ")
         .or_else(|| trimmed.strip_prefix("/task "))
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let task = state
-            .supervisor
+        let task = sup
             .submit_task(Some(&bot_id), None, inst, 0)
             .map_err(map_gm_error)?;
         return Ok(Json(serde_json::json!({
@@ -3040,8 +3173,7 @@ async fn post_dm_message_route(
             "queued_task": task,
         })));
     }
-    let assistant_msg = state
-        .supervisor
+    let assistant_msg = sup
         .post_direct_chat(
             &bot_id,
             "assistant",
@@ -3050,7 +3182,7 @@ async fn post_dm_message_route(
             Some(&user_msg.id),
             body.thread_id.as_deref(),
             None,
-            None,
+            clean_client_id,
         )
         .map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({
@@ -3058,6 +3190,8 @@ async fn post_dm_message_route(
         "user_message": user_msg,
         "assistant_message": assistant_msg,
         "queued_task": null,
+        "reply_error": null,
+        "provider_setup_required": false,
     })))
 }
 
@@ -3150,6 +3284,7 @@ async fn patch_channel_route(
 async fn respond_approval_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -3163,29 +3298,46 @@ async fn respond_approval_route(
         .and_then(|v| v.as_str())
         .map(str::trim)
         .filter(|s| !s.is_empty());
-    if let Some(pattern) = remember_rule {
+    let resolved = state.interactions.resolve_approval(&id, approved).await;
+    if resolved && let Some(pattern) = remember_rule {
         let mode = if approved {
             crate::rules::RuleMode::Allow
         } else {
             crate::rules::RuleMode::AskFirst
         };
-        state
-            .supervisor
-            .rules()
+        sup.rules()
             .upsert_rule(None, mode, pattern, None, "Saved from approval card", true)
             .map_err(map_gm_error)?;
     }
-    let resolved = state.interactions.resolve_approval(&id, approved).await;
+    let final_status = if resolved {
+        if approved { "approved" } else { "denied" }
+    } else {
+        "expired"
+    };
     update_web_dm_card_status(
-        &state.supervisor,
+        &sup,
         &id,
-        if approved { "approved" } else { "denied" },
-        remember_rule.map(|r| serde_json::json!({ "remember_rule": r })),
+        final_status,
+        if resolved {
+            remember_rule.map(|r| serde_json::json!({ "remember_rule": r }))
+        } else {
+            None
+        },
     );
+    let _ = sup.daemon_event_sender().send(if resolved {
+        DaemonEvent::ApprovalResolved {
+            request_id: id.clone(),
+        }
+    } else {
+        DaemonEvent::ApprovalExpired {
+            request_id: id.clone(),
+        }
+    });
     Ok(Json(serde_json::json!({
         "request_id": id,
         "approved": approved,
-        "rule_saved": remember_rule.is_some(),
+        "status": final_status,
+        "rule_saved": resolved && remember_rule.is_some(),
         "resolved": resolved,
     })))
 }
@@ -3643,19 +3795,17 @@ async fn get_usage_route(
 
 async fn list_routines_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let routines = state
-        .supervisor
-        .queue()
-        .list_routines()
-        .map_err(map_gm_error)?;
+    let routines = sup.queue().list_routines().map_err(map_gm_error)?;
     Ok(Json(routines))
 }
 
 async fn upsert_routine_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -3748,33 +3898,29 @@ async fn upsert_routine_route(
         preferred_model,
         enabled,
     };
-    state
-        .supervisor
-        .save_routine(&routine)
-        .map_err(map_gm_error)?;
+    sup.save_routine(&routine).map_err(map_gm_error)?;
     Ok((StatusCode::CREATED, Json(routine)))
 }
 
 async fn delete_routine_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let deleted = state.supervisor.delete_routine(&id).map_err(map_gm_error)?;
+    let deleted = sup.delete_routine(&id).map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({ "id": id, "deleted": deleted })))
 }
 
 async fn test_routine_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let run = state
-        .supervisor
-        .trigger_routine_test(&id)
-        .map_err(map_gm_error)?;
+    let run = sup.trigger_routine_test(&id).map_err(map_gm_error)?;
     Ok(Json(run))
 }
 
@@ -3854,13 +4000,11 @@ async fn trigger_routine_webhook_route(
 async fn list_routine_runs_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let runs = state
-        .supervisor
-        .list_routine_runs(&id, 25)
-        .map_err(map_gm_error)?;
+    let runs = sup.list_routine_runs(&id, 25).map_err(map_gm_error)?;
     Ok(Json(runs))
 }
 
@@ -4363,6 +4507,140 @@ async fn system_updates_download_route(
     ))
 }
 
+async fn system_components_list_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let Some(components) = state.components else {
+        return Err(ApiErr::msg(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Component catalog manager is unavailable in this standalone server",
+        ));
+    };
+    Ok(Json(components.list().await.map_err(map_gm_error)?))
+}
+
+async fn system_components_install_route(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let Some(components) = state.components else {
+        return Err(ApiErr::msg(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Component catalog manager is unavailable in this standalone server",
+        ));
+    };
+    Ok(Json(components.install(&id).await.map_err(map_gm_error)?))
+}
+
+async fn system_components_verify_route(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let Some(components) = state.components else {
+        return Err(ApiErr::msg(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Component catalog manager is unavailable in this standalone server",
+        ));
+    };
+    Ok(Json(components.verify(&id).await.map_err(map_gm_error)?))
+}
+
+async fn voice_status_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    Ok(Json(state.voice_manager.status()))
+}
+
+async fn voice_start_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let bot_id = body
+        .get("bot_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("muse");
+    let mode = body.get("mode").and_then(|v| v.as_str()).unwrap_or("voice");
+    Ok(Json(state.voice_manager.start(bot_id, mode)))
+}
+
+async fn voice_consent_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let granted = body
+        .get("granted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let bot_id = body.get("bot_id").and_then(|v| v.as_str());
+    Ok(Json(state.voice_manager.set_consent(granted, bot_id)))
+}
+
+async fn voice_transcribe_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let b64 = body
+        .get("wav_base64")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    use base64::Engine as _;
+    let wav = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid wav_base64: {e}")))?;
+    let res = state
+        .voice_manager
+        .transcribe_wav(&wav)
+        .await
+        .map_err(map_gm_error)?;
+    Ok(Json(res))
+}
+
+async fn voice_speak_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    let text = body.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    let res = state
+        .voice_manager
+        .speak(text)
+        .await
+        .map_err(map_gm_error)?;
+    Ok(Json(res))
+}
+
+async fn voice_barge_in_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    Ok(Json(state.voice_manager.barge_in()))
+}
+
+async fn voice_stop_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    check_auth(&headers, state.bearer_token.as_deref())?;
+    Ok(Json(state.voice_manager.stop()))
+}
+
 async fn system_provider_key_route(
     headers: HeaderMap,
     State(state): State<CompanionWebState>,
@@ -4550,10 +4828,13 @@ fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
         )
         .route("/auth/logout", post(auth_logout_v1_route))
         .route("/auth/revoke", post(auth_revoke_v1_route))
-        .route("/workspaces", get(list_workspaces_v1_route))
+        .route(
+            "/workspaces",
+            get(list_workspaces_v1_route).post(create_workspace_v1_route),
+        )
         .route("/doctor", get(doctor_status_v1_route))
         .route("/bootstrap", get(get_bootstrap_route))
-        .route("/activity", get(list_activity))
+        .route("/activity", get(list_activity).post(create_activity_post))
         .route("/queue", get(list_queue))
         .route("/tasks/:id/:action", post(control_task_route))
         .route("/workspaces/:ws_id/events", get(stream_workspace_events_v1))
@@ -4577,6 +4858,7 @@ fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
             "/routines",
             get(list_routines_route).post(upsert_routine_route),
         )
+        .route("/routines/:id", axum::routing::delete(delete_routine_route))
         .route("/routines/:id/test", post(test_routine_route))
         .route("/routines/:id/runs", get(list_routine_runs_route))
         .route(
@@ -4593,6 +4875,7 @@ fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
             "/system/providers/profile",
             post(system_provider_profile_route),
         )
+        .route("/system/providers/key", post(system_provider_key_route))
         .route(
             "/system/providers/:id/discover-models",
             post(system_provider_discover_models_route),
@@ -4619,12 +4902,10 @@ fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
         ))
 }
 
-async fn auth_enroll_v1_route(
-    headers: HeaderMap,
-    State(state): State<CompanionWebState>,
-    Json(body): Json<serde_json::Value>,
-) -> std::result::Result<impl IntoResponse, ApiErr> {
-    // Only operator bearer token can mint enrollments.
+fn require_operator_bearer(
+    headers: &HeaderMap,
+    state: &CompanionWebState,
+) -> std::result::Result<(), ApiErr> {
     let expected = state
         .bearer_token
         .as_deref()
@@ -4643,6 +4924,70 @@ async fn auth_enroll_v1_route(
             "Operator token required",
         ));
     }
+    Ok(())
+}
+
+async fn create_workspace_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    require_operator_bearer(&headers, &state)?;
+    let plane = state
+        .hosted_plane
+        .as_ref()
+        .ok_or_else(|| ApiErr::msg(StatusCode::NOT_IMPLEMENTED, "Hosted plane not enabled"))?;
+    let ws_id = body["ws_id"]
+        .as_str()
+        .or_else(|| body["id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing ws_id"))?;
+    let tenant_id = body["tenant_id"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ws_id);
+    let name = body["name"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(ws_id);
+    let owner_user_id = body["owner_user_id"]
+        .as_str()
+        .or_else(|| body["user_id"].as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("operator");
+    let owner_email = body["owner_email"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("operator@dt.local");
+    let bearer_token = body["bearer_token"].as_str().unwrap_or("");
+    let rec = plane
+        .provision_workspace(
+            ws_id,
+            tenant_id,
+            owner_email,
+            name,
+            owner_user_id,
+            bearer_token,
+        )
+        .await
+        .map_err(map_gm_error)?;
+    // Warm up workspace supervisor directory cleanly.
+    let _ = state.supervisor_for_workspace(&rec.ws_id).await;
+    Ok((StatusCode::CREATED, Json(rec)))
+}
+
+async fn auth_enroll_v1_route(
+    headers: HeaderMap,
+    State(state): State<CompanionWebState>,
+    Json(body): Json<serde_json::Value>,
+) -> std::result::Result<impl IntoResponse, ApiErr> {
+    // Only operator bearer token can mint enrollments.
+    require_operator_bearer(&headers, &state)?;
     let plane = state
         .hosted_plane
         .as_ref()
@@ -4657,6 +5002,7 @@ async fn auth_enroll_v1_route(
     let ttl = body["ttl_seconds"].as_i64().unwrap_or(900);
     let issued = plane
         .issue_enrollment(ws_id, user_id, role, ttl)
+        .await
         .map_err(map_gm_error)?;
     Ok(Json(issued))
 }
@@ -4699,6 +5045,7 @@ async fn auth_session_v1_route(
         .clamp(300, 86400);
     let session = plane
         .redeem_enrollment(enrollment_token, ttl)
+        .await
         .map_err(|e| ApiErr::msg(StatusCode::UNAUTHORIZED, e.to_string()))?;
 
     let cookie = format!(
@@ -4729,7 +5076,7 @@ async fn auth_logout_v1_route(
         extract_cookie_value(&headers, HOSTED_SESSION_COOKIE),
         state.hosted_plane.as_ref(),
     ) {
-        let _ = plane.revoke_session(&session_id);
+        let _ = plane.revoke_session(&session_id).await;
     }
     let mut resp = Json(serde_json::json!({ "signed_out": true })).into_response();
     if let Ok(hv) = HeaderValue::from_str(&format!(
@@ -4745,24 +5092,7 @@ async fn auth_revoke_v1_route(
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
-    let expected = state
-        .bearer_token
-        .as_deref()
-        .filter(|t| !t.trim().is_empty())
-        .ok_or_else(|| ApiErr::msg(StatusCode::UNAUTHORIZED, "Operator token required"))?;
-    let auth_val = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !crate::bridges::constant_time_eq(
-        auth_val.as_bytes(),
-        format!("Bearer {expected}").as_bytes(),
-    ) {
-        return Err(ApiErr::msg(
-            StatusCode::UNAUTHORIZED,
-            "Operator token required",
-        ));
-    }
+    require_operator_bearer(&headers, &state)?;
     let plane = state
         .hosted_plane
         .as_ref()
@@ -4775,6 +5105,7 @@ async fn auth_revoke_v1_route(
         .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing user_id"))?;
     plane
         .revoke_membership(ws_id, user_id)
+        .await
         .map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({
         "revoked": true,
@@ -4784,23 +5115,48 @@ async fn auth_revoke_v1_route(
 }
 
 async fn list_workspaces_v1_route(
+    State(state): State<CompanionWebState>,
     request: axum::extract::Request,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
-    let state = request
+    let sess = request
         .extensions()
         .get::<crate::hosted::HostedSessionIssued>()
         .cloned();
-    if let Some(sess) = state {
+    if let Some(sess) = sess {
+        let workspaces = if let Some(ref plane) = state.hosted_plane {
+            plane
+                .list_user_workspaces(&sess.user_id)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         return Ok(Json(serde_json::json!({
             "active_workspace": sess.ws_id,
             "user_id": sess.user_id,
             "role": sess.role,
+            "workspaces": workspaces,
         })));
     }
-    let ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
+    let requested = request
+        .headers()
+        .get("x-dt-workspace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string);
+    let workspaces = if let Some(ref plane) = state.hosted_plane {
+        plane.list_workspaces().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let ws = requested
+        .or_else(|| std::env::var("GM_WORKSPACE_ID").ok())
+        .unwrap_or_else(|| "default".into());
     Ok(Json(serde_json::json!({
         "active_workspace": ws,
         "role": "owner",
+        "workspaces": workspaces,
     })))
 }
 
@@ -4860,16 +5216,19 @@ async fn health_ready_v1_route(State(state): State<CompanionWebState>) -> impl I
         );
     }
 
-    if let Some(ref plane) = state.hosted_plane
-        && let Err(err) = plane.ready_check()
-    {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "status": "not_ready",
-                "reason": err.to_string(),
-            })),
-        );
+    let mut hosted_backend = "local";
+    if let Some(ref plane) = state.hosted_plane {
+        hosted_backend = plane.backend_kind();
+        if let Err(err) = plane.ready_check().await {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "not_ready",
+                    "hosted_backend": hosted_backend,
+                    "reason": err.to_string(),
+                })),
+            );
+        }
     }
 
     if std::env::var("DT_HOSTED_REQUIRED").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -4888,6 +5247,7 @@ async fn health_ready_v1_route(State(state): State<CompanionWebState>) -> impl I
         StatusCode::OK,
         Json(serde_json::json!({
             "status": "ready",
+            "hosted_backend": hosted_backend,
             "version": env!("CARGO_PKG_VERSION"),
         })),
     )
@@ -4897,6 +5257,7 @@ async fn stream_workspace_events_v1(
     headers: HeaderMap,
     Query(cursor): Query<EventCursor>,
     Path(ws_id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     session_ext: Option<axum::Extension<crate::hosted::HostedSessionIssued>>,
 ) -> std::result::Result<
@@ -4915,7 +5276,11 @@ async fn stream_workspace_events_v1(
         Some(sess.user_id)
     } else {
         let expected_ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
-        if clean != expected_ws && clean != "local" {
+        let workspace_known = match state.hosted_plane.as_ref() {
+            Some(plane) => plane.get_workspace(&clean).await.ok().flatten().is_some(),
+            None => false,
+        };
+        if clean != expected_ws && clean != "local" && !workspace_known {
             return Err(ApiErr::msg(
                 StatusCode::FORBIDDEN,
                 format!("Cross-tenant SSE subscription denied for workspace '{clean}'"),
@@ -4932,21 +5297,49 @@ async fn stream_workspace_events_v1(
 
     // Subscribe to live broadcasts and revocations BEFORE reading persisted cursor
     // so zero events committed during replay->live transition can fall into a gap.
-    let mut live_rx = state.supervisor.agui_sender().subscribe();
+    let same_sup = sup.config().storage_dir == state.supervisor.config().storage_dir;
+    let mut live_rx = sup.agui_sender().subscribe();
+    let mut root_live_rx = (!same_sup).then(|| state.supervisor.agui_sender().subscribe());
     let mut revocation_rx = state
         .hosted_plane
         .as_ref()
         .map(|p| p.subscribe_revocations());
-    let min_seq = state
-        .supervisor
-        .queue()
-        .min_event_sequence()
-        .map_err(map_gm_error)?;
-    let backlog = state
-        .supervisor
+    let ws_min_seq = sup.queue().min_event_sequence().map_err(map_gm_error)?;
+    let root_min_seq = if same_sup {
+        None
+    } else {
+        state
+            .supervisor
+            .queue()
+            .min_event_sequence()
+            .map_err(map_gm_error)?
+    };
+    let min_seq = match (ws_min_seq, root_min_seq) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    let mut backlog = sup
         .queue()
         .events_after(last_event_id, 500)
         .map_err(map_gm_error)?;
+    if !same_sup {
+        let root_backlog = state
+            .supervisor
+            .queue()
+            .events_after(last_event_id, 500)
+            .map_err(map_gm_error)?;
+        for (seq, val) in root_backlog {
+            if val
+                .get("payload")
+                .and_then(|p| p.get("ws_id"))
+                .and_then(|w| w.as_str())
+                == Some(clean.as_str())
+            {
+                backlog.push((seq, val));
+            }
+        }
+        backlog.sort_by_key(|(seq, _)| *seq);
+    }
     let plane_for_task = state.hosted_plane.clone();
 
     let (tx, rx) = tokio::sync::mpsc::channel::<std::result::Result<Event, Infallible>>(128);
@@ -5001,7 +5394,7 @@ async fn stream_workspace_events_v1(
 
         loop {
             if let (Some(plane), Some(uid)) = (&plane_for_task, &session_user_id)
-                && plane.authorize_membership(&clean, uid).is_err()
+                && plane.authorize_membership(&clean, uid).await.is_err()
             {
                 break;
             }
@@ -5017,6 +5410,31 @@ async fn stream_workspace_events_v1(
                         && session_user_id.as_deref() == Some(rev_uid.as_str())
                     {
                         break;
+                    }
+                }
+                root_item = async {
+                    match root_live_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    if let Ok(evt) = root_item
+                        && evt.payload.get("ws_id").and_then(|w| w.as_str()) == Some(clean.as_str())
+                    {
+                        if evt.sequence > 0 && evt.sequence <= highest_replayed {
+                            continue;
+                        }
+                        if evt.sequence > highest_replayed {
+                            highest_replayed = evt.sequence;
+                        }
+                        let json = serde_json::to_string(&evt).unwrap_or_else(|_| "{}".into());
+                        let sse_evt = Event::default()
+                            .id(evt.sequence.to_string())
+                            .event(evt.event_type)
+                            .data(json);
+                        if tx.send(Ok(sse_evt)).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 item = live_rx.recv() => {
@@ -5066,12 +5484,12 @@ async fn stream_workspace_events_v1(
 async fn probe_connector_v1_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let cfg = state.shared_config.read().clone();
-    let result = state
-        .supervisor
+    let result = sup
         .connectors()
         .probe_integration_capability(&cfg, &id)
         .await;
@@ -5080,15 +5498,12 @@ async fn probe_connector_v1_route(
 
 async fn list_marketplace_v1_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let catalog = state.supervisor.marketplace().builtin_catalog();
-    let installed = state
-        .supervisor
-        .marketplace()
-        .list_installed()
-        .map_err(map_gm_error)?;
+    let catalog = sup.marketplace().builtin_catalog();
+    let installed = sup.marketplace().list_installed().map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({
         "catalog": catalog,
         "installed": installed,
@@ -5097,6 +5512,7 @@ async fn list_marketplace_v1_route(
 
 async fn install_marketplace_v1_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -5117,16 +5533,13 @@ async fn install_marketplace_v1_route(
         let id = body["id"]
             .as_str()
             .ok_or_else(|| ApiErr::msg(StatusCode::BAD_REQUEST, "Missing plugin id or listing"))?;
-        state
-            .supervisor
-            .marketplace()
+        sup.marketplace()
             .builtin_catalog()
             .into_iter()
             .find(|c| c.id == id)
             .ok_or_else(|| ApiErr::msg(StatusCode::NOT_FOUND, format!("Unknown plugin '{id}'")))?
     };
-    let installed = state
-        .supervisor
+    let installed = sup
         .marketplace()
         .install_plugin(&listing, &confirmed_scopes)
         .map_err(map_gm_error)?;
@@ -5136,6 +5549,7 @@ async fn install_marketplace_v1_route(
 async fn update_marketplace_v1_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -5153,8 +5567,7 @@ async fn update_marketplace_v1_route(
         serde_json::from_value(body.get("listing").cloned().unwrap_or(body))
             .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid listing: {e}")))?;
     listing.id = id;
-    let updated = state
-        .supervisor
+    let updated = sup
         .marketplace()
         .update_plugin(&listing, &confirmed_scopes)
         .map_err(map_gm_error)?;
@@ -5164,25 +5577,25 @@ async fn update_marketplace_v1_route(
 async fn remove_marketplace_v1_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let removed = state
-        .supervisor
-        .marketplace()
-        .remove_plugin(&id)
-        .map_err(map_gm_error)?;
+    let removed = sup.marketplace().remove_plugin(&id).map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({ "id": id, "removed": removed })))
 }
 
 async fn billing_status_v1_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
+    session_ext: Option<axum::Extension<crate::hosted::HostedSessionIssued>>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let ws_id = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
-    let ent = state
-        .supervisor
+    let ws_id = session_ext
+        .map(|axum::Extension(s)| s.ws_id)
+        .unwrap_or_else(|| std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into()));
+    let ent = sup
         .billing()
         .get_entitlements(&ws_id)
         .map_err(map_gm_error)?;
@@ -5191,6 +5604,7 @@ async fn billing_status_v1_route(
 
 async fn billing_checkout_v1_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     session_ext: Option<axum::Extension<crate::hosted::HostedSessionIssued>>,
     Json(body): Json<serde_json::Value>,
@@ -5230,8 +5644,7 @@ async fn billing_checkout_v1_route(
         .unwrap_or_else(|_| "https://localhost/billing/success".into());
     let cancel = std::env::var("DT_STRIPE_CANCEL_URL")
         .unwrap_or_else(|_| "https://localhost/billing/cancel".into());
-    let res = state
-        .supervisor
+    let res = sup
         .billing()
         .create_sandbox_checkout_session(&stripe_key, &ws_id, &success, &cancel, price_id)
         .await
@@ -6494,6 +6907,167 @@ mod tests {
             saw_b,
             "Workspace B must continue unaffected after A revocation"
         );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_hosted_operator_workspace_creation_enrollment_and_data_isolation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = gm_core::config::GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        cfg.openbot.bots_dir = dir.path().join("bots");
+        let audit =
+            Arc::new(gm_safety::AuditLogger::with_file(dir.path().join("audit.jsonl")).unwrap());
+        let (tx, _rx) = tokio::sync::broadcast::channel(32);
+        let sup = OpenBotSupervisor::open(cfg, audit, tx).unwrap();
+        let bridge = BridgeRouter::new(sup.clone(), Default::default());
+        let plane = Arc::new(
+            crate::hosted::HostedControlPlane::open(
+                dir.path().join("hosted-control.sqlite"),
+                dir.path().join("workers"),
+                b"super-strong-master-key-32bytes!",
+            )
+            .unwrap(),
+        );
+        let (addr, handle) = CompanionWebServer::new(sup, bridge, Some("op-secret".into()), None)
+            .with_hosted_plane(plane)
+            .bind_and_serve("127.0.0.1:0")
+            .await
+            .unwrap();
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. Fresh server rejects unauthenticated workspace creation
+        let unauth_ws = client
+            .post(format!("{base}/api/v1/workspaces"))
+            .json(&serde_json::json!({ "ws_id": "ws_fresh_a", "name": "Fresh A" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauth_ws.status(), 401);
+
+        // 2. Operator creates ws_fresh_a and ws_fresh_b
+        for (ws_id, name) in [("ws_fresh_a", "Fresh A"), ("ws_fresh_b", "Fresh B")] {
+            let created = client
+                .post(format!("{base}/api/v1/workspaces"))
+                .bearer_auth("op-secret")
+                .json(&serde_json::json!({ "ws_id": ws_id, "name": name }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(created.status(), 201);
+        }
+
+        // 3. Operator enrolls Alice in ws_fresh_a and Bob in ws_fresh_b; both redeem sessions
+        let login = |ws_id: &str, user_id: &str| {
+            let client = client.clone();
+            let base = base.clone();
+            let ws_id = ws_id.to_string();
+            let user_id = user_id.to_string();
+            async move {
+                let enr: serde_json::Value = client
+                    .post(format!("{base}/api/v1/auth/enroll"))
+                    .bearer_auth("op-secret")
+                    .json(
+                        &serde_json::json!({ "ws_id": ws_id, "user_id": user_id, "role": "owner" }),
+                    )
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                let resp = client
+                    .post(format!("{base}/api/v1/auth/session"))
+                    .json(&serde_json::json!({ "enrollment_token": enr["enrollment_token"] }))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 200);
+                let cookie = resp
+                    .headers()
+                    .get(header::SET_COOKIE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_string();
+                let body: serde_json::Value = resp.json().await.unwrap();
+                (cookie, body["csrf_token"].as_str().unwrap().to_string())
+            }
+        };
+
+        let (cookie_a, csrf_a) = login("ws_fresh_a", "alice").await;
+        let (cookie_b, _csrf_b) = login("ws_fresh_b", "bob").await;
+
+        // 4. Alice posts an idempotent DM in ws_fresh_a
+        let post_dm = client
+            .post(format!("{base}/api/v1/dm/muse/messages"))
+            .header(header::COOKIE, &cookie_a)
+            .header("x-dt-csrf-token", &csrf_a)
+            .json(
+                &serde_json::json!({ "content": "Secret Alpha DM", "client_msg_id": "dm-idemp-1" }),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(post_dm.status(), 200);
+
+        // Retry with same client_msg_id does NOT duplicate user message
+        let retry_dm = client
+            .post(format!("{base}/api/v1/dm/muse/messages"))
+            .header(header::COOKIE, &cookie_a)
+            .header("x-dt-csrf-token", &csrf_a)
+            .json(
+                &serde_json::json!({ "content": "Secret Alpha DM", "client_msg_id": "dm-idemp-1" }),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(retry_dm.status(), 200);
+
+        let msgs_a: Vec<serde_json::Value> = client
+            .get(format!("{base}/api/v1/dm/muse/messages"))
+            .header(header::COOKIE, &cookie_a)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let user_msgs_a: Vec<_> = msgs_a.iter().filter(|m| m["role"] == "user").collect();
+        assert_eq!(user_msgs_a.len(), 1);
+        assert_eq!(user_msgs_a[0]["content"], "Secret Alpha DM");
+
+        // 5. Bob in ws_fresh_b sees ZERO of Alice's messages (routed through isolated workspace!)
+        let msgs_b: Vec<serde_json::Value> = client
+            .get(format!("{base}/api/v1/dm/muse/messages"))
+            .header(header::COOKIE, &cookie_b)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            msgs_b.is_empty(),
+            "Workspace B must not see Workspace A messages: {msgs_b:?}"
+        );
+
+        // 6. Bob trying to specify X-DT-Workspace-Id: ws_fresh_a gets 403 Forbidden
+        let cross = client
+            .get(format!("{base}/api/v1/dm/muse/messages"))
+            .header(header::COOKIE, &cookie_b)
+            .header("x-dt-workspace-id", "ws_fresh_a")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cross.status(), 403);
 
         handle.abort();
     }

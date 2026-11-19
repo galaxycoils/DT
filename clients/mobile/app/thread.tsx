@@ -1,46 +1,92 @@
 import React, { useCallback, useState } from "react";
-import { Button, FlatList, Text, TextInput, View } from "react-native";
-import { useFocusEffect, useLocalSearchParams } from "expo-router";
-import { connectedRequest, type Message } from "../lib/api";
-import { darkTokens } from "../lib/tokens";
+import { Button, FlatList, Text, TextInput, useColorScheme, View } from "react-native";
+import { Link, useFocusEffect, useLocalSearchParams } from "expo-router";
+import {
+  connectedRequest,
+  createClientMessageId,
+  parseMessageCard,
+  postDirectMessage,
+  respondApproval,
+  type Message,
+} from "../lib/api";
+import { darkTokens, lightTokens } from "../lib/tokens";
+
+interface FailedReplyState {
+  clientMsgId: string;
+  content: string;
+  detail: string;
+  providerSetupRequired: boolean;
+}
 
 export default function ThreadScreen() {
-  const { bot = "muse" } = useLocalSearchParams<{ bot?: string }>();
-  const endpoint = `/dm/${encodeURIComponent(bot)}/messages`;
+  const scheme = useColorScheme();
+  const tokens = scheme === "light" ? lightTokens : darkTokens;
+  const { bot, channel } = useLocalSearchParams<{ bot?: string; channel?: string }>();
+  const isChannel = Boolean(channel);
+  const targetId = isChannel ? String(channel) : String(bot || "muse");
+  const endpoint = isChannel
+    ? `/channels/${encodeURIComponent(targetId)}/messages`
+    : `/dm/${encodeURIComponent(targetId)}/messages`;
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [status, setStatus] = useState("");
+  const [failedReply, setFailedReply] = useState<FailedReplyState | null>(null);
+  const [pendingClientMsgId, setPendingClientMsgId] = useState<string | null>(null);
+  const [cardBusyId, setCardBusyId] = useState<string | null>(null);
 
-  const refresh = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    try {
-      const items = await connectedRequest<Message[]>(endpoint, { signal });
-      if (!signal?.aborted) {
-        setMessages(items);
-        setStatus("");
+  const refresh = useCallback(
+    async (signal?: AbortSignal) => {
+      setLoading(true);
+      try {
+        const items = await connectedRequest<Message[]>(endpoint, { signal });
+        if (!signal?.aborted) {
+          setMessages(Array.isArray(items) ? items : []);
+          setStatus("");
+        }
+      } catch (error) {
+        if (!signal?.aborted) {
+          setMessages([]);
+          setStatus(error instanceof Error ? error.message : "Could not load the thread.");
+        }
+      } finally {
+        if (!signal?.aborted) setLoading(false);
       }
-    } catch (error) {
-      if (!signal?.aborted) setStatus(error instanceof Error ? error.message : "Could not load the thread.");
-    } finally {
-      if (!signal?.aborted) setLoading(false);
-    }
-  }, [endpoint]);
+    },
+    [endpoint],
+  );
 
-  useFocusEffect(useCallback(() => {
-    const controller = new AbortController();
-    void refresh(controller.signal);
-    return () => controller.abort();
-  }, [refresh]));
+  useFocusEffect(
+    useCallback(() => {
+      const controller = new AbortController();
+      setFailedReply(null);
+      setPendingClientMsgId(null);
+      void refresh(controller.signal);
+      return () => controller.abort();
+    }, [refresh]),
+  );
 
-  async function send() {
-    const content = draft.trim();
-    if (!content || sending) return;
+  async function dispatchDirect(content: string, existingId?: string) {
+    const clientMsgId = existingId || pendingClientMsgId || createClientMessageId();
+    setPendingClientMsgId(clientMsgId);
     setSending(true);
+    setStatus("");
     try {
-      await connectedRequest(endpoint, { method: "POST", body: JSON.stringify({ content }) });
+      const outcome = await postDirectMessage(targetId, content, clientMsgId);
       setDraft("");
+      setPendingClientMsgId(null);
+      if (outcome.reply_error) {
+        setFailedReply({
+          clientMsgId: outcome.user_message?.id || clientMsgId,
+          content,
+          detail: outcome.reply_error,
+          providerSetupRequired: Boolean(outcome.provider_setup_required),
+        });
+      } else {
+        setFailedReply(null);
+      }
       await refresh();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "Could not send message.");
@@ -49,27 +95,218 @@ export default function ThreadScreen() {
     }
   }
 
+  async function send() {
+    const content = draft.trim();
+    if (!content || sending) return;
+    if (isChannel) {
+      setSending(true);
+      setStatus("");
+      try {
+        await connectedRequest(endpoint, {
+          method: "POST",
+          body: JSON.stringify({ content }),
+        });
+        setDraft("");
+        await refresh();
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "Could not send message.");
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+    await dispatchDirect(content);
+  }
+
+  async function handleApprovalDecision(requestId: string, approved: boolean) {
+    setCardBusyId(requestId);
+    try {
+      const res = await respondApproval(requestId, approved);
+      const nextStatus = res.status || (res.resolved ? (approved ? "approved" : "denied") : "expired");
+      setMessages((prev) =>
+        prev.map((m) => {
+          const c = parseMessageCard(m);
+          if (c && (c.request_id === requestId || m.request_id === requestId)) {
+            return { ...m, card: { ...c, status: nextStatus } };
+          }
+          return m;
+        }),
+      );
+      await refresh();
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not update approval.");
+    } finally {
+      setCardBusyId(null);
+    }
+  }
+
   return (
-    <View style={{ flex: 1, backgroundColor: darkTokens.background, padding: 16, gap: 8 }}>
-      {status ? <Text accessibilityLiveRegion="polite" style={{ color: darkTokens.foreground }}>{status}</Text> : null}
+    <View style={{ flex: 1, backgroundColor: tokens.background, padding: 16, gap: 10 }}>
+      {status ? (
+        <Text accessibilityLiveRegion="polite" style={{ color: tokens.destructive }}>
+          {status}
+        </Text>
+      ) : null}
+
       <FlatList
         data={messages}
         keyExtractor={(item) => item.id}
         refreshing={loading}
         onRefresh={() => void refresh()}
-        ListEmptyComponent={loading || status ? undefined : <Text style={{ color: darkTokens.mutedForeground }}>No messages.</Text>}
-        renderItem={({ item }) => <Text style={{ color: darkTokens.foreground, paddingVertical: 8 }}>{item.author} · {item.content}</Text>}
+        contentContainerStyle={{ gap: 10, paddingBottom: 8 }}
+        ListEmptyComponent={
+          loading || status ? undefined : (
+            <Text style={{ color: tokens.mutedForeground }}>
+              No messages yet in {isChannel ? `#${targetId}` : `@${targetId}`}.
+            </Text>
+          )
+        }
+        renderItem={({ item }) => {
+          const card = parseMessageCard(item);
+          const cardKind = card?.kind || card?.type || "";
+          const isApproval = ["approval", "terminal_approval", "ask_first", "order_approval"].includes(
+            cardKind,
+          );
+          const cardStatus = card?.status || "pending";
+          const reqId = String(card?.request_id || item.request_id || item.id);
+          const isUser = item.role === "user" || item.author === "You";
+          return (
+            <View
+              style={{
+                backgroundColor: isUser ? tokens.chatUser : tokens.card,
+                borderColor: tokens.border,
+                borderWidth: 1,
+                borderRadius: 14,
+                padding: 12,
+                gap: 6,
+                alignSelf: isUser ? "flex-end" : "stretch",
+                maxWidth: "94%",
+              }}
+            >
+              <Text
+                style={{
+                  color: isUser ? tokens.chatUserForeground : tokens.mutedForeground,
+                  fontSize: 12,
+                  fontWeight: "600",
+                }}
+              >
+                {item.author || targetId}
+              </Text>
+              {item.content ? (
+                <Text
+                  style={{
+                    color: isUser ? tokens.chatUserForeground : tokens.foreground,
+                    fontSize: 15,
+                    lineHeight: 22,
+                  }}
+                >
+                  {item.content}
+                </Text>
+              ) : null}
+              {isApproval && card ? (
+                <View
+                  style={{
+                    marginTop: 6,
+                    padding: 10,
+                    borderRadius: 10,
+                    borderWidth: 1,
+                    borderColor: cardStatus === "pending" ? tokens.warning : tokens.border,
+                    backgroundColor: tokens.background,
+                    gap: 6,
+                  }}
+                >
+                  <Text style={{ color: tokens.foreground, fontWeight: "600" }}>
+                    {card.title || "Action Approval Required"} · [{cardStatus}]
+                  </Text>
+                  {card.details || card.summary ? (
+                    <Text style={{ color: tokens.mutedForeground, fontSize: 13 }}>
+                      {String(card.details || card.summary)}
+                    </Text>
+                  ) : null}
+                  {cardStatus === "pending" ? (
+                    <View style={{ flexDirection: "row", gap: 8 }}>
+                      <Button
+                        title="Approve"
+                        color={tokens.success}
+                        disabled={cardBusyId === reqId}
+                        onPress={() => void handleApprovalDecision(reqId, true)}
+                      />
+                      <Button
+                        title="Deny"
+                        color={tokens.destructive}
+                        disabled={cardBusyId === reqId}
+                        onPress={() => void handleApprovalDecision(reqId, false)}
+                      />
+                    </View>
+                  ) : null}
+                </View>
+              ) : null}
+            </View>
+          );
+        }}
       />
-      <TextInput
-        accessibilityLabel="Message"
-        value={draft}
-        editable={!sending}
-        onChangeText={setDraft}
-        placeholder={`Message @${bot}`}
-        placeholderTextColor={darkTokens.mutedForeground}
-        style={{ color: darkTokens.foreground, backgroundColor: darkTokens.card, padding: 12, borderRadius: 10 }}
-      />
-      <Button title={sending ? "Sending…" : "Send"} disabled={sending || !draft.trim()} onPress={() => void send()} />
+
+      {failedReply ? (
+        <View
+          accessibilityLiveRegion="polite"
+          style={{
+            backgroundColor: tokens.card,
+            borderColor: tokens.warning,
+            borderWidth: 1,
+            borderRadius: 12,
+            padding: 12,
+            gap: 8,
+          }}
+        >
+          <Text style={{ color: tokens.warning, fontWeight: "600" }}>
+            Message saved, reply failed
+          </Text>
+          <Text style={{ color: tokens.mutedForeground, fontSize: 13 }}>{failedReply.detail}</Text>
+          <View style={{ flexDirection: "row", gap: 8, flexWrap: "wrap" }}>
+            <Button
+              title="Retry reply"
+              color={tokens.primary}
+              disabled={sending}
+              onPress={() => void dispatchDirect(failedReply.content, failedReply.clientMsgId)}
+            />
+            {failedReply.providerSetupRequired ? (
+              <Link href="/settings" asChild>
+                <Button title="Open Provider Setup" color={tokens.primary} />
+              </Link>
+            ) : null}
+          </View>
+        </View>
+      ) : null}
+
+      <View style={{ flexDirection: "row", gap: 8, alignItems: "center" }}>
+        <TextInput
+          accessibilityLabel="Message"
+          value={draft}
+          editable={!sending}
+          onChangeText={(next) => {
+            setDraft(next);
+            if (!next.trim()) setPendingClientMsgId(null);
+          }}
+          placeholder={isChannel ? `Message #${targetId}` : `Message @${targetId}`}
+          placeholderTextColor={tokens.mutedForeground}
+          style={{
+            flex: 1,
+            color: tokens.foreground,
+            backgroundColor: tokens.card,
+            borderColor: tokens.border,
+            borderWidth: 1,
+            paddingHorizontal: 14,
+            paddingVertical: 10,
+            borderRadius: 20,
+          }}
+        />
+        <Button
+          title={sending ? "Sending…" : "Send"}
+          color={tokens.primary}
+          disabled={sending || !draft.trim()}
+          onPress={() => void send()}
+        />
+      </View>
     </View>
   );
 }

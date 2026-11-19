@@ -77,6 +77,13 @@ pub enum ChatCanvasAction {
         client_msg_id: String,
     },
     OpenProviderSetup,
+    ToggleVoice,
+    ToggleDictation,
+    VoiceConsent(bool),
+    VoiceSpeak(String),
+    VoiceBargeIn,
+    VoiceStop,
+    OpenLocalComponents,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -498,6 +505,104 @@ pub fn draw_chat_canvas(
                                 ui.add_space(4.0);
                             }
 
+                            // Voice & Dictation live session strip (consent-gated, honest readiness)
+                            let voice_state = &ui_state.responses["voice"];
+                            let voice_running = ui_state.voice_active
+                                || ui_state.dictation_active
+                                || voice_state["active"].as_bool().unwrap_or(false);
+                            if voice_running {
+                                let mode_str = voice_state["mode"]
+                                    .as_str()
+                                    .unwrap_or(if ui_state.dictation_active {
+                                        "dictate"
+                                    } else {
+                                        "voice"
+                                    });
+                                let consent_ok = voice_state["consent_acknowledged"]
+                                    .as_bool()
+                                    .unwrap_or(false);
+                                let stt_installed =
+                                    voice_state["stt_installed"].as_bool().unwrap_or(false);
+                                let voice_err = voice_state["last_error"]
+                                    .as_str()
+                                    .unwrap_or_default();
+                                let last_assistant = rows
+                                    .iter()
+                                    .rev()
+                                    .find(|r| r.role != "user" && !r.content.trim().is_empty())
+                                    .map(|r| r.content.clone());
+                                egui::Frame::NONE
+                                    .fill(palette.bg_elevated)
+                                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                                    .corner_radius(CornerRadius::same(10))
+                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.strong(if mode_str == "dictate" {
+                                                "Dictation"
+                                            } else {
+                                                "Voice Session"
+                                            });
+                                            ui.small(
+                                                RichText::new(if consent_ok {
+                                                    if stt_installed {
+                                                        "Mic consent granted · Local STT ready"
+                                                    } else {
+                                                        "Mic consent granted · Local STT not installed"
+                                                    }
+                                                } else {
+                                                    "Waiting for microphone consent"
+                                                })
+                                                .color(if consent_ok && stt_installed {
+                                                    palette.status_ok
+                                                } else {
+                                                    palette.text_secondary
+                                                }),
+                                            );
+                                            if !consent_ok {
+                                                if ui
+                                                    .small_button("Allow Microphone")
+                                                    .clicked()
+                                                {
+                                                    push_action(ChatCanvasAction::VoiceConsent(true));
+                                                }
+                                            } else if ui
+                                                .small_button("Revoke Consent")
+                                                .clicked()
+                                            {
+                                                push_action(ChatCanvasAction::VoiceConsent(false));
+                                            }
+                                            if let Some(reply_text) = last_assistant
+                                                && ui.small_button("Speak Last Reply").clicked()
+                                            {
+                                                push_action(ChatCanvasAction::VoiceSpeak(reply_text));
+                                            }
+                                            if voice_state["state"].as_str() == Some("speaking")
+                                                && ui.small_button("Interrupt").clicked()
+                                            {
+                                                push_action(ChatCanvasAction::VoiceBargeIn);
+                                            }
+                                            if !stt_installed
+                                                && ui
+                                                    .small_button("Install Speech Runtime")
+                                                    .clicked()
+                                            {
+                                                push_action(ChatCanvasAction::OpenLocalComponents);
+                                            }
+                                            if ui.small_button("End").clicked() {
+                                                push_action(ChatCanvasAction::VoiceStop);
+                                            }
+                                        });
+                                        if !voice_err.is_empty() {
+                                            ui.small(
+                                                RichText::new(voice_err)
+                                                    .color(palette.status_danger),
+                                            );
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+
                             // Attachment pills (`< 25 MB` limit enforced; cleared only on confirmed persistence)
                             if !ui_state.pending_attachments.is_empty() {
                                 ui.horizontal_wrapped(|ui| {
@@ -713,7 +818,7 @@ pub fn draw_chat_canvas(
                                         })
                                         .clicked()
                                     {
-                                        ui_state.dictation_active = !ui_state.dictation_active;
+                                        push_action(ChatCanvasAction::ToggleDictation);
                                         ui.close();
                                     }
                                 });
@@ -803,7 +908,7 @@ pub fn draw_chat_canvas(
                                         .on_hover_text("Start/Stop Realtime Voice Session")
                                         .clicked()
                                     {
-                                        ui_state.active_modal = Some(ActiveModal::ConnectApps);
+                                        push_action(ChatCanvasAction::ToggleVoice);
                                     }
                                 });
                             });

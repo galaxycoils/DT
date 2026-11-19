@@ -153,7 +153,26 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
         DaemonRequest::ManageSystem { op, .. }
             if matches!(
                 op.as_str(),
-                "get_bot_avatar" | "install_update" | "support_bundle" | "health" | "feedback"
+                "get_bot_avatar"
+                    | "install_update"
+                    | "support_bundle"
+                    | "health"
+                    | "feedback"
+                    | "components_list"
+                    | "components_install"
+                    | "components_verify"
+                    | "voice_status"
+                    | "voice_start"
+                    | "voice_consent"
+                    | "voice_transcribe"
+                    | "voice_speak"
+                    | "voice_barge_in"
+                    | "voice_stop"
+                    | "marketplace_list"
+                    | "marketplace_install"
+                    | "marketplace_remove"
+                    | "billing_status"
+                    | "connector_probe"
             ) =>
         {
             PendingKind::ToolResult(op.clone())
@@ -651,9 +670,31 @@ impl ViewState {
                 if ok { "Completed" } else { "Task update" }.into(),
                 format!("{task_id}\n{message}"),
             )),
-            DaemonEvent::ApprovalResolved { request_id }
-            | DaemonEvent::ApprovalExpired { request_id } => {
-                self.approvals.retain(|(id, _, _)| id != &request_id)
+            DaemonEvent::ApprovalResolved { request_id } => {
+                self.approvals.retain(|(id, _, _)| id != &request_id);
+                for m in &mut self.dm_messages {
+                    if m.get("card")
+                        .and_then(|c| c.get("request_id"))
+                        .and_then(|v| v.as_str())
+                        == Some(request_id.as_str())
+                        && m["card"]["status"].as_str() == Some("pending")
+                    {
+                        m["card"]["status"] = serde_json::json!("resolved");
+                    }
+                }
+            }
+            DaemonEvent::ApprovalExpired { request_id } => {
+                self.approvals.retain(|(id, _, _)| id != &request_id);
+                for m in &mut self.dm_messages {
+                    if m.get("card")
+                        .and_then(|c| c.get("request_id"))
+                        .and_then(|v| v.as_str())
+                        == Some(request_id.as_str())
+                        && m["card"]["status"].as_str() == Some("pending")
+                    {
+                        m["card"]["status"] = serde_json::json!("expired");
+                    }
+                }
             }
             DaemonEvent::ApprovalRequested {
                 request_id,
@@ -1154,6 +1195,28 @@ impl eframe::App for NativeApp {
         let previous_modal = self.ui_state.active_modal.clone();
         // 1. Handle global GrokBot hotkeys & 5-tier Escape stack
         let hotkey_outcome = handle_global_hotkeys(ctx, &mut self.ui_state);
+        if let Some(collapsed) = hotkey_outcome.sidebar_collapsed_toggled {
+            self.send(DaemonRequest::SaveUiSettings {
+                ui: serde_json::json!({ "sidebar_collapsed": collapsed }),
+            });
+        }
+        if hotkey_outcome.toggle_dictation {
+            if self.ui_state.dictation_active {
+                self.ui_state.dictation_active = false;
+                self.ui_state.voice_active = false;
+                self.send(DaemonRequest::ManageSystem {
+                    op: "voice_stop".into(),
+                    payload: Value::Null,
+                });
+            } else {
+                self.ui_state.dictation_active = true;
+                self.ui_state.voice_active = false;
+                self.send(DaemonRequest::ManageSystem {
+                    op: "voice_start".into(),
+                    payload: serde_json::json!({ "bot_id": self.bot, "mode": "dictate" }),
+                });
+            }
+        }
 
         if previous_section != self.ui_state.section {
             match self.ui_state.section {
@@ -1233,7 +1296,40 @@ impl eframe::App for NativeApp {
                             let _ = self.settings_config.providers.upsert_profile(prof, false);
                         }
                     }
-                    self.ui_state.responses[key] = value;
+                    if key.starts_with("voice_") {
+                        let status_val = value
+                            .get("status")
+                            .cloned()
+                            .unwrap_or_else(|| value.clone());
+                        let active = status_val["active"].as_bool().unwrap_or(false);
+                        let mode = status_val["mode"].as_str().unwrap_or("idle");
+                        self.ui_state.voice_active = active && mode != "dictate";
+                        self.ui_state.dictation_active = active && mode == "dictate";
+                        if key == "voice_transcribe"
+                            && let Some(text) = value["text"].as_str()
+                            && !text.trim().is_empty()
+                        {
+                            if !self.draft.is_empty() && !self.draft.ends_with(' ') {
+                                self.draft.push(' ');
+                            }
+                            self.draft.push_str(text.trim());
+                        }
+                        self.ui_state.responses["voice"] = status_val;
+                    } else if key == "components_install" || key == "components_verify" {
+                        self.ui_state.responses[key] = value;
+                        self.send(DaemonRequest::ManageSystem {
+                            op: "components_list".into(),
+                            payload: Value::Null,
+                        });
+                    } else if key == "marketplace_install" || key == "marketplace_remove" {
+                        self.ui_state.responses[key] = value;
+                        self.send(DaemonRequest::ManageSystem {
+                            op: "marketplace_list".into(),
+                            payload: Value::Null,
+                        });
+                    } else {
+                        self.ui_state.responses[key] = value;
+                    }
                 }
             }
         }
@@ -1644,6 +1740,86 @@ impl eframe::App for NativeApp {
                                 self.ui_state.active_modal =
                                     Some(crate::ui::state::ActiveModal::Settings);
                             }
+                            ChatCanvasAction::OpenLocalComponents => {
+                                self.ui_state.settings_pane = SettingsPane::SystemAndUpdates;
+                                self.ui_state.active_modal =
+                                    Some(crate::ui::state::ActiveModal::Settings);
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "components_list".into(),
+                                    payload: Value::Null,
+                                });
+                            }
+                            ChatCanvasAction::ToggleVoice => {
+                                if self.ui_state.voice_active {
+                                    self.ui_state.voice_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_stop".into(),
+                                        payload: Value::Null,
+                                    });
+                                } else {
+                                    self.ui_state.voice_active = true;
+                                    self.ui_state.dictation_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_start".into(),
+                                        payload: serde_json::json!({
+                                            "bot_id": self.bot,
+                                            "mode": "voice",
+                                        }),
+                                    });
+                                }
+                            }
+                            ChatCanvasAction::ToggleDictation => {
+                                if self.ui_state.dictation_active {
+                                    self.ui_state.dictation_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_stop".into(),
+                                        payload: Value::Null,
+                                    });
+                                } else {
+                                    self.ui_state.dictation_active = true;
+                                    self.ui_state.voice_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_start".into(),
+                                        payload: serde_json::json!({
+                                            "bot_id": self.bot,
+                                            "mode": "dictate",
+                                        }),
+                                    });
+                                }
+                            }
+                            ChatCanvasAction::VoiceConsent(granted) => {
+                                if !granted {
+                                    self.ui_state.voice_active = false;
+                                    self.ui_state.dictation_active = false;
+                                }
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_consent".into(),
+                                    payload: serde_json::json!({
+                                        "granted": granted,
+                                        "bot_id": self.bot,
+                                    }),
+                                });
+                            }
+                            ChatCanvasAction::VoiceSpeak(text) => {
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_speak".into(),
+                                    payload: serde_json::json!({ "text": text }),
+                                });
+                            }
+                            ChatCanvasAction::VoiceBargeIn => {
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_barge_in".into(),
+                                    payload: Value::Null,
+                                });
+                            }
+                            ChatCanvasAction::VoiceStop => {
+                                self.ui_state.voice_active = false;
+                                self.ui_state.dictation_active = false;
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_stop".into(),
+                                    payload: Value::Null,
+                                });
+                            }
                             ChatCanvasAction::RetryPending { client_msg_id } => {
                                 self.retry_pending_direct_send(&client_msg_id);
                             }
@@ -1843,6 +2019,29 @@ impl eframe::App for NativeApp {
                 });
         }
 
+        if previous_modal != self.ui_state.active_modal {
+            match self.ui_state.active_modal {
+                Some(crate::ui::state::ActiveModal::ConnectApps) => {
+                    self.send(DaemonRequest::ManageSystem {
+                        op: "marketplace_list".into(),
+                        payload: Value::Null,
+                    });
+                    self.send(DaemonRequest::ManageSystem {
+                        op: "billing_status".into(),
+                        payload: Value::Null,
+                    });
+                }
+                Some(crate::ui::state::ActiveModal::Settings)
+                    if self.ui_state.settings_pane == SettingsPane::SystemAndUpdates =>
+                {
+                    self.send(DaemonRequest::ManageSystem {
+                        op: "components_list".into(),
+                        payload: Value::Null,
+                    });
+                }
+                _ => {}
+            }
+        }
         if previous_modal.is_some() && previous_modal != self.ui_state.active_modal {
             use zeroize::Zeroize;
             self.ui_state.vault_secret_draft.zeroize();
