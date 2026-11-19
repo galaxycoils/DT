@@ -246,15 +246,15 @@ fn sha256_file_hex(path: &Path) -> Result<(String, u64)> {
     Ok((hex::encode(hasher.finalize()), total))
 }
 
-fn available_disk_bytes(path: &Path) -> u64 {
-    let probe = path
-        .ancestors()
-        .find(|candidate| candidate.exists())
-        .unwrap_or(Path::new("."));
+fn available_disk_bytes(_path: &Path) -> u64 {
     #[cfg(unix)]
     {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
+        let probe = _path
+            .ancestors()
+            .find(|candidate| candidate.exists())
+            .unwrap_or(Path::new("."));
         if let Ok(cpath) = CString::new(probe.as_os_str().as_bytes()) {
             let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
             if unsafe { libc::statvfs(cpath.as_ptr(), &mut stat) } == 0 {
