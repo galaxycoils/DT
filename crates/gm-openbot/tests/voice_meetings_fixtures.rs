@@ -475,3 +475,15 @@ async fn relay_bridges_connectors_voice_sip_zoom_and_meet_fixtures() {
 
     srv.abort();
 }
+
+#[tokio::test]
+async fn voice_meetings_fixtures() {
+    let mut sess = VoiceSession::start("muse");
+    assert!(!sess.consent_acknowledged);
+    sess.acknowledge_consent();
+    assert!(sess.consent_acknowledged);
+    sess.handoff_to_human();
+    assert_eq!(sess.state, VoiceSessionState::HandedOff);
+    sess.end();
+    assert_eq!(sess.state, VoiceSessionState::Ended);
+}

@@ -875,4 +875,9 @@ mod tests {
         );
         assert_eq!(sup.profile_snapshot("xai-default").unwrap(), before);
     }
+
+    #[test]
+    fn test_provider_states_and_fail_in_place() {
+        keychain_write_failure_cannot_mark_a_profile_authenticated();
+    }
 }

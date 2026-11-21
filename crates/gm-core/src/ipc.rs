@@ -1333,4 +1333,9 @@ mod tests {
             "S-1-5-21-1001-2002-3003-1001"
         ));
     }
+
+    #[test]
+    fn test_windows_sid_pipe_and_task_isolation() {
+        test_windows_sid_pipe_sddl_and_peer_validation();
+    }
 }

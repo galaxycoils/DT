@@ -491,4 +491,9 @@ mod geometry_tests {
             annotate_frame_with_geometry(Some(b"invalid"), (500, 250), &snapshot, None).is_err()
         );
     }
+
+    #[test]
+    fn test_negative_origin_and_scaled_som() {
+        scaled_marks_draw_in_image_space_and_resolve_to_desktop_space();
+    }
 }

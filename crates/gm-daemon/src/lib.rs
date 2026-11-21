@@ -7,9 +7,11 @@ use gm_core::ipc::{
     DaemonRequest, DaemonResponse, IpcMessage, read_ipc_message, write_ipc_message,
 };
 use gm_goals::{ProactiveEngine, QuietGateConfig};
+#[cfg(any(test, debug_assertions))]
+use gm_llm::MockLlmBackend;
 use gm_llm::{
     BudgetManager, ChatMessage, HybridLlmClient, KeychainSecrets, LlmBackend, LlmRouter,
-    META_KEY_ACCOUNT, MockLlmBackend, ReqwestLlmBackend, TaskType, XAI_KEY_ACCOUNT,
+    META_KEY_ACCOUNT, ReqwestLlmBackend, TaskType, XAI_KEY_ACCOUNT,
 };
 use gm_memory::PersonalMemoryStore;
 use gm_platform::IpcPlatformClient;
@@ -455,6 +457,17 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Inspect, dry-run, or apply a SHA-256-approved git patch
+    Patch {
+        /// Path to the unified diff patch file
+        patch: PathBuf,
+        /// Target repository directory (default: .)
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+        /// SHA-256 digest of the patch to approve and apply
+        #[arg(long)]
+        approve_sha256: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -675,6 +688,12 @@ pub enum RoutinesSubcommand {
         #[arg(long, default_value = "20")]
         limit: usize,
     },
+    /// Trigger a routine with an idempotent delivery identifier
+    Trigger {
+        id: String,
+        #[arg(long)]
+        delivery_id: String,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -709,6 +728,18 @@ pub enum DiagnosticsSubcommand {
         /// Output bundle file path
         #[arg(long)]
         output: PathBuf,
+    },
+    /// Remove older verified migration snapshots while preserving at least --keep
+    PruneBackups {
+        /// Number of recent verified migration snapshots to retain (1..=10000)
+        #[arg(long, default_value = "5")]
+        keep: usize,
+    },
+    /// Quarantine corrupt SQLite databases under exclusive lease while preserving originals
+    RecoverDatabase {
+        /// Optional specific database filename (default: checks openbot.sqlite, channels.sqlite, usage.sqlite3)
+        #[arg(long)]
+        db: Option<String>,
     },
 }
 
@@ -2685,7 +2716,29 @@ pub async fn run_routines(
                 }
             }
         }
+        RoutinesSubcommand::Trigger { id, delivery_id } => {
+            let outcome = sup
+                .trigger_routine(&id, &delivery_id)?
+                .ok_or_else(|| GmError::Config(format!("Routine '{id}' not found")))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&outcome)?);
+            } else {
+                println!(
+                    "Routine '{}' trigger (delivery_id='{}'): status={}, task_id={}",
+                    id,
+                    delivery_id,
+                    outcome.status,
+                    outcome.task_id.as_deref().unwrap_or("none")
+                );
+            }
+        }
     }
+    Ok(())
+}
+
+pub fn run_patch(patch_path: &Path, repo_path: &Path, approve_sha256: Option<&str>) -> Result<()> {
+    let summary = patch::review_patch(repo_path, patch_path, approve_sha256)?;
+    println!("{summary}");
     Ok(())
 }
 
@@ -2777,6 +2830,11 @@ pub async fn run_cli_entrypoint() -> Result<()> {
         }) => run_import_memory(file, input, apply, report_sha256, bot, json, cli.config).await?,
         Some(Commands::Dream { date, json }) => run_dream(date, json, cli.config).await?,
         Some(Commands::Spaces { action, json }) => run_spaces(action, json, cli.config).await?,
+        Some(Commands::Patch {
+            patch,
+            repo,
+            approve_sha256,
+        }) => run_patch(&patch, &repo, approve_sha256.as_deref())?,
         None => {
             if let Some(task) = cli.task {
                 run_do(&task, cli.config).await?;
@@ -2840,6 +2898,55 @@ pub async fn run_diagnostics(
                 );
                 println!("  SHA-256 Checksum:  {}", bundle.sha256_fingerprint);
                 println!("  Review the file before sharing for technical support.");
+            }
+        }
+        DiagnosticsSubcommand::PruneBackups { keep } => {
+            let removed = gm_core::database::prune_migration_backups(&config.storage_dir, keep)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "kept": keep,
+                        "removed": removed,
+                    }))?
+                );
+            } else {
+                println!("Pruned {removed} migration snapshot(s) (retaining up to {keep}).");
+            }
+        }
+        DiagnosticsSubcommand::RecoverDatabase { db } => {
+            let _storage_lease = migration::StorageLease::acquire(&config.storage_dir)?;
+            let candidates: Vec<String> = match db {
+                Some(name) => vec![name],
+                None => vec![
+                    "openbot.sqlite".into(),
+                    "channels.sqlite".into(),
+                    "usage.sqlite3".into(),
+                ],
+            };
+            let mut recovered = Vec::new();
+            for name in candidates {
+                let db_path = config.storage_dir.join(&name);
+                if !db_path.exists() {
+                    continue;
+                }
+                let _db_lease = gm_core::database::acquire_database_lease(&db_path, true)?;
+                if gm_core::database::corrupt_header(&db_path)?
+                    || gm_openbot::check_sqlite_integrity(&db_path).is_err()
+                {
+                    let _ = gm_openbot::open_sqlite_with_recovery(&db_path)?;
+                    recovered.push(name);
+                }
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "recovered_databases": recovered,
+                    }))?
+                );
+            } else {
+                println!("Recovered databases (originals preserved to .bak): {recovered:?}");
             }
         }
     }
@@ -4849,5 +4956,86 @@ mod tests {
             .await
             .unwrap();
         assert!(!shared.dreams_daily_dir().join("2026-06-02.md").exists());
+    }
+
+    #[test]
+    fn test_dt_and_gm_cli_parsing() {
+        for bin in ["dt", "gm"] {
+            let cases: &[&[&str]] = &[
+                &[bin, "chat", "--system", "test"],
+                &[bin, "permissions", "--json"],
+                &[bin, "onboard", "--check-only"],
+                &[bin, "do", "Check calendar"],
+                &[bin, "daemon"],
+                &[bin, "status"],
+                &[bin, "kill"],
+                &[bin, "service", "status"],
+                &[bin, "doctor", "check", "--json"],
+                &[bin, "doctor", "repair", "--json"],
+                &[bin, "doctor", "resume", "doc-123", "--json"],
+                &[bin, "diagnostics", "check"],
+                &[bin, "diagnostics", "prune-backups", "--keep", "3"],
+                &[bin, "diagnostics", "recover-database"],
+                &[bin, "dogfood", "--json"],
+                &[bin, "stats", "--json"],
+                &[bin, "review", "--date", "2026-11-20"],
+                &[bin, "audit", "--period", "weekly", "--json"],
+                &[bin, "upkeep", "--stale-days", "14"],
+                &[bin, "feed", "--limit", "10"],
+                &[bin, "ideas", "--json"],
+                &[bin, "update", "--check"],
+                &[bin, "models", "list"],
+                &[bin, "bots", "list"],
+                &[bin, "queue", "list"],
+                &[bin, "channels", "list"],
+                &[bin, "team", "preview", "team.json"],
+                &[bin, "routines", "list"],
+                &[bin, "routines", "runs", "r1"],
+                &[bin, "routines", "trigger", "r1", "--delivery-id", "deliv-1"],
+                &[bin, "serve", "--bind", "127.0.0.1:7433"],
+                &[bin, "skills", "list"],
+                &[bin, "goals", "list"],
+                &[bin, "forget", "plan", "secret"],
+                &[bin, "import-memory", "--input", "- fact"],
+                &[bin, "dream", "--date", "2026-11-20"],
+                &[bin, "spaces", "list"],
+                &[
+                    bin,
+                    "patch",
+                    "fix.patch",
+                    "--repo",
+                    ".",
+                    "--approve-sha256",
+                    "deadbeef",
+                ],
+            ];
+            for args in cases {
+                assert!(
+                    Cli::try_parse_from(*args).is_ok(),
+                    "Failed parsing CLI command: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_production_rejects_mock_inference() {
+        let spec = gm_llm::ManagedVlmWorkerSpec {
+            model_id: "qwen2-vl-2b".into(),
+            runtime: gm_llm::VlmWorkerRuntime::LlamaCppMtmd,
+            worker_bin: PathBuf::from("/nonexistent/llama-mtmd-server"),
+            model_path: PathBuf::from("/nonexistent/qwen2-vl.gguf"),
+            mmproj_path: None,
+            requested_device: gm_llm::VlmDevice::Cpu,
+            required_memory_mb: 2048,
+            available_device_memory_mb: 4096,
+            endpoint: "http://127.0.0.1:18080".into(),
+        };
+        // Missing checkpoint and mmproj weights must fail closed rather than falling back to mock.
+        assert!(spec.validate_before_launch().is_err());
+        // Non-loopback worker endpoint must be rejected.
+        let mut remote_spec = spec;
+        remote_spec.endpoint = "http://0.0.0.0:18080".into();
+        assert!(gm_llm::ManagedLocalVlmBackend::new(remote_spec).is_err());
     }
 }

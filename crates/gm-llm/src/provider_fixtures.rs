@@ -365,3 +365,81 @@ async fn provider_presets_oauth_responses_discovery_and_revalidation_fixtures() 
     assert!(err.to_string().contains("revalidate credentials"));
     assert_eq!(state.saw_auth_on_changed_dest.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn test_nous_refresh_and_revocation() {
+    let (base, _state) = spawn_fixture_server().await;
+    let secrets = KeychainSecrets::in_memory();
+    let backend = Arc::new(ReqwestLlmBackend::with_secrets(&secrets));
+    let budget = Arc::new(BudgetManager::new(BudgetConfig::default()));
+    let client = HybridLlmClient::new(backend, budget);
+
+    let nous_bundle = OAuthTokenBundle {
+        provider_id: "nous_portal".into(),
+        account_id: "nous_isolated".into(),
+        account_label: "Nous Isolated Account".into(),
+        access_token: "stale_nous_token".into(),
+        refresh_token: Some("rt_nous".into()),
+        expires_at: None,
+        token_endpoint: format!("{base}/oauth/token"),
+        client_id: "nous_client".into(),
+        identity: None,
+        inference_base_url: None,
+    };
+    let nous_ref = store_oauth_bundle(&secrets, ProviderPreset::NousPortal, &nous_bundle).unwrap();
+    let mut nous_target = ModelTarget::simple(
+        ProviderKind::NousPortal,
+        format!("{base}/v1"),
+        "Hermes-3-Llama-3.1-70B",
+        false,
+    );
+    nous_target.credential_ref = Some(nous_ref.clone());
+    let nous_resp = client
+        .execute_routed(&nous_target, None, &[ChatMessage::text("user", "Ping")])
+        .await
+        .unwrap();
+    assert_eq!(nous_resp.content, "Sync(Hermes-3-Llama-3.1-70B)");
+    assert_eq!(
+        load_oauth_bundle(&secrets, &nous_ref).unwrap().access_token,
+        "fresh_oauth_token_v2"
+    );
+    disconnect_oauth_account(&secrets, &nous_ref).unwrap();
+    assert!(load_oauth_bundle(&secrets, &nous_ref).is_err());
+}
+
+#[tokio::test]
+async fn test_custom_responses_and_completions_endpoints() {
+    let (base, state) = spawn_fixture_server().await;
+    let secrets = KeychainSecrets::in_memory();
+    let backend = Arc::new(ReqwestLlmBackend::with_secrets(&secrets));
+
+    let mut custom_resp_target = ModelTarget::simple(
+        ProviderKind::Custom,
+        format!("{base}/v1"),
+        "custom-model",
+        false,
+    );
+    custom_resp_target.protocol = WireProtocol::Responses;
+    let resp = backend
+        .complete(
+            &custom_resp_target,
+            &[ChatMessage::with_jpeg("user", "Screen", &[1, 2, 3])],
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.content, "Sync Responses OK");
+    assert_eq!(state.saw_image_when_disabled.load(Ordering::SeqCst), 0);
+
+    let mut custom_chat_target = ModelTarget::simple(
+        ProviderKind::Custom,
+        format!("{base}/v1"),
+        "fixture-fast-1",
+        false,
+    );
+    custom_chat_target.protocol = WireProtocol::ChatCompletions;
+    let chat_resp = backend
+        .complete(&custom_chat_target, &[ChatMessage::text("user", "Hello")])
+        .await
+        .unwrap();
+    assert_eq!(chat_resp.content, "Sync(fixture-fast-1)");
+}

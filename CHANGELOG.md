@@ -2,6 +2,13 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
+## [v1.0.3] — Pre-Shipping Hardening, Interactive Cross-Device UX & 100% Coverage Inventory (2026-11-21)
+
+- **Interactive Cross-Device React Web & Expo Mobile Experience (`clients/web/`, `clients/mobile/`, `tools/generate-ui-tokens.py`)**: Added responsive 3-tier layout hierarchy (drag-resizable desktop sidebar `240px–480px`, `72px` collapsed icon rail, mobile slide-over drawer), geometric coworker avatars with animated eyes, Command Palette (`⌘K`/`Ctrl+K`), per-target draft isolation + historical transcript loading, smart `->` to `→` composer with single-Backspace undo, inline Tier-3 Approval Cards, 1-click Routine `Trigger Now`, split-view `sandbox="allow-scripts"` Space preview, 4-stage Provider Connection pipeline + Connector prober, and DT Doctor readiness scorecard.
+- **CLI & `/api/v1` Parity (`crates/gm-daemon`, `crates/gm-openbot`)**: Exposed `dt patch`, `dt routines trigger`, `dt diagnostics prune-backups`, and `dt diagnostics recover-database` in the top-level CLI (`dt` and `gm`); added `POST /api/v1/routines/:id/trigger`, returned active workspace memberships in `GET /api/v1/workspaces`, and updated `POST /api/v1/marketplace/:id/update` to resolve built-in catalog items by ID.
+- **100% Release Coverage Inventory Contract (`docs/release/coverage-inventory.json`, `tools/test_release_tools.py`)**: Implemented all 30/30 required `test_ids` across all 26 required capability rows, enforced by `test_coverage_inventory_test_ids_exist_in_codebase`, with 384/384 workspace tests passing under `cargo nextest`.
+- **Packaging, Docker & Front Page (`tools/installers/linux/build-deb.sh`, `deploy/docker/Dockerfile`, `docs/index.html`)**: Fixed container `umask` directory permissions in `build-deb.sh`, added `dt` and `dt-doctor` symlinks in `xtask install`, added cross-platform JPEG encoding benchmark in `xtask bench-hotpath`, updated `Dockerfile` with Linux build dependencies and `gm` binary, and added the interactive DT Front Page (`docs/index.html`).
+
 ## [v1.0.0] — DT Stable Release Candidate & Certification Infrastructure (2026-11-17)
 
 - **Rename & Compatibility**: Branded user-facing surfaces to **DT**, exposed `dt` primary CLI and standalone `dt-doctor` recovery binary while preserving `gm` compatibility alias, crate names, credential namespaces, bundle IDs, OAuth identity, and legacy config inputs.

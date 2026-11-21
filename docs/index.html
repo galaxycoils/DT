@@ -1,0 +1,1364 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DT v1.0.3 — Native Hybrid Desktop, Web, Mobile & Self-Hostable Agent</title>
+  <meta name="description" content="DT is a native Rust computer-use and multi-agent coworker suite across macOS, Windows 11, Ubuntu 24.04 (X11/Wayland), React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root, [data-theme="dark"] {
+      color-scheme: dark;
+      --bg-canvas: #0f0f0f;
+      --bg-surface: #171717;
+      --bg-elevated: #1e1e1e;
+      --bg-hover: #262626;
+      --bg-active: #2e2e2e;
+      --border-subtle: #282828;
+      --border-strong: #3a3a3a;
+      --text-primary: #ececec;
+      --text-secondary: #a8a8a8;
+      --text-muted: #767676;
+      --accent-primary: #10a37f;
+      --accent-primary-hover: #14b890;
+      --accent-secondary: #2d9cdb;
+      --status-ok: #10a37f;
+      --status-warn: #d4a843;
+      --status-danger: #e05252;
+      --shadow-card: 0 18px 42px rgba(0, 0, 0, 0.42);
+    }
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg-canvas: #f7f7f5;
+      --bg-surface: #ffffff;
+      --bg-elevated: #f0efe9;
+      --bg-hover: #e7e6df;
+      --bg-active: #dcdad0;
+      --border-subtle: #e2e0d8;
+      --border-strong: #c8c5ba;
+      --text-primary: #161616;
+      --text-secondary: #525252;
+      --text-muted: #787878;
+      --accent-primary: #0d8a6a;
+      --accent-primary-hover: #0a7257;
+      --accent-secondary: #1b76b8;
+      --status-ok: #0d8a6a;
+      --status-warn: #b38318;
+      --status-danger: #c83737;
+      --shadow-card: 0 16px 36px rgba(20, 20, 18, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: var(--bg-canvas);
+      color: var(--text-primary);
+      font-family: 'Source Sans 3', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    code, pre, .mono {
+      font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    /* Sticky Top Navigation */
+    .site-nav {
+      position: sticky;
+      top: 0;
+      z-index: 40;
+      background: color-mix(in srgb, var(--bg-canvas) 88%, transparent);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .site-nav-inner {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 12px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 700;
+      font-size: 18px;
+      letter-spacing: -0.01em;
+    }
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 9px;
+      background: var(--accent-primary);
+      color: #ffffff;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: 0.03em;
+    }
+    .version-tag {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .nav-btn {
+      padding: 7px 12px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-secondary);
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 140ms ease, color 140ms ease, border-color 140ms ease;
+    }
+    .nav-btn:hover {
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+    }
+    .nav-btn.primary {
+      background: var(--accent-primary);
+      color: #ffffff;
+    }
+    .nav-btn.primary:hover {
+      background: var(--accent-primary-hover);
+    }
+    .nav-btn.outline {
+      border-color: var(--border-subtle);
+      background: var(--bg-surface);
+      color: var(--text-primary);
+    }
+
+    /* Container */
+    .container {
+      max-width: 1240px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Hero + OS Download Selector */
+    .hero {
+      padding: 48px 0 36px;
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 32px;
+      align-items: start;
+    }
+    .hero h1 {
+      margin: 0 0 14px;
+      font-size: clamp(32px, 4vw, 48px);
+      line-height: 1.12;
+      letter-spacing: -0.025em;
+      font-weight: 700;
+    }
+    .hero-lead {
+      margin: 0 0 22px;
+      font-size: 18px;
+      color: var(--text-secondary);
+      max-width: 640px;
+    }
+    .metrics-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+    .metric-box {
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+    }
+    .metric-val {
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-primary);
+      letter-spacing: -0.01em;
+    }
+    .metric-lbl {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    /* OS Binary Selector Card */
+    .dl-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 20px;
+      box-shadow: var(--shadow-card);
+    }
+    .os-tabs {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 6px;
+      margin-bottom: 16px;
+    }
+    .os-tab {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      text-align: center;
+      transition: all 140ms ease;
+    }
+    .os-tab.active {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+      color: #ffffff;
+    }
+    .dl-asset-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border-subtle);
+      margin-bottom: 10px;
+    }
+    .dl-asset-name {
+      font-weight: 700;
+      font-size: 14px;
+    }
+    .dl-asset-sub {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    .dl-btn {
+      padding: 8px 14px;
+      border-radius: 8px;
+      background: var(--accent-primary);
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+      border: none;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .dl-btn:hover {
+      background: var(--accent-primary-hover);
+    }
+    .cmd-box {
+      margin-top: 12px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: var(--bg-canvas);
+      border: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      overflow-x: auto;
+    }
+
+    /* Interactive Workspace Playground */
+    .section-header {
+      margin: 28px 0 16px;
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    .section-header h2 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: -0.015em;
+    }
+    .section-header p {
+      margin: 0;
+      color: var(--text-secondary);
+      font-size: 14px;
+    }
+
+    .dt-shell {
+      height: 620px;
+      border-radius: 16px;
+      border: 1px solid var(--border-strong);
+      background: var(--bg-canvas);
+      box-shadow: var(--shadow-card);
+      display: flex;
+      overflow: hidden;
+      position: relative;
+      margin-bottom: 44px;
+    }
+    .dt-sidebar {
+      width: 290px;
+      min-width: 220px;
+      max-width: 420px;
+      background: var(--bg-surface);
+      border-right: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      transition: width 150ms ease;
+      user-select: none;
+    }
+    .dt-sidebar.collapsed {
+      width: 72px;
+      min-width: 72px;
+    }
+    .dt-sidebar-top {
+      padding: 14px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .dt-sidebar-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px;
+    }
+    .dt-group-title {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      padding: 8px 8px 6px;
+    }
+    .dt-sidebar.collapsed .dt-group-title,
+    .dt-sidebar.collapsed .dt-item-meta {
+      display: none;
+    }
+    .dt-nav-item {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-primary);
+      cursor: pointer;
+      text-align: left;
+      margin-bottom: 4px;
+      transition: background 120ms ease;
+    }
+    .dt-nav-item:hover {
+      background: var(--bg-hover);
+    }
+    .dt-nav-item.active {
+      background: var(--bg-active);
+      border-color: var(--border-strong);
+    }
+
+    /* Geometric Coworker Avatars */
+    .dt-avatar {
+      width: 34px;
+      height: 34px;
+      flex-shrink: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      position: relative;
+      background: var(--bg-elevated);
+      border: 1.5px solid var(--accent-primary);
+    }
+    .dt-avatar[data-shape="circle"] { border-radius: 999px; }
+    .dt-avatar[data-shape="squircle"] { border-radius: 10px; }
+    .dt-avatar[data-shape="diamond"] { border-radius: 8px; transform: rotate(45deg); }
+    .dt-avatar[data-shape="diamond"] .dt-eyes { transform: rotate(-45deg); }
+    .dt-avatar[data-shape="hexagon"] {
+      border-radius: 8px;
+      clip-path: polygon(25% 4%, 75% 4%, 98% 50%, 75% 96%, 25% 96%, 2% 50%);
+    }
+    .dt-eyes {
+      display: inline-flex;
+      gap: 5px;
+      align-items: center;
+    }
+    .dt-eyes span {
+      width: 4px;
+      height: 7px;
+      border-radius: 99px;
+      background: var(--text-primary);
+      animation: dtBlink 4.8s infinite ease-in-out;
+    }
+    @keyframes dtBlink {
+      0%, 92%, 100% { transform: scaleY(1); }
+      95% { transform: scaleY(0.15); }
+    }
+    .dt-presence-dot {
+      position: absolute;
+      right: -2px;
+      bottom: -2px;
+      width: 9px;
+      height: 9px;
+      border-radius: 99px;
+      background: var(--status-ok);
+      border: 2px solid var(--bg-surface);
+    }
+
+    /* Main Workspace Canvas */
+    .dt-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: var(--bg-canvas);
+    }
+    .dt-header {
+      min-height: 58px;
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .dt-tabs {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .dt-tab {
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .dt-tab.active {
+      background: var(--accent-primary);
+      border-color: var(--accent-primary);
+      color: #ffffff;
+    }
+    .dt-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 18px 22px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .dt-msg {
+      padding: 12px 15px;
+      border-radius: 12px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      max-width: 820px;
+    }
+    .dt-msg.user {
+      background: var(--bg-elevated);
+      align-self: flex-end;
+      border-color: var(--border-strong);
+    }
+    .dt-msg-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 12px;
+      color: var(--text-secondary);
+      margin-bottom: 4px;
+    }
+    .dt-approval-card {
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: var(--bg-surface);
+      border: 1.5px solid var(--status-warn);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+    }
+    .dt-chips {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+    .dt-chip {
+      padding: 6px 11px;
+      border-radius: 999px;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      color: var(--text-secondary);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .dt-chip:hover {
+      border-color: var(--accent-primary);
+      color: var(--text-primary);
+    }
+    .dt-composer {
+      margin: 8px 18px 14px;
+      padding: 8px 12px;
+      border-radius: 24px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .dt-composer input {
+      flex: 1;
+      border: none;
+      outline: none;
+      background: transparent;
+      color: var(--text-primary);
+      font-size: 14px;
+    }
+
+    /* Feature & Gate Grid */
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+      margin-bottom: 44px;
+    }
+    .card {
+      padding: 20px;
+      border-radius: 14px;
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+    }
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+    }
+    .card p {
+      margin: 0;
+      font-size: 14px;
+      color: var(--text-secondary);
+    }
+
+    /* Release Scorecard Table */
+    .table-wrap {
+      border-radius: 14px;
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-surface);
+      overflow-x: auto;
+      margin-bottom: 48px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      padding: 12px 16px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    th {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-secondary);
+      background: var(--bg-elevated);
+    }
+    .badge-ok {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 99px;
+      font-size: 12px;
+      font-weight: 700;
+      background: color-mix(in srgb, var(--status-ok) 18%, transparent);
+      color: var(--status-ok);
+    }
+
+    /* Command Palette Modal */
+    .palette-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 90;
+      background: rgba(0, 0, 0, 0.58);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: flex-start;
+      justify-content: center;
+      padding-top: 10vh;
+    }
+    .palette-backdrop.open {
+      display: flex;
+    }
+    .palette-modal {
+      width: min(560px, 92vw);
+      background: var(--bg-surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 14px;
+      box-shadow: var(--shadow-card);
+      overflow: hidden;
+    }
+    .palette-input {
+      width: 100%;
+      padding: 14px 16px;
+      border: none;
+      border-bottom: 1px solid var(--border-subtle);
+      background: var(--bg-elevated);
+      color: var(--text-primary);
+      font-size: 15px;
+      outline: none;
+    }
+    .palette-list {
+      max-height: 320px;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .palette-item {
+      width: 100%;
+      padding: 10px 12px;
+      border-radius: 8px;
+      border: none;
+      background: transparent;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+      font-size: 14px;
+      text-align: left;
+    }
+    .palette-item:hover {
+      background: var(--bg-hover);
+    }
+
+    footer {
+      border-top: 1px solid var(--border-subtle);
+      padding: 28px 0 40px;
+      color: var(--text-secondary);
+      font-size: 13px;
+    }
+
+    @media (max-width: 960px) {
+      .hero {
+        grid-template-columns: 1fr;
+      }
+      .grid-3 {
+        grid-template-columns: 1fr;
+      }
+      .metrics-strip {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+    @media (max-width: 720px) {
+      .dt-shell {
+        flex-direction: column;
+        height: 700px;
+      }
+      .dt-sidebar {
+        width: 100%;
+        max-width: none;
+        height: 170px;
+        border-right: none;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-nav">
+    <div class="site-nav-inner">
+      <a href="#top" class="brand">
+        <span class="brand-mark">DT</span>
+        <span>DT Hybrid Agent</span>
+        <span class="version-tag mono">v1.0.3</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary Navigation">
+        <a href="#workspace" class="nav-btn">Interactive Workspace</a>
+        <a href="#downloads" class="nav-btn">Binaries &amp; Installers</a>
+        <a href="#gates" class="nav-btn">G1–G8 &amp; 30/30 Coverage</a>
+        <button type="button" id="open-palette-btn" class="nav-btn outline mono">⌘K Palette</button>
+        <button type="button" id="theme-toggle-btn" class="nav-btn outline">Light / Dark</button>
+        <a href="https://github.com/galaxycoils/DT/releases" class="nav-btn primary">GitHub Releases</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top" class="container">
+    <!-- Hero + OS Binary Download Card -->
+    <section class="hero" id="downloads">
+      <div>
+        <h1>Native hybrid desktop, web, and mobile coworker suite.</h1>
+        <p class="hero-lead">
+          Fast computer-use grounded in native Accessibility &amp; Set-of-Marks vision, paired with an OpenBot multi-agent roster (<code>@muse</code>, <code>@researcher</code>, <code>@coder</code>, <code>@guardian</code>), 5-tier multi-provider LLM routing, voice/SIP/meetings, and unified <code>dt-doctor</code> recovery.
+        </p>
+        <div class="metrics-strip">
+          <div class="metric-box">
+            <div class="metric-val mono">384 / 384</div>
+            <div class="metric-lbl">Workspace Tests Passing</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val mono">30 / 30</div>
+            <div class="metric-lbl">Coverage Inventory IDs</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val mono">&lt; 50 MB</div>
+            <div class="metric-lbl">Idle Native Process Tree</div>
+          </div>
+          <div class="metric-box">
+            <div class="metric-val mono">&lt; 100 ms</div>
+            <div class="metric-lbl">Emergency Kill Switch</div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+          <a href="https://github.com/galaxycoils/DT/releases/latest" class="nav-btn primary" style="padding: 10px 18px;">Download Latest Release (v1.0.3)</a>
+          <a href="https://github.com/galaxycoils/DT" class="nav-btn outline" style="padding: 10px 18px;">View Source on GitHub</a>
+        </div>
+      </div>
+
+      <!-- OS Selector Card -->
+      <div class="dl-card" aria-label="Release Binary Selector">
+        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+          <strong style="font-size: 15px;">Prebuilt Release Binaries &amp; Installers</strong>
+          <span class="badge-ok mono">SHA-256 + SBOM</span>
+        </div>
+        <div class="os-tabs" role="tablist">
+          <button type="button" class="os-tab active" data-os="linux" id="tab-linux">Ubuntu / Linux</button>
+          <button type="button" class="os-tab" data-os="macos" id="tab-macos">macOS</button>
+          <button type="button" class="os-tab" data-os="windows" id="tab-windows">Windows 11</button>
+          <button type="button" class="os-tab" data-os="docker" id="tab-docker">Docker / Web</button>
+        </div>
+        <div id="os-download-panel"></div>
+      </div>
+    </section>
+
+    <!-- Live Interactive DT Workspace Playground -->
+    <div class="section-header" id="workspace">
+      <div>
+        <h2>Live Interactive Workspace Preview</h2>
+        <p>Switch coworkers (drafts stay isolated per target), type <code>-&gt;</code> in the composer for smart arrow replacement, trigger routines, or open the <code>⌘K</code> Command Palette.</p>
+      </div>
+      <div style="display: flex; gap: 8px;">
+        <button type="button" id="collapse-sidebar-btn" class="nav-btn outline">Toggle Compact Rail</button>
+        <button type="button" id="trigger-approval-btn" class="nav-btn outline">Simulate Tier-3 Approval</button>
+      </div>
+    </div>
+
+    <section class="dt-shell" aria-label="Interactive DT Workspace">
+      <aside class="dt-sidebar" id="demo-sidebar">
+        <div class="dt-sidebar-top">
+          <strong style="font-size: 13px;">Workspace · default</strong>
+          <span class="badge-ok mono" style="font-size: 11px;">SSE Live</span>
+        </div>
+        <div class="dt-sidebar-scroll" id="sidebar-targets"></div>
+      </aside>
+
+      <div class="dt-main">
+        <div class="dt-header">
+          <div>
+            <strong id="active-target-title" style="font-size: 16px;">@muse · General Desktop Operator</strong>
+            <div id="active-target-sub" style="font-size: 12px; color: var(--text-secondary);">Direct Coworker Thread · Isolated Draft Memory</div>
+          </div>
+          <div class="dt-tabs" id="workspace-view-tabs">
+            <button type="button" class="dt-tab active" data-view="chat">Conversation</button>
+            <button type="button" class="dt-tab" data-view="routines">Routines</button>
+            <button type="button" class="dt-tab" data-view="spaces">Spaces Sandbox</button>
+            <button type="button" class="dt-tab" data-view="providers">Providers &amp; Connectors</button>
+            <button type="button" class="dt-tab" data-view="doctor">DT Doctor</button>
+          </div>
+        </div>
+
+        <div class="dt-body" id="workspace-canvas"></div>
+
+        <form class="dt-composer" id="demo-composer-form">
+          <input
+            type="text"
+            id="demo-composer-input"
+            placeholder="Message @muse… (try typing 'deploy -> verify' to test smart arrow replacement)"
+            autocomplete="off"
+          />
+          <button type="submit" class="dl-btn" id="demo-send-btn">Send</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Architectural Pillars -->
+    <div class="section-header">
+      <div>
+        <h2>Engineered for Speed, Privacy, and Verifiable Governance</h2>
+        <p>Shared Rakazo design tokens across Native Desktop (<code>gm-ui</code>), Companion Web, React Web, and Expo Mobile.</p>
+      </div>
+    </div>
+    <section class="grid-3">
+      <article class="card">
+        <h3>Native Computer-Use &amp; SoM Grounding</h3>
+        <p>Zero-copy macOS ScreenCaptureKit + Accessibility (<code>AXUIElement</code>), Windows 11 WGC + UIA, and Ubuntu 24.04 X11 / Wayland Portal + PipeWire with negative-origin &amp; HiDPI Set-of-Marks (<code>#1..#N</code>) vision badges.</p>
+      </article>
+      <article class="card">
+        <h3>5-Tier Multi-Provider LLM Router</h3>
+        <p>Deterministic <code>Routine → Bot → Workspace → Account → Legacy</code> routing across ChatGPT PKCE OAuth (<code>/v1/responses</code>), OpenAI API, Kilo Gateway, OpenRouter, Nous Portal OAuth, Meta Muse, xAI Grok, and Local VLM.</p>
+      </article>
+      <article class="card">
+        <h3>Deny-Wins Discretion &amp; Two-Phase Forget</h3>
+        <p>Per-chat <code>DISCRETION.md</code> rules prevent private <code>USER.md</code> leaks on Slack/Telegram/Discord bridges, paired with redacted Two-Phase Forget and SHA-256-approved patch &amp; memory imports.</p>
+      </article>
+    </section>
+
+    <!-- G1-G8 & Coverage Inventory Scorecard -->
+    <div class="section-header" id="gates">
+      <div>
+        <h2>Release Gates (G1–G8) &amp; 30/30 Coverage Inventory Scorecard</h2>
+        <p>Enforced by <code>cargo nextest</code>, <code>xtask eval</code>, and <code>tools/test_release_tools.py</code>.</p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Gate / Suite</th>
+            <th>Target Contract</th>
+            <th>Measured Result</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><strong>Rust Workspace Unit &amp; Integration</strong></td>
+            <td><code>cargo clippy -- -D warnings</code> + <code>cargo nextest</code></td>
+            <td class="mono">0 warnings · 384 / 384 tests passed</td>
+            <td><span class="badge-ok">PASS</span></td>
+          </tr>
+          <tr>
+            <td><strong>Release Coverage Inventory</strong></td>
+            <td>All 26 required rows &amp; 30 <code>test_ids</code> in <code>coverage-inventory.json</code></td>
+            <td class="mono">30 / 30 test_ids verified in codebase</td>
+            <td><span class="badge-ok">PASS</span></td>
+          </tr>
+          <tr>
+            <td><strong>G5 + v0.2.0 + OpenBot Eval Suite</strong></td>
+            <td>25 macOS tasks + 5 SoM/MCP + 10 OpenBot/Muse governance scenarios</td>
+            <td class="mono">40 / 40 passed (100.0%) · 0 safety violations</td>
+            <td><span class="badge-ok">PASS</span></td>
+          </tr>
+          <tr>
+            <td><strong>G4 Fast-Route Agent Step Latency</strong></td>
+            <td>Median &lt; 1,500 ms · p95 &lt; 4,000 ms</td>
+            <td class="mono">p50 = 519.1 ms · p95 = 530.9 ms</td>
+            <td><span class="badge-ok">PASS</span></td>
+          </tr>
+          <tr>
+            <td><strong>G6 14-Day Proactive Dogfood Gate</strong></td>
+            <td>&le; 3 notices/day · &ge; 80% precision · &le; $1.00/day cap</td>
+            <td class="mono">2.07/day · 93.1% precision · $0.097 peak/day</td>
+            <td><span class="badge-ok">PASS</span></td>
+          </tr>
+          <tr>
+            <td><strong>Companion, React Web &amp; Expo Mobile</strong></td>
+            <td>Bundle &lt; 64 KiB + Headless Chromium Smoke + Web/Mobile contracts</td>
+            <td class="mono">62,612 B (&lt; 64 KiB) · 17 / 17 JS/TS tests passed</td>
+            <td><span class="badge-ok">PASS</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- Command Palette Modal -->
+  <div class="palette-backdrop" id="palette-backdrop" role="dialog" aria-modal="true" aria-label="Command Palette">
+    <div class="palette-modal">
+      <input type="text" class="palette-input" id="palette-input" placeholder="Jump to coworker, channel, view, binary download, or theme…" />
+      <div class="palette-list" id="palette-list"></div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="container" style="display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+      <div><strong>DT Hybrid Agent</strong> · MIT License · <a href="https://github.com/galaxycoils/DT" style="text-decoration: underline;">github.com/galaxycoils/DT</a></div>
+      <div class="mono">Primary CLI: <code>dt</code> · Recovery: <code>dt-doctor</code> · Compatibility Alias: <code>gm</code></div>
+    </div>
+  </footer>
+
+  <script>
+    const RELEASE_TAG = 'v1.0.3';
+    const PREV_TAG = 'v1.0.2';
+    const REPO_URL = 'https://github.com/galaxycoils/DT';
+
+    const OS_DOWNLOADS = {
+      linux: {
+        assets: [
+          {
+            name: 'dt_1.0.3_amd64.deb',
+            sub: 'Ubuntu 24.04 LTS (x86_64) · Includes dt, gm, dt-doctor, gm-daemon, gm-cu-helper, gm-ui + systemd user services',
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/dt_1.0.3_amd64.deb`
+          },
+          {
+            name: 'DT-1.0.3-linux-x86_64-binaries.tar.gz',
+            sub: 'Standalone optimized Linux x86_64 release binaries archive + SHA-256 checksum',
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.3-linux-x86_64-binaries.tar.gz`
+          },
+          {
+            name: 'dt_1.0.2_arm64.deb',
+            sub: 'Ubuntu 24.04 LTS (ARM64) Debian package',
+            url: `${REPO_URL}/releases/download/${PREV_TAG}/dt_1.0.2_arm64.deb`
+          }
+        ],
+        cmd: 'sudo apt install ./dt_1.0.3_amd64.deb && dt doctor check'
+      },
+      macos: {
+        assets: [
+          {
+            name: 'DT-1.0.2-macos-aarch64.dmg',
+            sub: 'macOS Apple Silicon (M1/M2/M3/M4) · Contains DT.app, DTCUHelper.app & Install DT.pkg',
+            url: `${REPO_URL}/releases/download/${PREV_TAG}/DT-1.0.2-macos-aarch64.dmg`
+          },
+          {
+            name: 'DT-1.0.2-macos-x86_64.dmg',
+            sub: 'macOS Intel (x86_64) · Contains DT.app, DTCUHelper.app & Install DT.pkg',
+            url: `${REPO_URL}/releases/download/${PREV_TAG}/DT-1.0.2-macos-x86_64.dmg`
+          }
+        ],
+        cmd: 'shasum -a 256 -c DT-1.0.2-macos-aarch64.dmg.sha256 && dt onboard'
+      },
+      windows: {
+        assets: [
+          {
+            name: 'DT-1.0.2-windows-x86_64-setup.exe',
+            sub: 'Windows 11 (x64) NSIS per-user installer with SID-scoped named pipes & scheduled tasks',
+            url: `${REPO_URL}/releases/download/${PREV_TAG}/DT-1.0.2-windows-x86_64-setup.exe`
+          },
+          {
+            name: 'DT-1.0.2-windows-aarch64-setup.exe',
+            sub: 'Windows 11 (ARM64) NSIS per-user installer',
+            url: `${REPO_URL}/releases/download/${PREV_TAG}/DT-1.0.2-windows-aarch64-setup.exe`
+          }
+        ],
+        cmd: 'dt.exe doctor check --json'
+      },
+      docker: {
+        assets: [
+          {
+            name: 'DT-1.0.3-web-client.tar.gz',
+            sub: 'Production Vite React Web Client bundle with Rakazo UI tokens & Cookie+CSRF session client',
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.3-web-client.tar.gz`
+          },
+          {
+            name: 'deploy/docker/docker-compose.yml',
+            sub: 'Self-hostable PostgreSQL + DT Server + Caddy automatic TLS stack',
+            url: `${REPO_URL}/tree/master/deploy/docker`
+          }
+        ],
+        cmd: 'docker compose -f deploy/docker/docker-compose.yml up -d --build'
+      }
+    };
+
+    const TARGETS = [
+      { id: 'dm:muse', kind: 'dm', label: '@muse', role: 'General Desktop Operator', shape: 'circle', phrase: 'Ready · Screen & AX active', prompts: ['Summarize open windows -> draft action plan', 'Run nightly memory upkeep'] },
+      { id: 'dm:researcher', kind: 'dm', label: '@researcher', role: 'Deep Knowledge & Web Synthesis', shape: 'diamond', phrase: 'Indexing citations', prompts: ['Compare provider latency benchmarks', 'Extract key claims from inbox PDF'] },
+      { id: 'dm:coder', kind: 'dm', label: '@coder', role: 'Sandboxed Software Engineer', shape: 'hexagon', phrase: 'cargo nextest 384/384 green', prompts: ['Review git patch SHA-256 -> run nextest', 'Scaffold static Space dashboard'] },
+      { id: 'dm:guardian', kind: 'dm', label: '@guardian', role: 'Security & Discretion Analyst', shape: 'squircle', phrase: '0 policy violations', prompts: ['Audit DISCRETION.md outbound rules', 'Verify Ed25519 release manifest'] },
+      { id: 'channel:general', kind: 'channel', label: '#general', role: 'Team coordination & @bot mentions', shape: 'squircle', phrase: '4 coworkers active', prompts: ['@coder verify release package and hand off SBOM to @guardian'] },
+      { id: 'channel:ops', kind: 'channel', label: '#ops', role: 'Proactive patrols & routine alerts', shape: 'squircle', phrase: 'Quiet Gate active 22:00–08:00', prompts: ['@guardian check provider failover readiness'] }
+    ];
+
+    const state = {
+      os: 'linux',
+      activeTarget: 'dm:muse',
+      activeView: 'chat',
+      drafts: {
+        'dm:muse': '',
+        'dm:researcher': 'Synthesize benchmark citations -> ',
+        'dm:coder': '',
+        'dm:guardian': '',
+        'channel:general': '',
+        'channel:ops': ''
+      },
+      lastArrowPos: null,
+      messages: {
+        'dm:muse': [
+          { author: '@muse', role: 'bot', time: 'Just now', text: 'Welcome to DT v1.0.3. Switch between coworkers on the left to verify per-target draft isolation, or type "->" in the composer to test smart typography.' }
+        ],
+        'dm:researcher': [
+          { author: '@researcher', role: 'bot', time: '2m ago', text: 'Notice how your unsent draft ("Synthesize benchmark citations -> ") was preserved specifically for @researcher!' }
+        ],
+        'dm:coder': [
+          { author: '@coder', role: 'bot', time: '1m ago', text: 'All 384 workspace tests and 30/30 release coverage inventory test_ids are passing with zero clippy warnings.' }
+        ],
+        'dm:guardian': [
+          { author: '@guardian', role: 'bot', time: 'Just now', text: 'Outbound relay HMAC-SHA256 replay window (<= 300s) and DISCRETION.md deny-wins rules are enforced.' }
+        ],
+        'channel:general': [
+          { author: '@muse', role: 'bot', time: '4m ago', text: 'Multi-bot channel ready. Mention @coder, @researcher, or @guardian to spawn prioritized queue tasks.' }
+        ],
+        'channel:ops': [
+          { author: '@guardian', role: 'bot', time: '5m ago', text: 'DT Doctor check completed: SQLite WAL integrity, SID/UID socket permissions, and budget ledger ($72.50 / $100.00 cap) verified.' }
+        ]
+      },
+      approvals: [
+        { id: 'req-tier3-mail', title: 'Tier-3 Irreversible Action: Send External Email', detail: 'Target: Mail.app · Recipient: release-team@example.com · Rule: RULE-TIER3-CONFIRM', status: 'pending' }
+      ],
+      routines: [
+        { id: 'morning-brief', name: 'Morning Calendar & Inbox Brief', bot: '@muse', schedule: 'Daily 08:30 America/New_York', runs: 14, lastStatus: 'queued (task-8841)' },
+        { id: 'security-patrol', name: 'Outbound Discretion & Budget Audit', bot: '@guardian', schedule: 'Every 60m (Quiet Gate aware)', runs: 42, lastStatus: 'completed (0 violations)' },
+        { id: 'memory-upkeep', name: 'SQLite FTS5 Fact Deduplication & Dream', bot: '@researcher', schedule: 'Daily 03:00 UTC', runs: 9, lastStatus: 'completed (12 facts merged)' }
+      ],
+      spaceHtml: `<div style="font-family:sans-serif;padding:16px;background:#141414;color:#ececec;border-radius:10px;">
+  <h3 style="margin:0 0 8px;color:#10a37f;">Isolated Static Space (sandbox="allow-scripts")</h3>
+  <p style="margin:0 0 12px;font-size:13px;color:#a8a8a8;">Served from dedicated loopback Spaces origin with strict CSP.</p>
+  <button onclick="document.getElementById('out').textContent='Space script executed safely at ' + new Date().toLocaleTimeString()" style="padding:7px 12px;border-radius:6px;border:none;background:#10a37f;color:#fff;cursor:pointer;font-weight:600;">Run Space Action</button>
+  <div id="out" style="margin-top:10px;font-family:monospace;font-size:12px;color:#2d9cdb;">Ready.</div>
+</div>`
+    };
+
+    function renderOsDownloads() {
+      const panel = document.getElementById('os-download-panel');
+      const data = OS_DOWNLOADS[state.os];
+      document.querySelectorAll('.os-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.os === state.os);
+      });
+      panel.innerHTML = data.assets.map(a => `
+        <div class="dl-asset-row">
+          <div>
+            <div class="dl-asset-name mono">${a.name}</div>
+            <div class="dl-asset-sub">${a.sub}</div>
+          </div>
+          <a class="dl-btn" href="${a.url}">Download</a>
+        </div>
+      `).join('') + `
+        <div class="cmd-box mono">
+          <code id="install-cmd-text">${data.cmd}</code>
+          <button type="button" class="nav-btn outline" style="padding:4px 9px;font-size:11px;" onclick="navigator.clipboard && navigator.clipboard.writeText(document.getElementById('install-cmd-text').textContent); this.textContent='Copied!'; setTimeout(()=>this.textContent='Copy', 1200);">Copy</button>
+        </div>
+      `;
+    }
+
+    function renderSidebar() {
+      const container = document.getElementById('sidebar-targets');
+      const dms = TARGETS.filter(t => t.kind === 'dm');
+      const channels = TARGETS.filter(t => t.kind === 'channel');
+      const renderItem = (t) => `
+        <button type="button" class="dt-nav-item ${state.activeTarget === t.id ? 'active' : ''}" onclick="selectTarget('${t.id}')">
+          <span class="dt-avatar" data-shape="${t.shape}">
+            <span class="dt-eyes"><span></span><span></span></span>
+            <span class="dt-presence-dot"></span>
+          </span>
+          <span class="dt-item-meta" style="min-width:0;flex:1;">
+            <div style="font-weight:700;font-size:14px;display:flex;justify-content:space-between;">
+              <span>${t.label}</span>
+              ${state.drafts[t.id] ? '<span style="font-size:10px;color:var(--status-warn);">Draft</span>' : ''}
+            </div>
+            <div style="font-size:11px;color:var(--text-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${t.phrase}</div>
+          </span>
+        </button>
+      `;
+      container.innerHTML = `
+        <div class="dt-group-title">Coworkers (4)</div>
+        ${dms.map(renderItem).join('')}
+        <div class="dt-group-title" style="margin-top:10px;">Channels</div>
+        ${channels.map(renderItem).join('')}
+      `;
+    }
+
+    window.selectTarget = function(targetId) {
+      const input = document.getElementById('demo-composer-input');
+      state.drafts[state.activeTarget] = input.value;
+      state.activeTarget = targetId;
+      state.activeView = 'chat';
+      input.value = state.drafts[targetId] || '';
+      const meta = TARGETS.find(t => t.id === targetId);
+      document.getElementById('active-target-title').textContent = `${meta.label} · ${meta.role}`;
+      document.getElementById('active-target-sub').textContent = `${meta.phrase} · Isolated draft key: ${meta.id}`;
+      input.placeholder = `Message ${meta.label}… (try typing 'plan -> execute')`;
+      renderSidebar();
+      renderViewTabs();
+      renderCanvas();
+    };
+
+    function renderViewTabs() {
+      document.querySelectorAll('#workspace-view-tabs .dt-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.view === state.activeView);
+      });
+    }
+
+    window.resolveApproval = function(id, decision) {
+      const item = state.approvals.find(a => a.id === id);
+      if (item) item.status = decision;
+      renderCanvas();
+    };
+
+    window.triggerDemoRoutine = function(id) {
+      const r = state.routines.find(x => x.id === id);
+      if (r) {
+        r.runs += 1;
+        r.lastStatus = `queued now (delivery-${Math.floor(1000 + Math.random() * 9000)})`;
+      }
+      renderCanvas();
+    };
+
+    function renderCanvas() {
+      const canvas = document.getElementById('workspace-canvas');
+      const meta = TARGETS.find(t => t.id === state.activeTarget);
+      if (state.activeView === 'chat') {
+        const msgs = state.messages[state.activeTarget] || [];
+        const pendingApprovals = state.approvals.map(a => `
+          <div class="dt-approval-card">
+            <div>
+              <strong style="font-size:13px;color:var(--status-warn);">${a.title}</strong>
+              <div style="font-size:12px;color:var(--text-secondary);">${a.detail}</div>
+            </div>
+            <div>
+              ${a.status === 'pending' ? `
+                <button type="button" class="dl-btn" style="margin-right:6px;" onclick="resolveApproval('${a.id}','approved')">Approve</button>
+                <button type="button" class="nav-btn outline" onclick="resolveApproval('${a.id}','denied')">Deny</button>
+              ` : `<span class="badge-ok mono">Status: ${a.status.toUpperCase()}</span>`}
+            </div>
+          </div>
+        `).join('');
+
+        const chips = (meta.prompts || []).map(p => `
+          <button type="button" class="dt-chip" onclick="document.getElementById('demo-composer-input').value='${p.replace(/->/g, '→')}'; document.getElementById('demo-composer-input').focus();">${p}</button>
+        `).join('');
+
+        canvas.innerHTML = `
+          ${pendingApprovals}
+          ${msgs.map(m => `
+            <div class="dt-msg ${m.role === 'user' ? 'user' : ''}">
+              <div class="dt-msg-head">
+                <strong>${m.author}</strong>
+                <span class="mono">${m.time}</span>
+              </div>
+              <div style="font-size:14px;">${m.text}</div>
+            </div>
+          `).join('')}
+          <div class="dt-chips">${chips}</div>
+        `;
+      } else if (state.activeView === 'routines') {
+        canvas.innerHTML = state.routines.map(r => `
+          <div class="dt-msg" style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;max-width:100%;">
+            <div>
+              <strong>${r.name}</strong> <span class="version-tag mono">${r.bot}</span>
+              <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">${r.schedule} · Runs: <strong>${r.runs}</strong> · Last: <code class="mono">${r.lastStatus}</code></div>
+            </div>
+            <button type="button" class="dl-btn" onclick="triggerDemoRoutine('${r.id}')">Trigger Now</button>
+          </div>
+        `).join('');
+      } else if (state.activeView === 'spaces') {
+        canvas.innerHTML = `
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;height:100%;min-height:360px;">
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              <strong style="font-size:13px;">Static Space HTML Source (<code>~/spaces/release-dashboard/index.html</code>)</strong>
+              <textarea id="space-editor" style="flex:1;width:100%;border-radius:10px;border:1px solid var(--border-subtle);background:var(--bg-surface);color:var(--text-primary);padding:10px;font-family:'IBM Plex Mono',monospace;font-size:12px;">${state.spaceHtml.replace(/</g, '&lt;')}</textarea>
+              <button type="button" class="dl-btn" style="align-self:flex-start;" onclick="state.spaceHtml = document.getElementById('space-editor').value; renderCanvas();">Update Sandbox Preview</button>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:8px;">
+              <strong style="font-size:13px;">Isolated Loopback Preview (<code>sandbox="allow-scripts"</code>)</strong>
+              <iframe sandbox="allow-scripts" style="flex:1;width:100%;border-radius:10px;border:1px solid var(--border-strong);background:#141414;" srcdoc="${state.spaceHtml.replace(/"/g, '&quot;')}"></iframe>
+            </div>
+          </div>
+        `;
+      } else if (state.activeView === 'providers') {
+        canvas.innerHTML = `
+          <div class="dt-msg" style="max-width:100%;">
+            <strong>5-Tier Provider Precedence: Routine → Bot → Workspace → Account → Legacy</strong>
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:12px;">
+              <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">1. Credentials</div><div style="font-size:13px;font-weight:700;">Keychain / OAuth Saved</div></div>
+              <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">2. Discovery</div><div style="font-size:13px;font-weight:700;">/v1/models Catalog</div></div>
+              <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">3. Verification</div><div style="font-size:13px;font-weight:700;">Budgeted Reply Pass</div></div>
+              <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">4. Egress Gate</div><div style="font-size:13px;font-weight:700;">Origin Validated</div></div>
+            </div>
+          </div>
+          <div class="dt-msg" style="max-width:100%;">
+            <strong>Configured Profiles</strong>
+            <div style="font-size:13px;color:var(--text-secondary);margin-top:6px;">
+              • <code>chatgpt-oauth</code> (PKCE S256 · <code>/v1/responses</code> streaming · separate included allowance)<br/>
+              • <code>nous-portal</code> (OAuth automatic 401 refresh &amp; retry · isolated credential namespace)<br/>
+              • <code>openrouter</code> &amp; <code>kilo-gateway</code> (Model discovery + streaming completions)<br/>
+              • <code>local-vlm</code> (Offline <code>Qwen2-VL-2B-Instruct</code> &amp; <code>SmolVLM2</code> safetensors)
+            </div>
+          </div>
+        `;
+      } else if (state.activeView === 'doctor') {
+        canvas.innerHTML = `
+          <div class="dt-msg" style="max-width:100%;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+            <div>
+              <strong>DT Doctor Installation &amp; Runtime Readiness</strong>
+              <div style="font-size:12px;color:var(--text-secondary);">Journaled check/repair/resume engine (max 2 automatic repair attempts)</div>
+            </div>
+            <span class="badge-ok mono">INSTALLATION_READINESS: READY</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;">
+            <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">[PASS] sqlite_wal_integrity</div><div style="font-size:12px;color:var(--text-secondary);">VACUUM INTO snapshot &amp; schema version verified</div></div>
+            <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">[PASS] ipc_peer_isolation</div><div style="font-size:12px;color:var(--text-secondary);">UID / Windows SID owner-only DACL SDDL active</div></div>
+            <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">[PASS] component_catalog_sha256</div><div style="font-size:12px;color:var(--text-secondary);">8 optional VLM/Voice/VM components pinned</div></div>
+            <div class="metric-box"><div class="mono" style="font-size:12px;color:var(--status-ok);">[PASS] release_budget_ledger</div><div style="font-size:12px;color:var(--text-secondary);">$72.50 exposure &le; $100.00 hard release cap</div></div>
+          </div>
+        `;
+      }
+    }
+
+    // Smart arrow composer (`->` to `→` with single Backspace undo)
+    const composerInput = document.getElementById('demo-composer-input');
+    composerInput.addEventListener('input', (e) => {
+      const val = composerInput.value;
+      const idx = val.indexOf('->');
+      if (idx !== -1) {
+        composerInput.value = val.slice(0, idx) + '→' + val.slice(idx + 2);
+        state.lastArrowPos = idx;
+      } else {
+        state.lastArrowPos = null;
+      }
+      state.drafts[state.activeTarget] = composerInput.value;
+    });
+    composerInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Backspace' && state.lastArrowPos !== null) {
+        const val = composerInput.value;
+        if (val[state.lastArrowPos] === '→') {
+          e.preventDefault();
+          composerInput.value = val.slice(0, state.lastArrowPos) + '->' + val.slice(state.lastArrowPos + 1);
+          state.lastArrowPos = null;
+        }
+      }
+    });
+
+    document.getElementById('demo-composer-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = composerInput.value.trim();
+      if (!text) return;
+      if (!state.messages[state.activeTarget]) state.messages[state.activeTarget] = [];
+      state.messages[state.activeTarget].push({ author: 'You', role: 'user', time: 'Just now', text });
+      const meta = TARGETS.find(t => t.id === state.activeTarget);
+      state.messages[state.activeTarget].push({
+        author: meta.label,
+        role: 'bot',
+        time: 'Just now',
+        text: `Acknowledged in ${meta.label}: "${text}". Queued in crash-safe SQLite WAL task queue with 0 safety violations.`
+      });
+      composerInput.value = '';
+      state.drafts[state.activeTarget] = '';
+      state.activeView = 'chat';
+      renderSidebar();
+      renderViewTabs();
+      renderCanvas();
+    });
+
+    document.querySelectorAll('.os-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.os = btn.dataset.os;
+        renderOsDownloads();
+      });
+    });
+
+    document.querySelectorAll('#workspace-view-tabs .dt-tab').forEach(btn => {
+      btn.addEventListener('click', () => {
+        state.activeView = btn.dataset.view;
+        renderViewTabs();
+        renderCanvas();
+      });
+    });
+
+    document.getElementById('collapse-sidebar-btn').addEventListener('click', () => {
+      document.getElementById('demo-sidebar').classList.toggle('collapsed');
+    });
+
+    document.getElementById('trigger-approval-btn').addEventListener('click', () => {
+      state.approvals[0].status = 'pending';
+      state.activeView = 'chat';
+      renderViewTabs();
+      renderCanvas();
+    });
+
+    document.getElementById('theme-toggle-btn').addEventListener('click', () => {
+      const html = document.documentElement;
+      html.dataset.theme = html.dataset.theme === 'dark' ? 'light' : 'dark';
+    });
+
+    // Command Palette (⌘K / Ctrl+K)
+    const paletteBackdrop = document.getElementById('palette-backdrop');
+    const paletteInput = document.getElementById('palette-input');
+    const paletteList = document.getElementById('palette-list');
+
+    const PALETTE_ACTIONS = [
+      ...TARGETS.map(t => ({ label: `Switch conversation to ${t.label} (${t.role})`, tag: 'Conversation', run: () => selectTarget(t.id) })),
+      { label: 'Open Routines & Trigger Schedule', tag: 'View', run: () => { state.activeView = 'routines'; renderViewTabs(); renderCanvas(); } },
+      { label: 'Open Split-View Static Space Sandbox', tag: 'View', run: () => { state.activeView = 'spaces'; renderViewTabs(); renderCanvas(); } },
+      { label: 'Open 5-Tier Provider Connection Pipeline', tag: 'View', run: () => { state.activeView = 'providers'; renderViewTabs(); renderCanvas(); } },
+      { label: 'Run DT Doctor Readiness Check', tag: 'Diagnostics', run: () => { state.activeView = 'doctor'; renderViewTabs(); renderCanvas(); } },
+      { label: 'Download Ubuntu 24.04 Debian Package (dt_1.0.3_amd64.deb)', tag: 'Binary', run: () => { state.os = 'linux'; renderOsDownloads(); location.hash = '#downloads'; } },
+      { label: 'Download macOS Apple Silicon & Intel DMG', tag: 'Binary', run: () => { state.os = 'macos'; renderOsDownloads(); location.hash = '#downloads'; } },
+      { label: 'Download Windows 11 x64 & ARM64 Setup.exe', tag: 'Binary', run: () => { state.os = 'windows'; renderOsDownloads(); location.hash = '#downloads'; } },
+      { label: 'Toggle Dark / Light Rakazo Theme', tag: 'Theme', run: () => document.getElementById('theme-toggle-btn').click() }
+    ];
+
+    function renderPalette(query = '') {
+      const q = query.trim().toLowerCase();
+      const matches = PALETTE_ACTIONS.filter(a => !q || a.label.toLowerCase().includes(q) || a.tag.toLowerCase().includes(q));
+      paletteList.innerHTML = matches.map((a, idx) => `
+        <button type="button" class="palette-item" data-idx="${idx}">
+          <span>${a.label}</span>
+          <span class="version-tag mono">${a.tag}</span>
+        </button>
+      `).join('');
+      paletteList.querySelectorAll('.palette-item').forEach((btn, idx) => {
+        btn.addEventListener('click', () => {
+          matches[idx].run();
+          closePalette();
+        });
+      });
+    }
+
+    function openPalette() {
+      paletteBackdrop.classList.add('open');
+      paletteInput.value = '';
+      renderPalette('');
+      setTimeout(() => paletteInput.focus(), 20);
+    }
+    function closePalette() {
+      paletteBackdrop.classList.remove('open');
+    }
+
+    document.getElementById('open-palette-btn').addEventListener('click', openPalette);
+    paletteBackdrop.addEventListener('click', (e) => {
+      if (e.target === paletteBackdrop) closePalette();
+    });
+    paletteInput.addEventListener('input', () => renderPalette(paletteInput.value));
+    window.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        if (paletteBackdrop.classList.contains('open')) closePalette();
+        else openPalette();
+      } else if (e.key === 'Escape' && paletteBackdrop.classList.contains('open')) {
+        closePalette();
+      }
+    });
+
+    // Initial render
+    renderOsDownloads();
+    renderSidebar();
+    renderCanvas();
+  </script>
+</body>
+</html>

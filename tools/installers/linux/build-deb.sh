@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 VERSION="${1:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB}"
 BIN_DIR="${2:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB}"
@@ -17,6 +18,7 @@ mkdir -p "$PKG_ROOT/DEBIAN" \
          "$PKG_ROOT/usr/share/applications" \
          "$PKG_ROOT/usr/share/doc/dt" \
          "$PKG_ROOT/usr/lib/systemd/user"
+find "$PKG_ROOT" -type d -exec chmod 0755 {} +
 
 for bin in dt gm dt-doctor gm-daemon gm-cu-helper gm-ui; do
   if [[ ! -f "$BIN_DIR/$bin" ]]; then

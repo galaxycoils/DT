@@ -168,4 +168,25 @@ mod tests {
         assert!(review_patch(&repository, &patch, Some(&gm_core::compute_sha256(escape))).is_err());
         assert!(!root.path().join("outside").exists());
     }
+
+    #[test]
+    fn test_cli_broker_egress_policy_and_patch_digest() {
+        let policy = gm_llm::CliEgressPolicy::for_provider(gm_llm::CliProvider::Claude, 3, 32_768);
+        assert!(policy.is_host_allowed("api.anthropic.com"));
+        assert!(!policy.is_host_allowed("metadata.google.internal"));
+        let broker = gm_llm::CliEgressBroker::new(policy, "sk-ant-host-secret");
+        let env = broker.isolated_guest_env("http://127.0.0.1:42000");
+        assert!(!env.values().any(|v| v.contains("sk-ant-host-secret")));
+        assert!(
+            broker
+                .authorize_forward("api.anthropic.com", &broker.job_token)
+                .is_ok()
+        );
+        assert!(
+            broker
+                .authorize_forward("unapproved.host", &broker.job_token)
+                .is_err()
+        );
+        requires_exact_approval_and_rejects_conflicts_and_escapes();
+    }
 }

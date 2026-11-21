@@ -29,3 +29,6 @@ pub use linux::LinuxPlatform;
 
 #[cfg(target_os = "windows")]
 pub use windows::WindowsPlatform;
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub use pixels::encode_rgba_jpeg;

@@ -114,6 +114,36 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             PACKAGE['archive_name']('../bad', 'macos', 'aarch64')
 
+    def test_coverage_inventory_test_ids_exist_in_codebase(self):
+        inventory = json.loads((ROOT / 'docs/release/coverage-inventory.json').read_text())
+        search_dirs = [ROOT / 'crates', ROOT / 'xtask', ROOT / 'tools', ROOT / 'clients']
+        corpus = []
+        for base in search_dirs:
+            for path in base.rglob('*'):
+                if 'node_modules' in path.parts or 'dist' in path.parts or '.expo' in path.parts:
+                    continue
+                if path.is_file() and path.suffix in ('.rs', '.py', '.mjs', '.cjs', '.js', '.ts', '.tsx', '.sh'):
+                    corpus.append(path.read_text(errors='ignore'))
+        full_text = '\n'.join(corpus)
+        missing = []
+        for row in inventory.get('rows', []):
+            if not row.get('required'):
+                continue
+            for test_id in row.get('test_ids', []):
+                if test_id not in full_text:
+                    missing.append((row['id'], test_id))
+        self.assertEqual(missing, [], f'Missing required coverage-inventory test_ids in codebase: {missing}')
+
+    def test_docker_and_installer_contracts(self):
+        dockerfile = (ROOT / 'deploy/docker/Dockerfile').read_text()
+        for expected in ('--bin dt', '--bin gm', '--bin gm-daemon', '--bin dt-doctor', 'libpipewire-0.3-dev', 'USER dt', '127.0.0.1:7433'):
+            self.assertIn(expected, dockerfile)
+        compose = (ROOT / 'deploy/docker/docker-compose.yml').read_text()
+        for expected in ('dt-server:', 'tls-proxy:', '"443:443"'):
+            self.assertIn(expected, compose)
+        caddy = (ROOT / 'deploy/docker/Caddyfile').read_text()
+        self.assertIn('reverse_proxy', caddy)
+
 
 if __name__ == '__main__':
     unittest.main()

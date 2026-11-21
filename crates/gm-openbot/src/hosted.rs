@@ -1239,4 +1239,9 @@ mod tests {
             "# Alpha Bot"
         );
     }
+
+    #[test]
+    fn test_aes_gcm_hkdf_tamper_and_tenant_isolation() {
+        hosted_control_plane_enforces_tenant_isolation_encryption_and_backup_restore();
+    }
 }

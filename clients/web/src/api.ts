@@ -106,10 +106,22 @@ export class DtV1Client {
     return this.request<Record<string, unknown>>("/bootstrap");
   }
 
+  getDirectMessages(botId: string) {
+    return this.request<Record<string, unknown> | Array<Record<string, unknown>>>(
+      `/dm/${encodeURIComponent(botId)}/messages`,
+    );
+  }
+
   postDirectMessage(botId: string, content: string) {
     return this.request<Record<string, unknown>>(
       `/dm/${encodeURIComponent(botId)}/messages`,
       { method: "POST", body: JSON.stringify({ content }) },
+    );
+  }
+
+  getChannelMessages(channelId: string) {
+    return this.request<Array<Record<string, unknown>>>(
+      `/channels/${encodeURIComponent(channelId)}/messages`,
     );
   }
 
@@ -127,12 +139,34 @@ export class DtV1Client {
     );
   }
 
+  listRoutines() {
+    return this.request<Array<Record<string, unknown>>>("/routines");
+  }
+
+  triggerRoutine(routineId: string, deliveryId: string) {
+    return this.request<Record<string, unknown>>(
+      `/routines/${encodeURIComponent(routineId)}/trigger`,
+      { method: "POST", body: JSON.stringify({ delivery_id: deliveryId }) },
+    );
+  }
+
   getProviders() {
     return this.request<Record<string, unknown>>("/system/providers");
   }
 
   listSpaces() {
     return this.request<unknown[]>("/spaces");
+  }
+
+  createSpace(slug: string, title: string, html?: string) {
+    return this.request<Record<string, unknown>>("/spaces", {
+      method: "POST",
+      body: JSON.stringify({ slug, title, kind: "static", html }),
+    });
+  }
+
+  getSpaceUrl(slug: string) {
+    return this.request<{ url: string }>(`/spaces/${encodeURIComponent(slug)}/url`);
   }
 
   probeIntegration(id: string) {
@@ -152,6 +186,24 @@ export class DtV1Client {
   eventsUrl(afterSeq?: number): string {
     return `${this.baseUrl}${workspaceEventsPath(this.workspaceId, afterSeq)}`;
   }
+}
+
+/**
+ * Smart composer transform: converts `->` outside backtick code spans to `→`,
+ * and restores `->` when a single Backspace removes a recién-converted `→`.
+ */
+export function applySmartArrowEdit(previous: string, current: string): string {
+  if (
+    previous.endsWith("→") &&
+    current.length === previous.length - 1 &&
+    previous.slice(0, -1) === current
+  ) {
+    return `${current}->`;
+  }
+  const parts = current.split(/(`+[^`]*`+)/g);
+  return parts
+    .map((part) => (part.startsWith("`") ? part : part.replace(/->/g, "→")))
+    .join("");
 }
 
 export { DtV1Client as MuseV1Client };

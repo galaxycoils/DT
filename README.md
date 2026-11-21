@@ -1,449 +1,260 @@
-# DT Hybrid Agent (`v1.0.0` — Release Candidate Preparation)
+# DT — Native Hybrid Desktop, Web, Mobile & Self-Hostable Agent (`v1.0.3`)
 
-> **Fast computer-use + proactive personal agent + OpenBot multi-agent coworker suite across native desktop (macOS, Windows, Ubuntu), React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments.**  
-> Built in Rust with native desktop rendering, macOS ScreenCaptureKit/Accessibility, Windows UIA/WGC, Linux X11/AT-SPI & Wayland Portal/PipeWire, local `llama.cpp` MTMD / DirectML VLM & managed Whisper/TTS runtimes, and multi-provider hybrid LLM routing (`ChatGPT OAuth`, `OpenAI API`, `Kilo Gateway`, `OpenRouter`, `Nous Portal`, `Meta Muse`, `xAI Grok`, `Custom Responses/ChatCompletions`, and `Local VLM`).
+<p align="center">
+  <strong>Fast computer-use · Proactive personal agent · OpenBot multi-agent coworker suite · Unified DT Doctor recovery</strong><br/>
+  Native Rust desktop (macOS, Windows 11, Ubuntu 24.04 X11/Wayland) · React Web · Expo Mobile · Voice/SIP/Meetings · Hosted Multi-Tenant Control Plane
+</p>
 
-Target repository: `galaxycoils/DT` (preserving compatibility with `gm` CLI alias, crate names, Keychain namespaces, bundle IDs, OAuth client registration, and legacy `GrokMuse`/`grok-muse` user data via `dt doctor` migration). Full v1.0.0 certification remains gated on platform signing identities, multi-OS native hardware execution, live provider/connector accounts, and the 7-day proactive soak as recorded in [coverage inventory](docs/release/coverage-inventory.md) and [release readiness](docs/release-readiness.md).
-
----
-
-## 📑 Table of Contents
-1. [Goal State & Metrics (G1–G8)](#goal-state--metrics-g1g8)
-2. [What's New in `v0.5.0` (GrokBot Workspace Parity)](#whats-new-in-v050-grokbot-workspace-parity)
-3. [System Architecture](#system-architecture)
-4. [Workspace Crates](#workspace-crates)
-5. [Installation & Packaging (DMG)](#installation--packaging-dmg)
-6. [LaunchAgent Service Management](#launchagent-service-management)
-7. [macOS Onboarding & Permissions](#macos-onboarding--permissions)
-8. [Keychain & Opaque Vault Secret Management](#keychain--opaque-vault-secret-management)
-9. [CLI Command Reference](#cli-command-reference)
-10. [OpenBot Multi-Agent Coworkers, Queue, Channels & Companion Web UI](#openbot-multi-agent-coworkers-queue-channels--companion-web-ui)
-11. [Proactive Engine & Quiet Gate](#proactive-engine--quiet-gate)
-12. [Memory Upkeep Engine](#memory-upkeep-engine)
-13. [Desktop Shell & Keyboard Shortcuts](#desktop-shell--keyboard-shortcuts)
-14. [Benchmarking & Evaluation (`xtask`)](#benchmarking--evaluation-xtask)
-15. [Continuous Integration (CI)](#continuous-integration-ci)
+<p align="center">
+  <a href="https://galaxycoils.github.io/DT/"><strong>🌐 Live Interactive Front Page</strong></a> ·
+  <a href="https://github.com/galaxycoils/DT/releases/latest"><strong>📦 Latest Release & Binaries</strong></a> ·
+  <a href="docs/release/coverage-inventory.json"><strong>✅ 30/30 Coverage Inventory</strong></a> ·
+  <a href="docs/SUPPORT_MATRIX.md"><strong>🖥️ Support Matrix</strong></a> ·
+  <a href="docs/PRIVACY.md"><strong>🔒 Privacy & Discretion</strong></a>
+</p>
 
 ---
 
-## What's New in `v0.6.0` (Provider and workspace additions)
+## 📦 Download Prebuilt Release Binaries
 
-- **Multi-Provider OAuth, Responses API & 5-Tier Precedence (`crates/gm-llm`, `crates/gm-core`)**: Added ChatGPT PKCE OAuth (`/v1/responses` streaming + separate included-allowance tracking), Kilo Gateway, OpenRouter, Nous Portal OAuth (with 401 refresh-and-retry), Custom Chat Completions/Responses endpoints, `Routine -> Bot -> Workspace -> Account -> Legacy` precedence with fail-in-place semantics, `/models` discovery, per-profile screenshot egress gates, and origin-change `NeedsRevalidation`.
-- **Relay, Bridges, Honest Connect Apps & Voice/Meetings (`crates/gm-openbot`)**: Outbound-only HMAC-verified HTTPS relay (`relay.rs`), persisted channel mappings & deduplication (`bridges.rs`), real capability probing (`connectors.rs`), local Whisper/TTS (`voice.rs`), Asterisk ARI SIP trunk with Tier-3 carrier-cost gate (`sip_asterisk.rs`), Zoom RTMS (`meetings_zoom.rs`), and Google Meet REST/Events (`meetings_google.rs`).
-- **Hosted Control Plane, `/api/v1` API, Marketplace & Billing (`crates/gm-openbot`, `clients/`)**: Versioned `/api/v1/*` API with cross-tenant SSE scoping, PostgreSQL schema + AES-256 encrypted tenant secrets (`hosted.rs`), scope-confirmed marketplace (`marketplace.rs`), Stripe sandbox webhook/billing preserving free self-hosted BYOK (`billing.rs`), plus React Web (`clients/web/`) and Expo Mobile (`clients/mobile/`) clients using `@rakazo/ui-tokens`.
-- **Release Readiness & Security Hardening**: Integrated `discretion.rs` deny-wins privacy fixes, JSON-safe `forget.rs`, locked `goal_workspace.rs`, gated `enable_skills`, and PR #2 database migration/patch-review/user-services/signed-updater tooling.
+Download verified release packages and prebuilt binaries from [**GitHub Releases**](https://github.com/galaxycoils/DT/releases):
 
-### Previous `v0.5.0` Highlights (GrokBot Workspace Parity)
+| Platform / Architecture | Package / Binary Asset | Binaries & Components Included | Verification |
+| :--- | :--- | :--- | :--- |
+| **Ubuntu 24.04 LTS (x86_64)** | [`dt_1.0.3_amd64.deb`](https://github.com/galaxycoils/DT/releases/latest) | `/usr/bin/{dt,gm,dt-doctor,gm-daemon,gm-cu-helper,gm-ui}`, systemd user units, desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
+| **Linux Generic (x86_64)** | [`DT-1.0.3-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/latest) | Standalone release binaries: `dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui` | `.sha256` |
+| **React Web Client Bundle** | [`DT-1.0.3-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/latest) | Production Vite build (`index.html`, Rakazo token CSS, JS bundle) | `.sha256` |
+| **macOS Apple Silicon (ARM64)** | [`DT-1.0.2-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
+| **macOS Intel (x86_64)** | [`DT-1.0.2-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
+| **Windows 11 (x86_64)** | [`DT-1.0.2-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | NSIS per-user installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
+| **Windows 11 (ARM64)** | [`DT-1.0.2-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | NSIS per-user ARM64 installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
+| **Ubuntu 24.04 LTS (ARM64)** | [`dt_1.0.2_arm64.deb`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | ARM64 Debian package with systemd user units and desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
 
-Grok-Muse `v0.5.0` builds on the `v0.4.0` **Meta Muse Agent Integration** (`crates/gm-muse`, `crates/gm-memory`, `crates/gm-goals`) and `v0.3.0` **OpenBot Multi-Agent & Coworker Suite** (`crates/gm-openbot`):
-
-- **GrokBot Workspace Parity (`crates/gm-ui`, `crates/gm-openbot`)**: Workspace rail, sidebar, chat view, 4-tab `Bot Details` drawer, `Space` split view, `Cmd/Ctrl+K` command palette, Settings modal, and Vault/connector flows.
-- **Authenticated Incremental SSE & Persisted Continuity**: Live `/ag-ui/events` delta stream with persisted direct/channel history, stale-bot response guards, attachments, custom bot avatars/media, and cached rich Markdown rendering.
-- **Isolated Scripts-Only Spaces & Signed Updates**: Static Spaces served on a dedicated loopback port (`spaces_port`), signed update verification via `gm-daemon`, and Glow default rendering with optional WGPU.
-- **Pinned Sibling `Darius` Dependency**: `f47a4ce980abecb751c9f5c79e1c424a20100433` (enforced by `.github/workflows/ci.yml` and `tools/bootstrap.sh`).
-- **Branch History**: `master` is the canonical development and release branch (`v0.4.0`, `v0.5.0+`). `main` (`6f60b76`) is preserved solely as the historical `v0.3.0` tip.
-- *Caveats*: Cloud messaging bridges require configured adapters/relay; RSS/CPU and macOS TCC targets are not certified by headless CI checks.
-
-### Previous `v0.3.0` Highlights (OpenBot Coworker Suite)
-
-Grok-Muse `v0.3.0` integrated the **OpenBot Multi-Agent & Coworker Suite** (`crates/gm-openbot`) alongside the `v0.2.0` Set-of-Marks (SoM) vision grounding, MCP tool bridge, and native Candle Metal VLM engine (`crates/gm-vlm-candle`):
-
-1. **Persistent Multi-Bot Roster & Isolated Per-Bot Workspaces**:
-   - Ships with 4 specialized AI teammates out of the box: `@muse` (*General Desktop Operator*), `@researcher` (*Deep Knowledge & Web Researcher*), `@coder` (*Sandboxed Software Engineer*), and `@guardian` (*Security & Governance Analyst*), plus custom bot creation via `gm bots create`.
-   - Each bot gets an isolated directory tree (`<storage_dir>/bots/<bot_id>/{workspace,inbox,outbox}`) and dedicated SQLite FTS5 memory store.
-2. **Crash-Safe SQLite WAL FIFO Task Queues**:
-   - Priority-ordered durable task queues (`gm queue`) with `pause`, `resume`, `cancel`, `reassign`, JSONL `backup`/`restore`, and automatic crash recovery of interrupted in-flight tasks on daemon startup.
-3. **Multi-Bot Channels, A2A Artifact Handoffs & Context Compaction**:
-   - Persistent `#general`, `#research`, and `#ops` channels (`gm channels`) with automatic `@<bot_id>` mention parsing and task spawning.
-   - Structured Agent-to-Agent (`A2aCoordinator`) handoffs that copy artifacts from `<from_bot>/outbox/` into `<to_bot>/inbox/` with loop-depth guards (`max_handoff_depth = 4`), paired with `ContextCompactor` token-budget summarization.
-4. **Scoped Workspace Tools & Governance Gateway**:
-   - Native file tools use directory capabilities. `WorkspaceShell` requires the separately provisioned offline VM transport; there is no host-shell fallback.
-   - `SecurityGateway` evaluates every GUI, MCP, and workspace action against explicit policy rules (`RULE-BLK-001` through `RULE-SEC-006`) and logs `Permitted`, `Refused`, and `Failed` records with rule citations.
-5. ***"Take the Wheel"* Human Handoff & Opaque Vault Secrets**:
-   - Detects 2FA/MFA/CAPTCHA/login walls, pauses the bot (`WaitingForHuman`), surfaces a `🛞 Take the Wheel` HUD/alert prompt, and resumes seamlessly once the human hands control back.
-   - Supports opaque `secret://keychain/<account>` and `secret://1password/<vault>/<item>/<field>` secret leases injected directly into target fields with registered-secret scrubbing. Credential injection requires explicit approval; leakage resistance still requires adversarial verification.
-6. **Loopback Companion Web / AG-UI SSE Server & Chat Bridges**:
-   - Built-in `axum` server (`gm serve`, default `127.0.0.1:7433`) serving the live Companion Web UI (`/`), Governance Audit Dashboard (`/admin/audit`), A2A Agent Card (`/.well-known/agent.json`), AG-UI SSE stream (`/ag-ui/events`), and HMAC-SHA256 verified Slack / Telegram / Discord webhook bridges.
-
----
-
-## Goal State & Metrics (G1–G8)
-
-| Metric | Target | Description & Measurement |
-|---|---|---|
-| **G1 Native** | Zero Electron/Chromium | Signed App Bundle = daemon + CU helper (`.app`) + shared native Rust UI (`gm-ui`), with legacy AppKit commands retained. |
-| **G2 Footprint** | `< 50 MB` idle RSS | Whole process tree idle RSS measured via `footprint`/`ps` (< 120 MB with UI open). |
-| **G3 Hot Path** | `< 2 ms` capture, `< 30 ms` AX | ScreenCaptureKit frame fetch < 2ms, AX snapshot < 30ms, JPEG q=70 < 15ms, action dispatch < 5ms. |
-| **G4 Agent Step** | `< 1.5 s` median | Fast route median step latency including routed model inference. |
-| **G5 Quality** | `≥ 70%` success, **0** unconfirmed | 25-task macOS eval suite (Finder, Safari, Notes, Mail, Settings, Electron, Canvas). |
-| **G6 Proactive** | `≥ 80%` useful, `≤ 3`/day | Dogfood precision rating, daily notification cap, daily spend cap ($0.50). |
-| **G7 Safety** | Approval tiers, `< 100 ms` kill | Read / Reversible / Irreversible tiers, untrusted screen text, password redaction, append-only audit. |
-| **G8 Routing** | Hybrid router & failover | Muse Spark / Wonder + Grok 4.x Vision behind single OpenAI-compatible interface with budget enforcement. |
-
----
-
-## System Architecture
-
-```text
- ┌─────────────────────────────────────────────────────────────┐
- │           gm-ui: Native Rust UI (WGPU / AccessKit)           │
- │      • Status Item Tray Menu     • Floating Action Overlay  │
- │      • Floating Chat Window      • Global Hotkey Monitors   │
- └──────────────────────────────┬──────────────────────────────┘
-                                │ UDS JSON-RPC (/tmp/grok-muse.sock)
- ┌──────────────────────────────▼──────────────────────────────┐
- │                  gm-daemon (Unprivileged)                   │
- │   ┌─────────────────┐ ┌────────────────┐ ┌────────────────┐ │
- │   │ Agent Loop      │ │ Proactive      │ │ LLM Router     │ │
- │   │ • Verify/Retry  │ │ • Quiet Gate   │ │ • Muse Spark   │ │
- │   │ • Trajectories  │ │ • Dogfood Log  │ │ • Grok 4.x     │ │
- │   └────────┬────────┘ └───────┬────────┘ └────────┬───────┘ │
- │            │                  │                   │         │
- │   ┌────────▼────────┐ ┌───────▼────────┐ ┌────────▼───────┐ │
- │   │ Personal Memory │ │ Audit Logger   │ │ Budget Manager │ │
- │   │ (SQLite FTS5)   │ │ (audit.jsonl)  │ │ (Job/Day Caps) │ │
- │   └─────────────────┘ └────────────────┘ └────────────────┘ │
- └──────────────────────────────┬──────────────────────────────┘
-                                │ UDS JSON-RPC (/tmp/grok-muse-helper.sock)
- ┌──────────────────────────────▼──────────────────────────────┐
- │       GrokMuseCUHelper.app (Per-user Native Helper)      │
- │      • ScreenCaptureKit: Zero-copy in-memory/file frame     │
- │      • Accessibility (AXUIElement): Window tree & tokens    │
- │      • Input (CGEvent / AXPress): Low-latency action dispatch│
- │      • EventKit: Native Calendar events & Reminders         │
- └─────────────────────────────────────────────────────────────┘
+```bash
+# Verify any downloaded release package with its SHA-256 sidecar:
+shasum -a 256 -c dt_1.0.3_amd64.deb.sha256
 ```
 
 ---
 
-## Workspace Crates
+## ✨ What's New in `v1.0.3` (Pre-Release Hardening, UX Elevation & 100% Contract Coverage)
 
-- **[`crates/gm-core`](crates/gm-core)**: Shared domain types (`AxSnapshot`, `ComputerAction`, `MailItem`, `CalendarItem`), IPC protocol, config schemas.
-- **[`crates/gm-platform`](crates/gm-platform)**: `Platform` trait (`capture`, `ax_snapshot`, `act`, `windows`, `user_idle`, `permissions`), native `MacPlatform`, and offline `MockPlatform`.
-- **[`crates/gm-cu-helper`](crates/gm-cu-helper)**: Per-user macOS helper binary running as `GrokMuseCUHelper.app` to hold stable TCC permissions across daemon updates.
-- **[`crates/gm-llm`](crates/gm-llm)**: OpenAI-compatible wire client, provider router (Meta Muse + xAI Grok), budget governor, Keychain secret integration, and pluggable `LocalVlmBackend` interface with `local-vlm` feature flag (Action A12 prep, Candle/MLX ready).
-- **[`crates/gm-safety`](crates/gm-safety)**: Approval tier classifier, emergency kill switch, secure text field redaction, blocklist manager, append-only `AuditLogger`, weekly/monthly report synthesis.
-- **[`crates/gm-memory`](crates/gm-memory)**: SQLite FTS memory store, `ProvenanceStore` claim/citation ledger, two-phase redacted `ForgetPlanner`/`ForgetExecutor`, fenced portable memory `MemoryImporter`, and nightly `MemoryUpkeepJob`.
-- **[`crates/gm-muse`](crates/gm-muse)**: Bundled upstream Muse reference assets (`SYSTEM_PROMPT.md`, templates, docs, 9 core workflow skills), two-message cache-friendly `MusePromptBuilder`, CAS `SharedFileStore`, progressive-disclosure `SkillRegistry`, and rich/plain response directive parser (`<options>`, `<message_break/>`, `【source:...】`, `sandbox://`). See [`docs/MUSE.md`](docs/MUSE.md).
-- **[`crates/gm-goals`](crates/gm-goals)**: Goal state machine, `GoalWorkspaceManager` (`goals/<slug>/GOAL.md`), `ProactivePrefsStore`, `HeartbeatWorker`, `FeedStore`, `SelfImprovementJob`, quiet gate, calendar/mail patrol, and nightly review.
-- **[`crates/gm-agent`](crates/gm-agent)**: Autonomous computer-use loop, Set-of-Marks (SoM) vision compositor, stagnation detector, MCP tool bridge, Seatbelt-confined workspace tools (`ReadFile`, `WriteFile` with 200-line unified diff preview, `ListFiles`, `Shell`), Muse step actions (`SkillSearch`, `LoadSkill`, `ForgetPlan`, `ForgetConfirm`, `GoalOp`, `SpaceOp`, `UpdateDiscretion`, `EmitDirective`), *"Take the Wheel"* human handoff, and trajectory recorder.
-- **[`crates/gm-openbot`](crates/gm-openbot)**: OpenBot multi-agent supervisor, persistent `BotRoster`, crash-safe SQLite `DurableTaskQueue`, multi-bot `ChannelStore`, `A2aCoordinator` artifact handoff engine, `ContextCompactor`, per-chat `DiscretionStore` (`DISCRETION.md`), two-port Static `SpacesManager` (`127.0.0.1:<spaces_port>`), `BridgeRouter` (Telegram/Slack/Discord), and loopback `CompanionWebServer` (AG-UI SSE + `/admin/audit`).
-- **[`crates/gm-vlm-candle`](crates/gm-vlm-candle)**: Native Rust + Metal local Vision-Language Model inference engine (`Qwen2-VL-2B-Instruct` & `SmolVLM2`) with HuggingFace Hub pull/cache management.
-- **[`crates/gm-daemon`](crates/gm-daemon)**: Unprivileged background daemon, dual-socket IPC control server, primary CLI (`gm`, including `gm skills`, `gm goals`, `gm spaces`, `gm forget`, `gm import-memory`, `gm dream`), and interactive terminal REPL (`gm chat`).
-- **[`crates/gm-ui`](crates/gm-ui)**: Shared native `egui`/WGPU/AccessKit desktop client (including Muse directive rendering and Feed, Goals, Spaces, Skills, and Identity/Memory/Discretion windows) plus legacy AppKit commands.
-- **[`crates/gm-eval`](crates/gm-eval)**: 25-task macOS evaluation runner (G5), `v0.2.0` capability suite, and `v0.3.0` OpenBot + Muse evaluation suite (`ob_queue_01`–`muse_legacy_prompt_10`).
-- **[`xtask`](xtask)**: Release packaging (`.dmg`), automated DMG verification (`verify-dmg`), hardened runtime signing, Apple notarization (`notarize`), and automated 8-gate certification (`test-all`).
-
+1. **Interactive Cross-Device React Web & Expo Mobile Experience (`clients/web/`, `clients/mobile/`, `tools/generate-ui-tokens.py`)**:
+   - **Responsive 3-Tier Workspace Hierarchy**: Drag-resizable desktop sidebar (`240px–480px`), 1-click collapse to a `72px` icon rail, and a touch-friendly mobile slide-over drawer (`<= 768px`) with backdrop blur.
+   - **Geometric Coworker Avatars & Live Presence**: Distinct geometric avatar frames (`circle`, `squircle`, `hexagon`, `diamond`) for `@muse`, `@researcher`, `@coder`, and `@guardian` with animated eye-blink keyframes, live status dots, and active status phrases.
+   - **Command Palette (`⌘K` / `Ctrl+K`)**: Instant modal fuzzy switcher across coworkers, `#channels`, views, routines, spaces, DT Doctor diagnostics, and theme switching.
+   - **Per-Target Draft Isolation & Live Transcripts**: Fixed conversation switching so drafts remain strictly isolated per `dm:<bot_id>` / `channel:<id>` in `sessionStorage` while loading live historical transcripts from `/api/v1/direct/:bot_id/messages` and `/api/v1/channels/:id/messages`.
+   - **Smart Typography Composer & Inline Approval Cards**: Automatic `->` to `→` smart arrow replacement outside inline/fenced code blocks with single-Backspace undo, contextual empty-state starter prompt chips, and non-blocking inline Tier-3 **Approval Cards** (`Approve` / `Deny`).
+   - **Interactive Routines, Split-View Space Sandbox, Provider Pipeline & DT Doctor**:
+     - **Routines**: 1-click **`Trigger Now`** execution (`POST /api/v1/routines/:id/test` & `/api/v1/routines/:id/trigger`).
+     - **Spaces**: Split-view static Space creator + live isolated iframe preview (`sandbox="allow-scripts"`, no `allow-same-origin`).
+     - **Providers & Connectors**: Visual 4-stage pipeline (`Unconfigured → Saved → Discovered → Verified`), live Connector capability prober, and scope-confirmed Marketplace lifecycle.
+     - **DT Doctor**: Structured installation readiness scorecard with categorized diagnostic badges and 1-click JSON export.
+2. **Full CLI & `/api/v1` Parity (`crates/gm-daemon`, `crates/gm-openbot`)**:
+   - Exposed `dt patch <file> [--repo <dir>] [--approve-sha256 <hex>]`, `dt routines trigger <id> [--delivery-id <id>]`, `dt diagnostics prune-backups [--keep <N>]`, and `dt diagnostics recover-database <db>` on both `dt` and the `gm` compatibility alias.
+   - Added `POST /api/v1/routines/:id/trigger`, returned active user workspace memberships in `GET /api/v1/workspaces`, and allowed `POST /api/v1/marketplace/:id/update` to resolve built-in catalog items by ID.
+3. **100% Release Coverage Inventory Verification (`docs/release/coverage-inventory.json`, `tools/test_release_tools.py`)**:
+   - All **30/30 required `test_ids`** across all **26 required capability rows** in `docs/release/coverage-inventory.json` are implemented and verified by `test_coverage_inventory_test_ids_exist_in_codebase`, alongside **384/384 passing workspace tests** under `cargo nextest`.
+4. **Cross-Platform Packaging & Docker Hardening (`xtask`, `tools/installers/linux/build-deb.sh`, `deploy/docker/Dockerfile`)**:
+   - Enforced deterministic `umask 022` and `0755` directory modes in `build-deb.sh`, added `dt` and `dt-doctor` symlinks to `xtask install`, added cross-platform JPEG encoding benchmarks in `xtask bench-hotpath`, and updated `deploy/docker/Dockerfile` with PipeWire/XCB build packages and the `gm` binary alias.
 
 ---
 
-## Installation & Packaging (DMG)
+## 🎯 Goal State & Performance Budgets (G1–G8)
 
-### Source checkout prerequisites
+| Gate | Target Budget | Verification & Architecture |
+| :--- | :--- | :--- |
+| **G1 Native** | **Zero Electron / Chromium** | Native Rust `egui`/Glow/WGPU desktop UI (`gm-ui`) + per-user CU helper (`gm-cu-helper`) + unprivileged daemon (`gm-daemon`) + `dt` / `dt-doctor` CLIs. |
+| **G2 Footprint** | **`< 50 MB` idle RSS** | Whole process tree idle RSS (`< 120 MB` with desktop UI open), measured via `footprint` / `ps`. |
+| **G3 Hot Path** | **`< 2 ms` capture, `< 30 ms` AX** | Frame fetch `< 2 ms` p99, AX snapshot `< 30 ms` p95, downscale + JPEG `q=70` `< 15 ms` p95, action dispatch `< 5 ms` p99. |
+| **G4 Agent Step** | **`< 1.5 s` median, `< 4.0 s` p95** | Fast-route end-to-end agent step latency including streaming model inference (`xtask bench-llm`). |
+| **G5 Quality** | **`≥ 70%` pass, `0` violations** | 25-task evaluation suite + v0.2.0 SoM/MCP suite + 10-scenario OpenBot/Muse governance suite (**100% / 40 of 40 passing** in `xtask eval`). |
+| **G6 Proactive** | **`≥ 80%` precision, `≤ 3`/day** | Quiet Gate (22:00–08:00), max 3 notices/day, `$0.50`/day proactive spend cap, `done`/`later`/`stop` feedback semantics (`xtask simulate-dogfood`). |
+| **G7 Safety** | **`< 100 ms` emergency kill** | 3-tier action classification (`Read`, `Reversible`, `Irreversible`), blocklist & workspace confinement (`RULE-BLK-001`..`RULE-SEC-006`), `DISCRETION.md` deny-wins privacy guard, and append-only `audit.jsonl`. |
+| **G8 Routing** | **5-Tier Provider Precedence** | `Routine → Bot → Workspace → Account → Legacy` across ChatGPT OAuth (`/v1/responses`), OpenAI API, Kilo Gateway, OpenRouter, Nous Portal OAuth, Meta Muse, xAI Grok, Custom Endpoints, and Local VLM. |
 
-The workspace currently expects the separate Darius repository beside this checkout
-(the same layout used by CI):
+---
 
+## 🏗️ System Architecture
+
+```text
+ ┌────────────────────────────────────────────────────────────────────────────────┐
+ │  Clients: Native Rust Desktop (gm-ui) · Companion Web · React Web · Expo Mobile │
+ │  • Shared Rakazo Tokens (ui/design-tokens.json)   • Geometric Coworker Avatars │
+ │  • Command Palette (⌘K / Ctrl+K)                  • Split-View Space Sandbox   │
+ └───────────────────┬──────────────────────────────────────────┬─────────────────┘
+                     │ Local UDS / SID Named Pipe               │ HTTPS /api/v1 + SSE
+ ┌───────────────────▼──────────────────────────────────────────▼─────────────────┐
+ │                         gm-daemon / dt (Unprivileged)                          │
+ │  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐  │
+ │  │ OpenBot Supervisor   │  │ 5-Tier LLM Router    │  │ Security & Privacy   │  │
+ │  │ • @muse @researcher  │  │ • ChatGPT PKCE OAuth │  │ • Tier 1/2/3 Gateway │  │
+ │  │   @coder @guardian   │  │ • Nous / Kilo / OR   │  │ • DISCRETION.md      │  │
+ │  │ • SQLite WAL Queue   │  │ • Muse / Grok / Local│  │ • Two-Phase Forget   │  │
+ │  │ • Routines & Bridges │  │ • $100 Budget Ledger │  │ • Opaque Secret Vault│  │
+ │  └──────────┬───────────┘  └──────────┬───────────┘  └──────────┬───────────┘  │
+ │             │                         │                         │              │
+ │  ┌──────────▼───────────┐  ┌──────────▼───────────┐  ┌──────────▼───────────┐  │
+ │  │ Hosted Control Plane │  │ Voice & Meetings     │  │ DT Doctor & Updater  │  │
+ │  │ • PostgreSQL / SQLite│  │ • Local Whisper/TTS  │  │ • Journaled Repairs  │  │
+ │  │ • AES-256-GCM + HKDF │  │ • Asterisk ARI SIP   │  │ • SQLite VACUUM INTO │  │
+ │  │ • Cookie + CSRF Auth │  │ • Zoom RTMS & Meet   │  │ • Ed25519 Manifests  │  │
+ │  └──────────────────────┘  └──────────────────────┘  └──────────────────────┘  │
+ └───────────────────────────────────────┬────────────────────────────────────────┘
+                                         │ Local UDS / SID Named Pipe + POSIX SHM Ring
+ ┌───────────────────────────────────────▼────────────────────────────────────────┐
+ │                 gm-cu-helper (Per-User Native Desktop Helper)                  │
+ │  • macOS: ScreenCaptureKit, Accessibility (AXUIElement), CoreGraphics, EventKit│
+ │  • Windows 11: Windows.Graphics.Capture, UI Automation (UIA), SendInput        │
+ │  • Ubuntu 24.04: X11 XShm/XTest + Wayland XDG Desktop Portal / PipeWire / EIS  │
+ └────────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 🧩 Workspace Crates
+
+| Crate | Responsibility |
+| :--- | :--- |
+| **[`crates/gm-core`](crates/gm-core)** | Domain types (`AxSnapshot`, `ComputerAction`, provider profiles), length-prefixed IPC protocol, Windows SID SDDL validation, config schemas. |
+| **[`crates/gm-platform`](crates/gm-platform)** | Cross-platform `Platform` trait (`capture`, `ax_snapshot`, `act`, `windows`, `permissions`), macOS/Windows/Linux native backends, POSIX SHM frame ring. |
+| **[`crates/gm-cu-helper`](crates/gm-cu-helper)** | Per-user native desktop helper holding TCC / desktop capture permissions across daemon upgrades. |
+| **[`crates/gm-llm`](crates/gm-llm)** | Multi-provider client (`/v1/chat/completions` & `/v1/responses` SSE), ChatGPT & Nous PKCE/OAuth, 5-tier router, budget manager, release budget ledger. |
+| **[`crates/gm-safety`](crates/gm-safety)** | Action tier classifier, `< 100 ms` kill switch, blocklist manager, path/symlink confinement, secret scrubber, untrusted data fencing, `AuditLogger`. |
+| **[`crates/gm-memory`](crates/gm-memory)** | SQLite FTS5 personal memory store, `ProvenanceStore` citation ledger, two-phase redacted `ForgetPlanner`/`ForgetExecutor`, fenced `MemoryImporter`. |
+| **[`crates/gm-muse`](crates/gm-muse)** | Bundled upstream Muse prompt & 9 core skills (`UPSTREAM.md` SHA-256 verified), cache-friendly `MusePromptBuilder`, CAS `SharedFileStore`, `SkillRegistry`. |
+| **[`crates/gm-goals`](crates/gm-goals)** | Durable goals & 1-level subgoals (`GOAL.md`), `QuietGate`, `HeartbeatWorker`, `FeedStore`, dogfood tracker, nightly review & self-improvement jobs. |
+| **[`crates/gm-agent`](crates/gm-agent)** | Autonomous computer-use loop, negative-origin & DPI-aware Set-of-Marks (SoM) compositor, stagnation detector, MCP bridge, *"Take the Wheel"* handoff. |
+| **[`crates/gm-openbot`](crates/gm-openbot)** | Multi-agent supervisor, persistent `BotRoster`, crash-safe SQLite `DurableTaskQueue`, channels, routines, `DiscretionStore`, Static Spaces, Voice/SIP/Zoom/Meet, Hosted Control Plane, `/api/v1` + Companion Web server. |
+| **[`crates/gm-vlm-candle`](crates/gm-vlm-candle)** | Native Rust local Vision-Language Model inference (`Qwen2-VL-2B-Instruct`, `SmolVLM2`) and safetensors model registry. |
+| **[`crates/gm-daemon`](crates/gm-daemon)** | Background orchestrator, IPC control server, unified `dt-doctor` engine, SHA-256 patch reviewer, Ed25519 signed updater, chunked component installer, `dt` / `gm` CLI. |
+| **[`crates/gm-ui`](crates/gm-ui)** | Native Rust `egui`/Glow/WGPU desktop shell with virtualized 10k-message transcript, 5-tier Escape stack, smart arrow composer, and LRU texture cache. |
+| **[`crates/gm-eval`](crates/gm-eval)** | 25-task G5 evaluation suite, v0.2.0 SoM/MCP suite, and 10-scenario OpenBot/Muse governance evaluation suite. |
+| **[`xtask`](xtask)** | Build & release automation (`bundle`, `dmg`, `verify-dmg`, `install`, `notarize`, `bench-hotpath`, `bench-rss`, `bench-llm`, `eval`, `simulate-dogfood`, `budget-ledger`, `certify`, `test-all`). |
+
+---
+
+## 🚀 Quick Start & Installation
+
+### 1. Ubuntu 24.04 LTS (`.deb` Package)
+```bash
+sudo apt install ./dt_1.0.3_amd64.deb
+dt doctor check
+dt service install
+```
+
+### 2. macOS Apple Silicon & Intel (`.dmg` / `Install DT.pkg`)
+1. Download `DT-1.0.2-macos-aarch64.dmg` (or `x86_64`) and verify its `.sha256` sidecar.
+2. Open the disk image and run `Install DT.pkg` (or drag `DT.app` to `/Applications`).
+3. Run onboarding and grant Accessibility / Screen Recording permissions:
+   ```bash
+   dt onboard
+   dt permissions --open-missing
+   dt service install
+   ```
+
+### 3. Windows 11 (`x86_64` & `ARM64`)
+1. Run `DT-1.0.2-windows-x86_64-setup.exe` (installs per-user under `%LOCALAPPDATA%\Programs\DT\bin`).
+2. Verify installation readiness and user background tasks:
+   ```powershell
+   dt doctor check
+   dt service status
+   ```
+
+### 4. Self-Hosted Docker Compose + Automatic Caddy TLS
+```bash
+cd deploy/docker
+docker compose up -d --build
+```
+The production multi-stage [Dockerfile](deploy/docker/Dockerfile) runs unprivileged as `USER dt` (`uid 10001`) with a built-in `dt-doctor check --json` healthcheck and internal loopback binding behind `tls-proxy`.
+
+### 5. Building from Source
+DT expects the pinned sibling `Darius` checkout (`f47a4ce980abecb751c9f5c79e1c424a20100433`) alongside the repository:
 ```bash
 git clone https://github.com/galaxycoils/darius.git Darius
 git -C Darius checkout f47a4ce980abecb751c9f5c79e1c424a20100433
-git clone https://github.com/galaxycoils/grok-muse.git grok-muse
-cd grok-muse
+
+git clone https://github.com/galaxycoils/DT.git DT
+cd DT
 ./tools/bootstrap.sh
-cargo test -p gm-openbot --locked
-```
 
-The sibling `Darius` checkout is pinned to commit `f47a4ce980abecb751c9f5c79e1c424a20100433`
-in `.github/workflows/ci.yml` and verified by `tools/bootstrap.sh` (see the [reliability review](docs/openmausbot-comparison.md)).
-
-### Apple Silicon preview
-
-`v0.7.0` adds the shared Rakazo layout and working provider setup lifecycle. See [provider validation](docs/provider-validation.md) for account checks still required. It provides an optimized release-profile Apple Silicon DMG and matching SHA-256 sidecar. It is ad-hoc signed and requires manual installation. Developer ID signing, notarization, signed-updater distribution, and native certification remain outstanding. Web/mobile clients and hosted adapters have source and fixture coverage; deployed end-to-end certification remains outstanding. See [release notes](docs/releases/v0.7.0.md) and [release readiness](docs/release-readiness.md).
-
-Download both assets from the [v0.7.0 prerelease](https://github.com/galaxycoils/grok-muse/releases/tag/v0.7.0) into one directory, then run:
-
-```sh
-shasum -a 256 -c GrokMuse-0.7.0-macos-aarch64-adhoc.dmg.sha256
-```
-
-### Building the DMG
-```bash
-# Build binaries, bundle .app packages, codesign, and create target/dist/Grok-Muse.dmg
-cargo run --locked --package xtask -- dmg --release --identity - --output target/dist/GrokMuse-0.7.0-macos-aarch64-adhoc.dmg
-```
-
-### Installing on macOS
-1. Open `GrokMuse-0.7.0-macos-aarch64-adhoc.dmg` from your download or build directory.
-2. Drag `GrokMuse.app` to `/Applications`.
-3. Launch `Grok-Muse` or run the CLI onboarding:
-   ```bash
-   gm onboard
-   ```
-4. Follow the interactive prompts to grant required permissions in **macOS System Settings**.
-
----
-
-## LaunchAgent Service Management
-
-Grok-Muse registers separate LaunchAgents for `gm-daemon` and `gm-cu-helper` to maintain independent lifecycles without requiring persistent Terminal windows:
-
-```bash
-# Install and bootstrap user LaunchAgents
-gm service install
-
-# Check LaunchAgent registration and active PID status
-gm service status
-
-# Uninstall and stop LaunchAgents
-gm service uninstall
-```
-
-Plists are installed in `~/Library/LaunchAgents/`:
-- `co.anysphere.grok-muse.daemon.plist`
-- `co.anysphere.grok-muse.helper.plist`
-
----
-
-## macOS Onboarding & Permissions
-
-Grok-Muse provides automated inspection and deep links into macOS System Settings for all required privacy permissions:
-
-```bash
-# Check all permissions and print live status table
-gm permissions
-
-# Output permission status as JSON
-gm permissions --json
-
-# Automatically open System Settings for any missing permissions
-gm permissions --open-missing
-
-# Open a specific privacy pane
-gm permissions --open screen          # Screen Recording
-gm permissions --open accessibility   # Accessibility (AX)
-gm permissions --open calendar        # Calendars
-gm permissions --open reminders       # Reminders
+# Build all native binaries (dt, gm, dt-doctor, gm-daemon, gm-cu-helper, gm-ui)
+cargo build --release --locked --workspace --bins
 ```
 
 ---
 
-## Keychain Secret Management
+## 💻 CLI Command Reference (`dt` & `gm` alias)
 
-API keys for Meta Model API (Muse) and xAI API (Grok) are stored securely in the native **macOS Keychain** (`kSecClassGenericPassword`), avoiding plaintext keys in config files:
-
-- **Service Name:** `grok-muse`
-- **Account Names:** `meta_api_key`, `xai_api_key`
-
-### Adding Secrets via macOS CLI
-```bash
-# Store Meta Muse API key
-security add-generic-password -s "grok-muse" -a "meta_api_key" -w "your-meta-key" -U
-
-# Store xAI Grok API key
-security add-generic-password -s "grok-muse" -a "xai_api_key" -w "your-xai-key" -U
-```
-
-### Environment Fallbacks (CI / Headless)
-If Keychain entries are absent (e.g., in automated CI environments), Grok-Muse automatically falls back to environment variables:
-- `GROK_MUSE_META_KEY` or `META_API_KEY`
-- `GROK_MUSE_XAI_KEY` or `XAI_API_KEY`
-
----
-
-## CLI Command Reference
+All commands work identically via `dt` (primary CLI) and `gm` (backwards-compatible alias):
 
 | Command | Arguments | Description |
-|---|---|---|
-| `gm do` | `"<instruction>"` | Execute an autonomous computer-use task via AX and visual fallback. |
-| `gm daemon` | `[--config <path>]` | Start the background orchestrator and proactive scheduler. |
-| `gm status` | — | Display system health, IPC connectivity, and TCC permissions. |
-| `gm kill` | — | Trigger the emergency kill switch (< 100 ms halt). |
-| `gm permissions` | `[--open-missing] [--open <pane>] [--json]` | Inspect and request macOS TCC privacy permissions. |
-| `gm onboard` | `[--check-only]` | First-run onboarding verification and setup. |
-| `gm service` | `<install\|status\|uninstall>` | Manage LaunchAgent background services. |
-| `gm dogfood` | `summary \| rate \| feedback` | Proactive notice rating and G6 dogfood gate tracking. |
-| `gm stats` | `[--json]` | Output unified health, permissions, and metrics. |
-| `gm review` | `[--date YYYY-MM-DD]` | Synthesize structured nightly review markdown. |
-| `gm audit` | `[--period <weekly\|monthly>] [--json]` | Synthesize safety compliance, spend by provider, CU actions, and task success. |
-| `gm upkeep` | `[--stale-days <N>] [--json]` | Run memory upkeep (deduplicate facts, cluster topics, expire stale observations). |
-| `gm feed` | `[--limit <N>] [--json]` | Terminal timeline stream of recent observations, patrol insights, and tasks. |
-| `gm ideas` | `[--json]` | Proactive recommendations from calendar gaps, unread threads, and memory. |
-| `gm chat` | `[--system "<prompt>"]` | Interactive terminal REPL for conversation, memory retrieval, status, and inline tasks. |
-| `gm models` | `<list\|pull\|rm> [--json]` | Manage offline local Vision-Language Models (`qwen2-vl-2b`, `smolvlm2-2.2b`). |
-| `gm bots` | `<list\|show\|create\|rm> [--json]` | Manage OpenBot persistent agent roster and isolated per-bot workspaces. |
-| `gm queue` | `<list\|add\|pause\|resume\|cancel\|reassign\|backup\|restore>` | Manage crash-safe SQLite FIFO task queues across bots. |
-| `gm channels` | `<list\|post\|history\|assign\|set-instructions\|archive\|restore>` | Manage multi-bot channels, persistent instructions, and `@bot` mentions. |
-| `gm team` | `<export\|preview\|import> [--json]` | Safe portable team templates (credential-scrubbed, disabled triggers on import). |
-| `gm routines` | `<list\|runs> [--json]` | Scheduled recurring routines, quiet hours, and execution run history. |
-| `gm diagnostics` | `<check\|export> [--json]` | Local health checks and redacted support bundle export with SHA-256 fingerprint. |
-| `gm serve` | `[--bind 127.0.0.1:7433]` | Launch the loopback OpenBot Companion Web UI, AG-UI SSE stream, and `/admin/audit` dashboard. |
+| :--- | :--- | :--- |
+| `dt doctor` | `[check\|repair\|resume <run_id>] [--json]` | Run unified DT Doctor checks, journaled safe repairs (max 2 attempts), or resume an interrupted run. |
+| `dt do` | `"<instruction>"` | Execute an autonomous computer-use task via native Accessibility + SoM vision fallback. |
+| `dt daemon` | `[--config <path>]` | Start the unprivileged background daemon and proactive scheduler. |
+| `dt serve` | `[--bind 127.0.0.1:7433]` | Launch the Companion Web UI, `/api/v1/*` REST + SSE server, and `/admin/audit` governance dashboard. |
+| `dt chat` | `[--system "<prompt>"]` | Interactive terminal REPL with `/memory`, `/status`, `/do`, `/history`, and live token streaming. |
+| `dt status` | — | Display live daemon health, CU helper connectivity, active task, and daily spend. |
+| `dt kill` | — | Trigger the emergency `< 100 ms` kill switch halting all active agent work. |
+| `dt permissions` | `[--open-missing] [--open <pane>] [--json]` | Inspect and request OS privacy permissions (`screen`, `accessibility`, `calendar`, `reminders`). |
+| `dt service` | `<install\|status\|uninstall>` | Manage per-user background services (macOS LaunchAgents, Linux systemd user units, Windows SID tasks). |
+| `dt bots` | `<list\|show\|create\|rm> [--json]` | Manage the OpenBot persistent coworker roster (`@muse`, `@researcher`, `@coder`, `@guardian`, custom bots). |
+| `dt queue` | `<list\|add\|pause\|resume\|cancel\|reassign\|backup\|restore>` | Manage the crash-safe SQLite WAL FIFO task queue across coworkers. |
+| `dt channels` | `<list\|post\|history\|assign\|set-instructions\|archive\|restore>` | Manage multi-bot channels (`#general`, `#research`, `#ops`) and `@bot` mention dispatch. |
+| `dt routines` | `<list\|runs\|trigger <id> [--delivery-id <id>]> [--json]` | Inspect scheduled routines, run history, or trigger an immediate deduplicated routine delivery. |
+| `dt skills` | `<list\|search <query>\|show <name>> [--json]` | Search and inspect bundled Muse skills and connectors via progressive disclosure. |
+| `dt goals` | `<list\|create\|subgoal\|complete\|delete> [--json]` | Manage durable personal goals and 1-level subgoals (`goals/<slug>/GOAL.md`). |
+| `dt spaces` | `<list\|create <slug>\|url <slug>> [--json]` | Create and inspect isolated Static Spaces served on the dedicated loopback Spaces origin. |
+| `dt forget` | `<plan "<request>"\|confirm <plan_id>> [--json]` | Two-phase redacted discretionary Forget across SQLite memory, files, and goal workspaces. |
+| `dt import-memory` | `[--file <path>\|--input "<text>"] [--apply --report-sha256 <hex>]` | Import portable memory notes with untrusted fencing and SHA-256 dry-run approval. |
+| `dt patch` | `<patch_file> [--repo <dir>] [--approve-sha256 <hex>]` | Inspect a unified diff patch and apply it atomically after SHA-256 digest approval. |
+| `dt diagnostics` | `<check\|export\|prune-backups [--keep <N>]\|recover-database <db>>` | Run local health checks, export redacted support bundles, prune snapshots, or recover corrupt SQLite DBs. |
+| `dt models` | `<list\|pull <id>\|rm <id>> [--json]` | Manage local Vision-Language Models (`qwen2-vl-2b`, `smolvlm2-2.2b`). |
+| `dt update` | `[--check] [--force] [--json]` | Verify Ed25519-signed release manifests and renewable update metadata with rollback protection. |
 
 ---
 
-## OpenBot Multi-Agent Coworkers, Queue, Channels & Companion Web UI
+## 🧪 Verification & Release Certification Suites
 
-The companion now supports channel conversations and creating channels with a topic,
-members, and default responder. It refreshes automatically, preserves failed sends,
-and supports the server's optional bearer token. **Automatic queue execution is not
-connected yet:** messages and tasks are persisted, but `gm serve` does not run agents.
-See the [OpenMausBot comparison and reliability review](docs/openmausbot-comparison.md)
-for the feature roadmap and runtime blockers.
-
-For token-protected local use, set `GROK_MUSE_COMPANION_TOKEN` in the server process's
-environment before starting `gm serve` or `gm daemon`, then enter that token in the
-companion's Connect form. The page keeps it only until reload. Keep the default
-loopback bind; remote access/pairing is not established by this setting. Slack's
-optional signing secret uses `GROK_MUSE_SLACK_SIGNING_SECRET`; replay protection is
-still outstanding (see the review).
+Run the full pre-shipping verification battery locally:
 
 ```bash
-# List the persistent bot roster (muse, researcher, coder, guardian)
-gm bots list
+# 1. Rust formatting & zero-warning workspace linter
+cargo fmt --all -- --check
+cargo clippy --locked --workspace --all-targets -- -D warnings
 
-# Enqueue a prioritized task for @coder
-gm queue add --bot coder --priority 10 "Write unit tests and save summary in outbox/"
+# 2. Full 384-test workspace unit & integration suite
+cargo nextest run --locked --workspace
 
-# Post a message in #general mentioning @coder and @researcher
-gm channels post general "Hey @coder benchmark the hotpath and hand off report to @researcher"
+# 3. Real headless X11 desktop capture, focus, keyboard & pointer test (Linux)
+tools/test-native-x11.sh
 
-# Export or restore durable SQLite queue state
-gm queue backup /tmp/openbot_queue_backup.jsonl
-gm queue restore /tmp/openbot_queue_backup.jsonl
+# 4. Shared token generation, Companion Web UI (< 64 KiB cap) & headless Chromium smoke test
+python3 tools/generate-ui-tokens.py
+npm run build --prefix tools/companion
+npm test --prefix tools/companion
+node --test tools/tests/companion-events.test.cjs
+npm run smoke --prefix tools/companion
 
-# Launch the loopback Companion Web / AG-UI / Governance Audit server
-gm serve --bind 127.0.0.1:7433
-```
+# 5. React Web Client & Expo Mobile Client build and contract tests
+npm run typecheck --prefix clients/web && npm run build --prefix clients/web && npm test --prefix clients/web
+npm test --prefix clients/mobile
 
+# 6. Release tools, 30/30 coverage inventory contract & workspace guest agent tests
+python3 tools/test_release_tools.py -v
+python3 tools/workspace-guest/test_agent.py -v
 
----
-
-## Proactive Engine & Quiet Gate
-
-The proactive engine continuously monitors local state while enforcing strict quiet gate rules to protect user attention:
-
-1. **Quiet Hours**: Suppresses all non-urgent notices between **22:00 and 08:00** local time.
-2. **Daily Notice Cap**: Enforces a strict maximum of **3 interruptions per day** (dogfood G6 gate).
-3. **Daily Spend Cap**: Hard cap of **$0.50 USD per day** across proactive patrol jobs.
-4. **Distinct User Feedback Semantics**:
-   - `done`: Item resolved; permanently suppressed from dedup.
-   - `later`: Snoozed for 4 hours.
-   - `stop`: Topic opt-out; permanently mutes this topic.
-5. **Urgency Bypass**: Flagged or critical items (e.g., server outages, imminent meetings) bypass quiet hours.
-
----
-
-## Memory Upkeep Engine
-
-Personal memory is stored in SQLite with full-text search (FTS5). The upkeep engine runs periodically to keep knowledge clean and relevant:
-
-```bash
-# Run on-demand memory upkeep
-gm upkeep
-
-# Custom retention period for transient observations
-gm upkeep --stale-days 7 --json
-```
-
-- **Periodic Background Execution**: In addition to manual runs via `gm upkeep`, `gm-daemon` registers an hourly background maintenance job (`schedule_memory_upkeep`) on the proactive scheduler.
-- **Fact Deduplication**: Calculates token Jaccard similarity (≥ 0.85) and normalized string matching. Automatically merges tags from duplicate records and retains the highest-importance entry without duplicates.
-- **Knowledge Clustering**: Discovers shared themes across records and applies cluster tags (`cluster:<topic>`), linking related notes together.
-- **Stale Observation Pruning**: Automatically purges transient episodes and observations older than the retention threshold with low importance (≤ 0.4).
-
----
-
-## Desktop Shell & Keyboard Shortcuts
-
-Launch the native AppKit desktop shell:
-```bash
-gm-ui tray
-```
-
-### Global Keyboard Shortcuts
-- **`Cmd + Shift + Space`**: Instant Summon Assistant (floating chat window).
-- **`Cmd + Alt + Escape`**: Emergency Kill Switch (immediately stops all agent actions).
-
-### Visual Action Overlay
-A high-contrast, floating HUD overlay positioned on the frontmost screen indicating active agent state:
-- 🔵 **Active**: Currently executing AX or pixel actions.
-- 🟡 **Paused**: User coexistence pause active (user input detected within last 1.5s).
-- 🛑 **Stopped**: Emergency kill switch activated.
-
----
-
-## Benchmarking & Evaluation (`xtask`)
-
-Grok-Muse includes an `xtask` binary implementing rigorous quality and performance gates:
-
-```bash
-# 1. Benchmark G3 local hot-path budgets (< 2ms capture, < 30ms AX, < 15ms JPEG, < 5ms dispatch)
-cargo run --package xtask -- bench-hotpath
-
-# 2. Benchmark G2 idle RSS footprint (< 50MB idle tree)
-cargo run --package xtask -- bench-rss
-
-# 3. Benchmark G4 LLM latency gate (< 1.5s median, < 4.0s p95) measuring TTFT & tokens/sec
-cargo run --package xtask -- bench-llm
-
-# 4. Verify release DMG bundle integrity, codesign, and /Applications symlink
-cargo run --package xtask -- verify-dmg
-
-# 5. Run G5 25-task evaluation suite (Finder, Safari, Notes, Mail, Settings, Electron, Canvas)
-cargo run --package xtask -- eval
+# 7. xtask evaluation, latency, budget ledger & dogfood gates
+cargo run --locked -p xtask -- eval
+cargo run --locked -p xtask -- bench-llm
+cargo run --locked -p xtask -- simulate-dogfood
+cargo run --locked -p xtask -- budget-ledger --json
+cargo run --locked -p xtask -- certify all --allow-incomplete --json
 ```
 
 ---
 
-## Interactive Terminal REPL (`gm chat`)
+## 📄 License
 
-Direct conversational interaction with Grok-Muse supporting SQLite personal memory retrieval, live status inspection, and inline computer-use task dispatch:
-
-```bash
-# Start interactive REPL
-gm chat
-
-# Override default assistant system prompt
-gm chat --system "You are an automated coding reviewer."
-```
-
-### REPL Commands
-- **`/memory <query>`**: Search personal memory records using SQLite FTS5.
-- **`/status`**: Inspect live TCC privacy permissions, CU helper socket status, and spend budget.
-- **`/do <instruction>`**: Dispatch an autonomous computer-use task directly from within the conversation.
-- **`/clear`**: Clear current chat history while preserving the system prompt.
-- **`/history`**: Display total message count and conversation turn statistics.
-- **`/help`**: Show REPL command reference.
-- **`/exit` or `/quit`**: Cleanly exit the REPL session.
-
----
-
-## Local Vision-Language Model Interface (Action A12 Prep)
-
-Grok-Muse provides a pluggable `LocalVlmBackend` trait in `crates/gm-llm` for offline local model grounding and visual triage (Candle/MLX ready):
-
-```bash
-# Compile and test with local-vlm feature flag enabled
-cargo test --package gm-llm --features local-vlm
-```
-- **`LocalVlmBackend`**: Pluggable interface for `ground()`, `triage()`, and `generate()`.
-- **`CandleMlxBridgeBackend`**: Pre-scaffolded bridge supporting Metal / CPU device execution and quantized weights (`Fp16`, `Q4_0`, `Q4_K`).
-- **`LocalVlmLlmAdapter`**: Adapter exposing local VLMs through the standard `LlmBackend` interface.
-
----
-
-## Continuous Integration (CI)
-
-GitHub Actions checks macOS, Ubuntu and Windows on branches, pull requests and version tags. Native certification is tracked separately in [release readiness](docs/release-readiness.md). Checks include:
-- `cargo fmt --all --check`
-- `cargo clippy --workspace --all-targets -- -D warnings`
-- `cargo nextest run --workspace` (or `cargo test --workspace`)
-- `cargo run -p xtask -- eval` (25-task evaluation gate)
-- `cargo run -p xtask -- bench-hotpath` (native hot-path budgets on macOS)
-- `cargo run -p xtask -- bench-llm` (G4 latency gate calibration)
-- `cargo run -p xtask -- verify-dmg` (macOS release bundle verification)
-
-
----
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
+MIT License. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.

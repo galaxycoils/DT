@@ -1022,4 +1022,39 @@ mod tests {
         // Slot freed!
         sup.save_routine(&r51).unwrap();
     }
+
+    #[test]
+    fn test_routine_dedup_and_bounded_previews() {
+        test_trigger_routine_deduplication_and_outcomes();
+        let dir = tempfile::tempdir().unwrap();
+        let img = image::RgbImage::from_pixel(64, 48, image::Rgb([30, 144, 255]));
+        let img_path = dir.path().join("sample.png");
+        img.save(&img_path).unwrap();
+        let img_bytes = std::fs::read(&img_path).unwrap();
+        let preview =
+            crate::attachments::preview_attachment_bounded("sample.png", &img_bytes).unwrap();
+        assert_eq!(
+            preview.kind,
+            crate::attachments::AttachmentPreviewKind::Image
+        );
+        assert_eq!(preview.width, Some(64));
+        assert_eq!(preview.height, Some(48));
+
+        let pdf_bytes =
+            b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n(Bounded preview test) Tj\n%%EOF";
+        let pdf_prev =
+            crate::attachments::preview_attachment_bounded("doc.pdf", pdf_bytes).unwrap();
+        assert_eq!(
+            pdf_prev.kind,
+            crate::attachments::AttachmentPreviewKind::Pdf
+        );
+        assert_eq!(pdf_prev.pdf_pages_estimate, Some(1));
+        assert!(
+            pdf_prev
+                .text_snippet
+                .as_deref()
+                .unwrap_or("")
+                .contains("Bounded preview test")
+        );
+    }
 }

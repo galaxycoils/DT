@@ -340,4 +340,9 @@ mod tests {
 
         let _ = fs::remove_dir_all(&cache);
     }
+
+    #[test]
+    fn test_component_catalog_chunked_verification() {
+        test_component_catalog_chunked_verification_resume_and_tamper_rejection();
+    }
 }

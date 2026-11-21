@@ -1,13 +1,18 @@
 # Digest-pinned multi-stage production image for DT self-hostable server & React web client.
 FROM rust:1.99.1-bookworm@sha256:0000000000000000000000000000000000000000000000000000000000000000 AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev \
+    libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+    libpipewire-0.3-dev libspa-0.2-dev clang && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p gm-daemon --bin dt --bin gm-daemon --bin dt-doctor
+RUN cargo build --release --locked -p gm-daemon --bin dt --bin gm --bin gm-daemon --bin dt-doctor
 
 FROM debian:bookworm-slim@sha256:0000000000000000000000000000000000000000000000000000000000000000
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 libsqlite3-0 && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --create-home dt
 COPY --from=builder /src/target/release/dt /usr/local/bin/dt
+COPY --from=builder /src/target/release/gm /usr/local/bin/gm
 COPY --from=builder /src/target/release/gm-daemon /usr/local/bin/gm-daemon
 COPY --from=builder /src/target/release/dt-doctor /usr/local/bin/dt-doctor
 USER dt

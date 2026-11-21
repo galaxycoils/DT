@@ -4554,6 +4554,7 @@ fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
             get(list_routines_route).post(upsert_routine_route),
         )
         .route("/routines/:id/test", post(test_routine_route))
+        .route("/routines/:id/trigger", post(trigger_routine_webhook_route))
         .route("/routines/:id/runs", get(list_routine_runs_route))
         .route(
             "/goals",
@@ -4739,17 +4740,24 @@ async fn auth_revoke_v1_route(
 }
 
 async fn list_workspaces_v1_route(
+    State(state): State<CompanionWebState>,
     request: axum::extract::Request,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
-    let state = request
+    let sess_ext = request
         .extensions()
         .get::<crate::hosted::HostedSessionIssued>()
         .cloned();
-    if let Some(sess) = state {
+    if let Some(sess) = sess_ext {
+        let workspaces = state
+            .hosted_plane
+            .as_ref()
+            .and_then(|plane| plane.list_user_workspaces(&sess.user_id).ok())
+            .unwrap_or_default();
         return Ok(Json(serde_json::json!({
             "active_workspace": sess.ws_id,
             "user_id": sess.user_id,
             "role": sess.role,
+            "workspaces": workspaces,
         })));
     }
     let ws = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
@@ -4910,9 +4918,24 @@ async fn update_marketplace_v1_route(
                 .collect()
         })
         .unwrap_or_default();
-    let mut listing: crate::marketplace::MarketplaceListing =
-        serde_json::from_value(body.get("listing").cloned().unwrap_or(body))
-            .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid listing: {e}")))?;
+    let mut listing: crate::marketplace::MarketplaceListing = if let Some(l) = body.get("listing") {
+        serde_json::from_value(l.clone())
+            .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid listing: {e}")))?
+    } else if body.get("name").is_some() {
+        serde_json::from_value(body.clone())
+            .map_err(|e| ApiErr::msg(StatusCode::BAD_REQUEST, format!("Invalid listing: {e}")))?
+    } else {
+        state
+            .supervisor
+            .marketplace()
+            .builtin_catalog()
+            .into_iter()
+            .find(|c| c.id == id)
+            .ok_or_else(|| ApiErr::msg(StatusCode::NOT_FOUND, format!("Unknown plugin '{id}'")))?
+    };
+    if let Some(ver) = body.get("version").and_then(|v| v.as_str()) {
+        listing.version = ver.to_string();
+    }
     listing.id = id;
     let updated = state
         .supervisor
@@ -6048,6 +6071,245 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after_revoke.status(), 401);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_hosted_cookie_session_and_csrf() {
+        let dir = tempfile::tempdir().unwrap();
+        let workers = dir.path().join("workers");
+        let plane = Arc::new(
+            crate::hosted::HostedControlPlane::in_memory(
+                &workers,
+                b"test-hosted-master-key-32bytes!",
+            )
+            .unwrap(),
+        );
+        plane
+            .provision_workspace("ws_primary", "t1", "Primary", "tok-primary")
+            .unwrap();
+        let cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: dir.path().join("bots"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (tx, _rx) = broadcast::channel(64);
+        let sup = OpenBotSupervisor::open(cfg, Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let app = build_companion_router(
+            CompanionWebServer::new(
+                sup.clone(),
+                BridgeRouter::new(sup, gm_core::config::ChatBridgesConfig::default()),
+                Some("op-token".into()),
+                None,
+            )
+            .with_hosted_plane(plane.clone())
+            .state,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        let enroll_resp: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/enroll"))
+            .bearer_auth("op-token")
+            .json(&serde_json::json!({ "ws_id": "ws_primary", "user_id": "bob", "role": "owner" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let enroll_tok = enroll_resp["enrollment_token"].as_str().unwrap();
+
+        let sess_resp = client
+            .post(format!("{base}/api/v1/auth/session"))
+            .json(&serde_json::json!({ "enrollment_token": enroll_tok }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sess_resp.status(), 200);
+        let cookie_pair = sess_resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let sess_json: serde_json::Value = sess_resp.json().await.unwrap();
+        let csrf = sess_json["csrf_token"].as_str().unwrap().to_string();
+
+        // /api/v1/workspaces includes user's active workspaces
+        let ws_resp: serde_json::Value = client
+            .get(format!("{base}/api/v1/workspaces"))
+            .header(header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(ws_resp["active_workspace"], "ws_primary");
+        assert_eq!(ws_resp["workspaces"].as_array().unwrap().len(), 1);
+
+        // Mutation without CSRF token is rejected
+        let no_csrf = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .header(header::COOKIE, &cookie_pair)
+            .json(&serde_json::json!({ "id": "calendar-brief", "confirmed_scopes": ["connectors.calendar.read"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(no_csrf.status(), 403);
+
+        // Mutation with CSRF token succeeds
+        let with_csrf = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .header(header::COOKIE, &cookie_pair)
+            .header("x-dt-csrf-token", &csrf)
+            .json(&serde_json::json!({ "id": "calendar-brief", "confirmed_scopes": ["connectors.calendar.read"] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(with_csrf.status(), 200);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_server_side_billing_and_marketplace_lifecycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = GmConfig {
+            storage_dir: dir.path().to_path_buf(),
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: dir.path().join("bots"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (tx, _rx) = broadcast::channel(64);
+        let sup = OpenBotSupervisor::open(cfg, Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let routine = crate::routines::Routine {
+            id: "r-v1-trig".into(),
+            name: "V1 Trigger Routine".into(),
+            bot_id: "researcher".into(),
+            channel_id: None,
+            instruction: "Run v1 check".into(),
+            timezone: "UTC".into(),
+            hour: 9,
+            minute: 0,
+            weekdays: vec![],
+            quiet_hours: None,
+            interval_minutes: Some(15),
+            webhook_secret_ref: None,
+            preferred_provider: None,
+            preferred_model: None,
+            enabled: true,
+        };
+        sup.save_routine(&routine).unwrap();
+
+        let app = build_companion_router(
+            CompanionWebServer::new(
+                sup.clone(),
+                BridgeRouter::new(sup, gm_core::config::ChatBridgesConfig::default()),
+                Some("op-token".into()),
+                None,
+            )
+            .state,
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let base = format!("http://{addr}");
+        let client = reqwest::Client::new();
+
+        // 1. /api/v1/routines/:id/trigger parity
+        let trig_resp = client
+            .post(format!("{base}/api/v1/routines/r-v1-trig/trigger"))
+            .bearer_auth("op-token")
+            .json(&serde_json::json!({ "delivery_id": "deliv-v1-1" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(trig_resp.status(), 200);
+
+        // 2. Marketplace lifecycle: install -> update -> remove
+        let install_bad = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .bearer_auth("op-token")
+            .json(&serde_json::json!({ "id": "calendar-brief", "confirmed_scopes": [] }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(install_bad.status(), 400);
+
+        let install_ok = client
+            .post(format!("{base}/api/v1/marketplace/install"))
+            .bearer_auth("op-token")
+            .json(&serde_json::json!({
+                "id": "calendar-brief",
+                "confirmed_scopes": ["connectors.calendar.read"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(install_ok.status(), 200);
+
+        let update_ok = client
+            .post(format!("{base}/api/v1/marketplace/calendar-brief/update"))
+            .bearer_auth("op-token")
+            .json(&serde_json::json!({
+                "confirmed_scopes": ["connectors.calendar.read"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(update_ok.status(), 200);
+
+        let remove_ok = client
+            .delete(format!("{base}/api/v1/marketplace/calendar-brief"))
+            .bearer_auth("op-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(remove_ok.status(), 200);
+
+        // 3. Server-side billing rejects client-supplied Stripe secret or redirect URL
+        let bad_secret = client
+            .post(format!("{base}/api/v1/billing/checkout"))
+            .bearer_auth("op-token")
+            .json(&serde_json::json!({
+                "stripe_secret_key": "sk_live_spoof",
+                "price_id": "price_default"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_secret.status(), 400);
+
+        let bad_redirect = client
+            .post(format!("{base}/api/v1/billing/checkout"))
+            .bearer_auth("op-token")
+            .json(&serde_json::json!({
+                "success_url": "https://evil.example/steal",
+                "price_id": "price_default"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(bad_redirect.status(), 400);
 
         handle.abort();
     }

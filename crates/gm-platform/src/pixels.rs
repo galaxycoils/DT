@@ -51,3 +51,17 @@ pub(crate) fn jpeg(
             .as_millis() as u64,
     })
 }
+
+pub fn encode_rgba_jpeg(rgba: &[u8], width: u32, height: u32, quality: u8) -> Result<Vec<u8>> {
+    let cap = jpeg(
+        width,
+        height,
+        rgba.to_vec(),
+        Some(width.max(height)),
+        Some(quality),
+    )?;
+    match cap.data {
+        FrameData::InlineBytes(bytes) => Ok(bytes),
+        _ => Err(GmError::Platform("Expected inline JPEG bytes".into())),
+    }
+}

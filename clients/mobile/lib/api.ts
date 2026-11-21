@@ -33,6 +33,75 @@ export async function fetchBootstrap(baseUrl: string, token: string, workspaceId
   return resp.json();
 }
 
+export async function postDirectMessage(
+  baseUrl: string,
+  token: string,
+  botId: string,
+  content: string,
+  workspaceId = "default",
+) {
+  const resp = await fetch(
+    mobileV1Endpoint(baseUrl, `/dm/${encodeURIComponent(botId)}/messages`),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "X-DT-Workspace-Id": workspaceId,
+      },
+      body: JSON.stringify({ content }),
+    },
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function respondApproval(
+  baseUrl: string,
+  token: string,
+  requestId: string,
+  approved: boolean,
+  workspaceId = "default",
+) {
+  const resp = await fetch(
+    mobileV1Endpoint(baseUrl, `/approvals/${encodeURIComponent(requestId)}`),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "X-DT-Workspace-Id": workspaceId,
+      },
+      body: JSON.stringify({ approved }),
+    },
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
+export async function triggerRoutine(
+  baseUrl: string,
+  token: string,
+  routineId: string,
+  deliveryId: string,
+  workspaceId = "default",
+) {
+  const resp = await fetch(
+    mobileV1Endpoint(baseUrl, `/routines/${encodeURIComponent(routineId)}/trigger`),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        "X-DT-Workspace-Id": workspaceId,
+      },
+      body: JSON.stringify({ delivery_id: deliveryId }),
+    },
+  );
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}
+
 export async function fetchSanitizedDoctor(baseUrl: string, token: string) {
   const resp = await fetch(mobileV1Endpoint(baseUrl, "/doctor"), {
     headers: { Authorization: `Bearer ${token}` },

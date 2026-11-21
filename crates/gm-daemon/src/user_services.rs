@@ -247,4 +247,57 @@ mod tests {
         assert!(task.contains("<RunLevel>LeastPrivilege</RunLevel>"));
         assert!(windows_task(Path::new("x"), false, "bad<sid>").is_err());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_linux_unit_escaping_and_deb_manifest() {
+        let unit = linux_unit(Path::new("/usr/bin/gm-daemon"), true).unwrap();
+        assert!(unit.contains("PartOf=graphical-session.target"));
+        assert!(unit.contains("UMask=0077"));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let build_deb =
+            std::fs::read_to_string(root.join("tools/installers/linux/build-deb.sh")).unwrap();
+        for bin in [
+            "dt",
+            "gm",
+            "dt-doctor",
+            "gm-daemon",
+            "gm-cu-helper",
+            "gm-ui",
+        ] {
+            assert!(build_deb.contains(bin), "build-deb.sh must package {bin}");
+        }
+        assert!(build_deb.contains("libpipewire-0.3-0"));
+        assert!(build_deb.contains("xdg-desktop-portal"));
+        let desktop =
+            std::fs::read_to_string(root.join("tools/installers/linux/dt.desktop")).unwrap();
+        assert!(desktop.contains("Exec=/usr/bin/gm-ui native"));
+    }
+
+    #[test]
+    fn test_nsis_script_contract() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let nsi = std::fs::read_to_string(root.join("tools/installers/windows/dt-installer.nsi"))
+            .unwrap();
+        for bin in [
+            "dt.exe",
+            "gm.exe",
+            "dt-doctor.exe",
+            "gm-daemon.exe",
+            "gm-cu-helper.exe",
+            "gm-ui.exe",
+        ] {
+            assert!(nsi.contains(bin), "NSIS installer must include {bin}");
+        }
+        assert!(nsi.contains("WriteUninstaller"));
+        assert!(nsi.contains("dt-doctor.exe\" check --json"));
+    }
 }

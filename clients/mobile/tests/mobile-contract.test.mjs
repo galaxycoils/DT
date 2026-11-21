@@ -24,4 +24,12 @@ test("mobile client screens, Expo SDK 58 config, SecureStore, and tokens match c
   const api = fs.readFileSync(path.join(root, "lib/api.ts"), "utf8");
   assert.match(api, /\/api\/v1/);
   assert.match(api, /expo-secure-store/);
+  assert.match(api, /WHEN_UNLOCKED_THIS_DEVICE_ONLY/);
+  assert.match(api, /triggerRoutine/);
+  assert.match(api, /respondApproval/);
+
+  const threadSrc = fs.readFileSync(path.join(root, "app/thread.tsx"), "utf8");
+  assert.ok(threadSrc.includes("Inline Approval") && threadSrc.includes("handleSend"));
+  const routinesSrc = fs.readFileSync(path.join(root, "app/routines.tsx"), "utf8");
+  assert.ok(routinesSrc.includes("Trigger Now") && routinesSrc.includes("/routines"));
 });

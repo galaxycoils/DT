@@ -617,4 +617,23 @@ mod tests {
         assert!(parts[0].contains("[1]") && parts[0].contains("Sources:"));
         assert!(parts[1].contains("1. Approve"));
     }
+
+    #[test]
+    fn test_bridge_discretion_and_replay_rejection() {
+        bridge_router_fences_inbound_blocks_private_leaks_and_renders_plain_directives();
+        let relay =
+            crate::OutboundRelayClient::new("https://relay.example.com", "sec", "tok").unwrap();
+        let now_ts = chrono::Utc::now().timestamp();
+        let mut env = crate::SignedRelayEnvelope {
+            delivery_id: "deliv-stale".into(),
+            platform: "slack".into(),
+            external_channel_id: "C123".into(),
+            sender_name: "U99".into(),
+            text: "ping".into(),
+            timestamp: now_ts - 900,
+            signature: String::new(),
+        };
+        relay.sign_envelope(&mut env);
+        assert!(relay.verify_envelope(&env, now_ts).is_err());
+    }
 }

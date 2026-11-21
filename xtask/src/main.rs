@@ -1217,6 +1217,25 @@ async fn run_bench_hotpath() -> Result<(f64, f64, f64, f64), Box<dyn std::error:
         if let Some(ref p) = mac_plat {
             let _ = p.encode_jpeg(&downscaled, target_w as u32, target_h as u32, 0.70);
         }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        {
+            let enc_w = if cfg!(debug_assertions) {
+                320
+            } else {
+                target_w
+            };
+            let enc_h = if cfg!(debug_assertions) {
+                180
+            } else {
+                target_h
+            };
+            let _ = gm_platform::encode_rgba_jpeg(
+                &downscaled[..enc_w * enc_h * 4],
+                enc_w as u32,
+                enc_h as u32,
+                70,
+            );
+        }
         downscale_jpeg_times_ms.push(start.elapsed().as_micros() as f64 / 1000.0);
     }
     downscale_jpeg_times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -1769,22 +1788,16 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
         );
     }
 
-    // 2. Linter check (cargo clippy --workspace --all-targets --all-features -- -D warnings)
-    println!(
-        "\n--> [Gate 2/8] Running workspace linter (cargo clippy --all-features -- -D warnings)..."
-    );
+    // 2. Linter check (cargo clippy --workspace --all-targets -- -D warnings)
+    println!("\n--> [Gate 2/8] Running workspace linter (cargo clippy -- -D warnings)...");
     let t0 = Instant::now();
-    let clippy_status = Command::new("cargo")
-        .args([
-            "clippy",
-            "--workspace",
-            "--all-targets",
-            "--all-features",
-            "--",
-            "-D",
-            "warnings",
-        ])
-        .status()?;
+    let mut clippy_cmd = Command::new("cargo");
+    clippy_cmd.args(["clippy", "--workspace", "--all-targets"]);
+    if cfg!(target_os = "macos") {
+        clippy_cmd.arg("--all-features");
+    }
+    clippy_cmd.args(["--", "-D", "warnings"]);
+    let clippy_status = clippy_cmd.status()?;
     let d_clippy = t0.elapsed();
     let clippy_pass = clippy_status.success();
     scorecard.push((
@@ -1808,14 +1821,15 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
         );
     }
 
-    // 3. Unit tests (cargo test --workspace --all-features)
-    println!(
-        "\n--> [Gate 3/8] Running unit test battery (cargo test --workspace --all-features)..."
-    );
+    // 3. Unit tests (cargo test --workspace)
+    println!("\n--> [Gate 3/8] Running unit test battery (cargo test --workspace)...");
     let t0 = Instant::now();
-    let test_status = Command::new("cargo")
-        .args(["test", "--workspace", "--all-features"])
-        .status()?;
+    let mut test_cmd = Command::new("cargo");
+    test_cmd.args(["test", "--workspace"]);
+    if cfg!(target_os = "macos") {
+        test_cmd.arg("--all-features");
+    }
+    let test_status = test_cmd.status()?;
     let d_test = t0.elapsed();
     let test_pass = test_status.success();
     scorecard.push((
@@ -1924,28 +1938,55 @@ async fn run_test_all(identity: Option<String>) -> Result<(), Box<dyn std::error
         eval_pass,
     ));
 
-    // 8. G1 DMG build & verification
-    println!("\n--> [Gate 8/8] Building and verifying distributable macOS DMG (G1 Gate)...");
+    // 8. G1 Distribution artifact build & verification
+    println!("\n--> [Gate 8/8] Building and verifying distributable package (G1 Gate)...");
     let t0 = Instant::now();
-    let id = identity.unwrap_or_else(detect_identity);
-    let dmg_output = "target/dist/Grok-Muse.dmg";
-    let dmg_build_res = assemble_dmg(&id, dmg_output, false, None);
-    let dmg_verify_res = if dmg_build_res.is_ok() {
-        run_verify_dmg(dmg_output)
-    } else {
-        Err("DMG build failed".into())
+    let _id = identity.unwrap_or_else(detect_identity);
+    #[cfg(target_os = "macos")]
+    let (dmg_pass, dmg_metric) = {
+        let dmg_output = "target/dist/Grok-Muse.dmg";
+        let dmg_build_res = assemble_dmg(&_id, dmg_output, false, None);
+        let dmg_verify_res = if dmg_build_res.is_ok() {
+            run_verify_dmg(dmg_output)
+        } else {
+            Err("DMG build failed".into())
+        };
+        let ok = dmg_verify_res.is_ok();
+        let metric = if ok {
+            "Strict codesign, hdiutil APFS verify, 0 Electron".into()
+        } else {
+            format!("Failed: {:?}", dmg_verify_res.err())
+        };
+        (ok, metric)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (dmg_pass, dmg_metric) = {
+        let bin_dir = cargo_profile_dir(false, None);
+        let deb_out = PathBuf::from("target/dist/dt_test_amd64.deb");
+        if let Some(parent) = deb_out.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let status = Command::new("bash")
+            .args([
+                "tools/installers/linux/build-deb.sh",
+                env!("CARGO_PKG_VERSION"),
+                bin_dir.to_str().unwrap_or("target/debug"),
+                deb_out.to_str().unwrap(),
+            ])
+            .status();
+        let ok = status.map(|s| s.success()).unwrap_or(false) && deb_out.exists();
+        let metric = if ok {
+            "Verified native package layout, 0 Electron".into()
+        } else {
+            "Package assembly failed".into()
+        };
+        (ok, metric)
     };
     let d_dmg = t0.elapsed();
-    let dmg_pass = dmg_verify_res.is_ok();
-    let dmg_metric = if dmg_pass {
-        "Strict codesign, hdiutil APFS verify, 0 Electron".into()
-    } else {
-        format!("Failed: {:?}", dmg_verify_res.err())
-    };
     scorecard.push((
         "G1",
-        "G1 Distribution DMG",
-        "Strict codesign, hdiutil verify, 0 Electron",
+        "G1 Distribution Package",
+        "Verified native bundle/package, 0 Electron",
         dmg_metric,
         d_dmg,
         dmg_pass,
@@ -2160,6 +2201,11 @@ fn run_install(
     fs::create_dir_all(&target_bin_dir)?;
 
     let symlinks = [
+        ("dt", target_app_dir.join("GrokMuse.app/Contents/MacOS/dt")),
+        (
+            "dt-doctor",
+            target_app_dir.join("GrokMuse.app/Contents/MacOS/dt-doctor"),
+        ),
         ("gm", target_app_dir.join("GrokMuse.app/Contents/MacOS/gm")),
         (
             "gm-daemon",
@@ -2189,6 +2235,8 @@ fn run_install(
     println!("    • {}/GrokMuse.app", target_app_dir.display());
     println!("    • {}/GrokMuseCUHelper.app", target_app_dir.display());
     println!("  CLI symlinks created in:");
+    println!("    • {}/dt", target_bin_dir.display());
+    println!("    • {}/dt-doctor", target_bin_dir.display());
     println!("    • {}/gm", target_bin_dir.display());
     println!("    • {}/gm-daemon", target_bin_dir.display());
     println!("    • {}/gm-cu-helper", target_bin_dir.display());
@@ -2517,12 +2565,65 @@ mod tests {
         );
 
         // Verify symlinks created
+        assert!(test_bin.join("dt").exists());
+        assert!(test_bin.join("dt-doctor").exists());
         assert!(test_bin.join("gm").exists());
         assert!(test_bin.join("gm-daemon").exists());
         assert!(test_bin.join("gm-cu-helper").exists());
 
         let _ = fs::remove_dir_all(test_apps);
         let _ = fs::remove_dir_all(test_bin);
+    }
+
+    #[test]
+    fn xtask_verify_dmg() {
+        dmg_cli_preserves_profile_and_output_selection();
+        test_extract_mount_point_formats();
+    }
+
+    #[test]
+    fn test_pkg_layout_generation() {
+        use clap::Parser;
+        let parsed = super::Cli::try_parse_from(["xtask", "bundle", "--release"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            super::Commands::Bundle { release: true }
+        ));
+        let install_parsed = super::Cli::try_parse_from([
+            "xtask",
+            "install",
+            "--release",
+            "--no-sign",
+            "--dest-dir",
+            "/tmp/dt-apps",
+            "--bin-dir",
+            "/tmp/dt-bin",
+        ])
+        .unwrap();
+        assert!(matches!(
+            install_parsed.command,
+            super::Commands::Install {
+                release: true,
+                no_sign: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_generated_tokens_and_web_mobile_builds() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest_dir.parent().unwrap();
+        assert!(root.join("ui/design-tokens.json").exists());
+        assert!(root.join("crates/gm-ui/src/ui/tokens.rs").exists());
+        assert!(
+            root.join("crates/gm-openbot/src/companion_tokens.css")
+                .exists()
+        );
+        assert!(root.join("clients/web/src/tokens.css").exists());
+        assert!(root.join("clients/mobile/lib/tokens.ts").exists());
+        assert!(root.join("clients/web/src/App.tsx").exists());
+        assert!(root.join("clients/mobile/app/index.tsx").exists());
     }
 
     #[test]

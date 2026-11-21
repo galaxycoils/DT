@@ -1421,4 +1421,9 @@ mod tests {
         std::fs::write(custom_dir.join("SKILL.md"), "# Body\n").unwrap();
         assert!(SkillRegistry::open(&paths).is_err());
     }
+
+    #[test]
+    fn test_bundled_skills_manifest_integrity() {
+        bundled_upstream_skills_and_docs_load_cleanly_via_progressive_disclosure();
+    }
 }
