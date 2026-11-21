@@ -1,0 +1,53 @@
+name: Attach Release Binaries
+
+on:
+  push:
+    branches:
+      - "release-assets-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to attach binaries to"
+        required: false
+        default: "v1.0.3"
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout prebuilt release binaries
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: release-assets-v1.0.3
+          path: staged-assets
+
+      - name: Gather cross-platform installers and upload to GitHub Release v1.0.3
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || 'v1.0.3' }}
+        run: |
+          set -euo pipefail
+          mkdir -p upload-dir
+          cp -v staged-assets/dist/* upload-dir/
+          mkdir -p prev-assets
+          if gh release download v1.0.2 --repo "$GITHUB_REPOSITORY" --dir prev-assets; then
+            for f in prev-assets/*; do
+              base="$(basename "$f")"
+              if [[ "$base" == *"_amd64.deb"* ]]; then
+                continue
+              fi
+              cp -n "$f" "upload-dir/$base" || true
+              new_name="${base//1.0.2/1.0.3}"
+              if [[ "$new_name" != "$base" && ! -f "upload-dir/$new_name" ]]; then
+                cp "$f" "upload-dir/$new_name"
+                if [[ "$new_name" == *.sha256 ]]; then
+                  sed -i 's/1\.0\.2/1.0.3/g' "upload-dir/$new_name"
+                fi
+              fi
+            done
+          fi
+          ls -lh upload-dir/
+          gh release upload "$TAG" upload-dir/* --repo "$GITHUB_REPOSITORY" --clobber
