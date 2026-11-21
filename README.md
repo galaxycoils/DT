@@ -21,14 +21,14 @@ Download verified release packages and prebuilt binaries from [**GitHub Releases
 
 | Platform / Architecture | Package / Binary Asset | Binaries & Components Included | Verification |
 | :--- | :--- | :--- | :--- |
-| **Ubuntu 24.04 LTS (x86_64)** | [`dt_1.0.3_amd64.deb`](https://github.com/galaxycoils/DT/releases/latest) | `/usr/bin/{dt,gm,dt-doctor,gm-daemon,gm-cu-helper,gm-ui}`, systemd user units, desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
-| **Linux Generic (x86_64)** | [`DT-1.0.3-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/latest) | Standalone release binaries: `dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui` | `.sha256` |
-| **React Web Client Bundle** | [`DT-1.0.3-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/latest) | Production Vite build (`index.html`, Rakazo token CSS, JS bundle) | `.sha256` |
-| **macOS Apple Silicon (ARM64)** | [`DT-1.0.2-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
-| **macOS Intel (x86_64)** | [`DT-1.0.2-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
-| **Windows 11 (x86_64)** | [`DT-1.0.2-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | NSIS per-user installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
-| **Windows 11 (ARM64)** | [`DT-1.0.2-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | NSIS per-user ARM64 installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
-| **Ubuntu 24.04 LTS (ARM64)** | [`dt_1.0.2_arm64.deb`](https://github.com/galaxycoils/DT/releases/tag/v1.0.2) | ARM64 Debian package with systemd user units and desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
+| **Ubuntu 24.04 LTS (x86_64)** | [`dt_1.0.3_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/dt_1.0.3_amd64.deb) | `/usr/bin/{dt,gm,dt-doctor,gm-daemon,gm-cu-helper,gm-ui}`, systemd user units, desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
+| **Ubuntu 24.04 LTS (ARM64)** | [`dt_1.0.3_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/dt_1.0.3_arm64.deb) | ARM64 Debian package with systemd user units and desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
+| **Linux Generic (x86_64)** | [`DT-1.0.3-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-linux-x86_64-binaries.tar.gz) | Standalone release binaries: `dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui` | `.sha256` |
+| **macOS Apple Silicon (ARM64)** | [`DT-1.0.3-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-macos-aarch64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
+| **macOS Intel (x86_64)** | [`DT-1.0.3-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-macos-x86_64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
+| **Windows 11 (x86_64)** | [`DT-1.0.3-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-windows-x86_64-setup.exe) | NSIS per-user installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
+| **Windows 11 (ARM64)** | [`DT-1.0.3-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-windows-aarch64-setup.exe) | NSIS per-user ARM64 installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
+| **React Web Client Bundle** | [`DT-1.0.3-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-web-client.tar.gz) | Production Vite build (`index.html`, Rakazo token CSS, JS bundle, Front Page) | `.sha256` |
 
 ```bash
 # Verify any downloaded release package with its SHA-256 sidecar:
