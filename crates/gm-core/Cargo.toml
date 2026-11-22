@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-sqlite = ["dep:rusqlite", "dep:libc"]
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 serde = { workspace = true }
@@ -15,7 +15,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "sync"] }
 rusqlite = { workspace = true, optional = true }
-libc = { workspace = true, optional = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

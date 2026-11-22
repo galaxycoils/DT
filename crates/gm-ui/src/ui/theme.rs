@@ -207,24 +207,26 @@ impl GrokPalette {
 
         style
             .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(13.0));
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(22.0, egui::FontFamily::Name("semibold".into())),
+        );
         style
             .text_styles
-            .insert(egui::TextStyle::Heading, egui::FontId::proportional(16.0));
+            .insert(egui::TextStyle::Small, egui::FontId::proportional(13.0));
         style
             .text_styles
-            .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Monospace, egui::FontId::monospace(12.5));
-        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
-        style.spacing.button_padding = Vec2::new(10.0, 7.0);
-        style.visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-        style.visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-        style.visuals.widgets.active.bg_stroke = Stroke::NONE;
+            .insert(egui::TextStyle::Monospace, egui::FontId::monospace(13.5));
+        style.spacing.item_spacing = Vec2::new(8.0, 8.0);
+        style.spacing.button_padding = Vec2::new(12.0, 7.0);
+        style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, self.border_subtle);
+        style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, self.accent);
+        style.visuals.widgets.active.bg_stroke = Stroke::new(1.5_f32, self.accent);
+        style.visuals.widgets.open.bg_stroke = Stroke::new(1.0_f32, self.accent);
         style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0_f32, self.border_subtle);
         style.visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
         style.visuals.widgets.inactive.corner_radius = CornerRadius::same(8);
@@ -339,24 +341,72 @@ pub fn paint_bot_avatar(
     }
 }
 
-/// Use the platform UI font when available; retain egui fallbacks for missing glyphs.
+pub const SOURCE_SANS_3_REGULAR: &[u8] =
+    include_bytes!("../../assets/fonts/SourceSans3-Regular.ttf");
+pub const SOURCE_SANS_3_SEMIBOLD: &[u8] =
+    include_bytes!("../../assets/fonts/SourceSans3-Semibold.ttf");
+pub const SOURCE_SANS_3_LICENSE: &str = include_str!("../../assets/fonts/LICENSE.md");
+
+/// Bundle Source Sans 3 Regular and Semibold while retaining glyph fallbacks and monospace for code.
 pub fn install_system_font(ctx: &egui::Context) {
-    let candidates = [
-        "/System/Library/Fonts/SFNS.ttf",
+    let _ = SOURCE_SANS_3_LICENSE;
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "source-sans-3".into(),
+        std::sync::Arc::new(egui::FontData::from_static(SOURCE_SANS_3_REGULAR)),
+    );
+    fonts.font_data.insert(
+        "source-sans-3-semibold".into(),
+        std::sync::Arc::new(egui::FontData::from_static(SOURCE_SANS_3_SEMIBOLD)),
+    );
+
+    let default_prop = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut proportional = vec!["source-sans-3".to_string()];
+    // Retain system CJK/glyph fallback if present on host, plus egui defaults (including emoji/symbols).
+    let sys_fallbacks = [
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
         "C:/Windows/Fonts/segoeui.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ];
-    if let Some(bytes) = candidates.iter().find_map(|p| std::fs::read(p).ok()) {
-        let mut fonts = egui::FontDefinitions::default();
-        fonts.font_data.insert(
-            "system-ui".into(),
-            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-        );
-        fonts
-            .families
-            .entry(egui::FontFamily::Proportional)
-            .or_default()
-            .insert(0, "system-ui".into());
-        ctx.set_fonts(fonts);
+    for (idx, path) in sys_fallbacks.iter().enumerate() {
+        if let Ok(bytes) = std::fs::read(path) {
+            let key = format!("sys-fallback-{idx}");
+            fonts.font_data.insert(
+                key.clone(),
+                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+            );
+            proportional.push(key);
+            break;
+        }
     }
+    for name in &default_prop {
+        if !proportional.contains(name) {
+            proportional.push(name.clone());
+        }
+    }
+    fonts
+        .families
+        .insert(egui::FontFamily::Proportional, proportional.clone());
+
+    let mut semibold = vec!["source-sans-3-semibold".to_string()];
+    semibold.extend(proportional);
+    fonts
+        .families
+        .insert(egui::FontFamily::Name("semibold".into()), semibold);
+
+    // Keep Monospace family dedicated to monospace glyphs while preserving Source Sans 3 fallback.
+    fonts
+        .families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("source-sans-3".into());
+
+    ctx.set_fonts(fonts);
 }

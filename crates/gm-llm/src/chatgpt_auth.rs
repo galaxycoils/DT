@@ -65,7 +65,7 @@ pub fn begin_chatgpt_sign_in(
         if let Some(identity) = saved {
             query.append_pair("id_token_hint", &identity.id_token);
         } else {
-            query.append_pair("agent_name_hint", "Grok Muse");
+            query.append_pair("agent_name_hint", "DT");
         }
     }
     Ok(ChatGptSignIn {
@@ -263,7 +263,7 @@ mod tests {
         let url = reqwest::Url::parse(&first.request.authorize_url).unwrap();
         let query: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(query["client_id"], "dynamic_agent_client");
-        assert_eq!(query["agent_name_hint"], "Grok Muse");
+        assert_eq!(query["agent_name_hint"], "DT");
         assert_eq!(query["ext_agent_host_id"], "host-1");
         assert!(query["scope"].contains("chatgpt.tokens.use.direct"));
         assert!(

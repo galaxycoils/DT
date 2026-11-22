@@ -568,6 +568,28 @@ impl GrokUiState {
             || self.live_computer_fullscreen
             || (self.details_drawer_open && self.details_tab == BotDetailsTab::Computer)
     }
+
+    /// Occupied width of the left sidebar at the current viewport width.
+    pub fn sidebar_occupied_width(&self, viewport_width: f32) -> f32 {
+        let collapsed = self.sidebar_manual_override == Some(false);
+        let narrow = viewport_width < 760.0;
+        if collapsed || narrow {
+            72.0
+        } else {
+            self.sidebar_width
+        }
+    }
+
+    /// Use a scrollable overlay whenever docking a side drawer would leave under 320 pt for chat.
+    pub fn should_overlay_right_panel(
+        &self,
+        viewport_width: f32,
+        panel_width: f32,
+        extra_occupied: f32,
+    ) -> bool {
+        let left = self.sidebar_occupied_width(viewport_width);
+        viewport_width - left - extra_occupied - panel_width < 320.0
+    }
 }
 
 /// Apply GrokBot Smart Composer transformations:
@@ -721,5 +743,13 @@ mod navigation_tests {
         history.push(target("researcher"));
         assert!(!history.can_forward());
         assert_eq!(history.back(), Some(target("muse")));
+    }
+
+    #[test]
+    fn drawer_uses_scrollable_overlay_below_320_pt_chat_floor() {
+        let state = GrokUiState::default();
+        assert!(state.should_overlay_right_panel(680.0, 384.0, 0.0));
+        assert!(!state.should_overlay_right_panel(1220.0, 384.0, 0.0));
+        assert!(state.should_overlay_right_panel(1220.0, 420.0, 384.0));
     }
 }

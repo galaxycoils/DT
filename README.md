@@ -9,6 +9,7 @@
   <a href="https://galaxycoils.github.io/DT/"><strong>🌐 Live Interactive Front Page</strong></a> ·
   <a href="https://github.com/galaxycoils/DT/releases/latest"><strong>📦 Latest Release & Binaries</strong></a> ·
   <a href="docs/release/coverage-inventory.json"><strong>✅ 30/30 Coverage Inventory</strong></a> ·
+  <a href="docs/OPERATIONS.md"><strong>🛠️ Operations Guide</strong></a> ·
   <a href="docs/SUPPORT_MATRIX.md"><strong>🖥️ Support Matrix</strong></a> ·
   <a href="docs/PRIVACY.md"><strong>🔒 Privacy & Discretion</strong></a>
 </p>
@@ -57,6 +58,16 @@ shasum -a 256 -c dt_1.0.3_amd64.deb.sha256
    - All **30/30 required `test_ids`** across all **26 required capability rows** in `docs/release/coverage-inventory.json` are implemented and verified by `test_coverage_inventory_test_ids_exist_in_codebase`, alongside **384/384 passing workspace tests** under `cargo nextest`.
 4. **Cross-Platform Packaging & Docker Hardening (`xtask`, `tools/installers/linux/build-deb.sh`, `deploy/docker/Dockerfile`)**:
    - Enforced deterministic `umask 022` and `0755` directory modes in `build-deb.sh`, added `dt` and `dt-doctor` symlinks to `xtask install`, added cross-platform JPEG encoding benchmarks in `xtask bench-hotpath`, and updated `deploy/docker/Dockerfile` with PipeWire/XCB build packages and the `gm` binary alias.
+
+---
+
+## What's in DT
+
+- **Pinned Local Components**: 8 optional local runtimes and models (`qwen2-vl-2b`, `smolvlm`, `smolvlm2`, `vlm_worker`, `whisper-stt-base-en`, `speech_tts`, `vm_image`, `vm_firmware` — 15 OS/architecture entries pinned with Ed25519 signatures and SHA-256 checksums in [`docs/release/component-catalog.json`](docs/release/component-catalog.json)). Pull local models from the CLI with `dt models list` / `dt models pull <id>` or install and verify optional components from the Desktop / Companion Settings UI (`/api/system/components`).
+- **PostgreSQL Hosted Mode**: Set `DT_DATABASE_URL=postgres://...` (or `DATABASE_URL`) when running `dt serve` to enable `PostgresHostedStore` (migrations V1–V4, row-level tenant isolation, and SHA-256-verified SQLite-to-PostgreSQL migration).
+- **Consent-Gated Voice & Dictation**: Managed local Whisper STT and TTS sessions via `VoiceSessionManager`, requiring explicit user consent with immediate child-process teardown on stop, barge-in, or consent revocation.
+- **Desktop Keyboard Shortcuts**: `Cmd/Ctrl+Shift+M` (Studio — Templates, Skills, Routines & Sections), `Cmd/Ctrl+B` (toggle sidebar collapse), `Cmd/Ctrl+Shift+F` (expand sidebar & search conversations), and `Cmd/Ctrl+D` (start/stop dictation), alongside `Cmd/Ctrl+K` (Command Palette), `Cmd/Ctrl+,` (Settings), `Cmd/Ctrl+/` (Shortcuts cheat-sheet), and `Cmd/Ctrl+Alt+B` (Bot Details drawer).
+- **Operations & Recovery**: See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for installation, `dt-doctor` recovery & snapshot restore, component downloads, spending controls, hosted backup/restore, and device revocation.
 
 ---
 

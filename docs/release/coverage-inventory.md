@@ -1,4 +1,4 @@
-# DT v1.0.0 Release Coverage Inventory
+# DT v1.0.2 Release Coverage Inventory
 
 This inventory maps every advertised feature, CLI entry point, API route group, settings control, provider, local runtime, workflow, and shipped skill/plugin to its supported surfaces, dependencies, expected outcomes, observable assertions, and verification test IDs. The machine-readable contract lives in [coverage-inventory.json](coverage-inventory.json) and is enforced by [verify-release-evidence.py](../../tools/verify-release-evidence.py).
 
@@ -6,10 +6,12 @@ This inventory maps every advertised feature, CLI entry point, API route group, 
 
 | Platform | Asset Name | Coverage | Certification Status |
 |---|---|---|---|
-| Apple Silicon | `DT-1.0.0-macos-aarch64.dmg` (contains `Install DT.pkg`) | macOS 14+ | Pending Developer ID signing, notarization, and 5-target native evidence |
-| Intel Mac | `DT-1.0.0-macos-x86_64.dmg` (contains `Install DT.pkg`) | macOS 14 through Tahoe | Pending Intel hardware build, signing, and native evidence |
-| Windows x64 | `DT-1.0.0-windows-x86_64-setup.exe` | Windows 11 25H2 and 26H2 | Pending NSIS 3.13 build, Authenticode signing, and native evidence |
-| Ubuntu x64 | `dt_1.0.0_amd64.deb` | Ubuntu Desktop 24.04 (X11 and Wayland) | Pending Ubuntu 24.04 `.deb` App Center smoke and X11/Wayland evidence |
+| Apple Silicon | `DT-1.0.2-macos-aarch64.dmg` (contains `Install DT.pkg`) | macOS 14+ | Pending Developer ID signing, notarization, and 8-target native evidence |
+| Intel Mac | `DT-1.0.2-macos-x86_64.dmg` (contains `Install DT.pkg`) | macOS 14 through Tahoe | Pending Intel hardware build, signing, and native evidence |
+| Windows x64 | `DT-1.0.2-windows-x86_64-setup.exe` | Windows 11 25H2 and 26H2 | Pending NSIS 3.13 build, Authenticode signing, and native evidence |
+| Windows ARM64 | `DT-1.0.2-windows-aarch64-setup.exe` | Windows 11 25H2 and 26H2 (ARM64) | Pending native ARM64 payload, Authenticode signing, and native evidence |
+| Ubuntu x64 | `dt_1.0.2_amd64.deb` | Ubuntu Desktop 24.04 (X11 and Wayland) | Pending Ubuntu 24.04 `.deb` App Center smoke and X11/Wayland evidence |
+| Ubuntu ARM64 | `dt_1.0.2_arm64.deb` | Ubuntu Desktop 24.04 ARM64 (X11 and Wayland) | Pending Ubuntu 24.04 ARM64 `.deb` App Center smoke and X11/Wayland evidence |
 
 ## Capability & Surface Matrix
 

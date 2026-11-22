@@ -864,30 +864,39 @@ function composerChanged() {
     }
 }
 
-async function sendMessage(text) {
+async function sendMessage(text, retryClientId) {
     text = (text ?? $("draft").value).trim();
     if (!text && !state._attachments.length) {
-        notice("Configure STT/TTS voice bridge in Connect Apps.");
+        dictation();
         return;
     }
     const epoch = state._epoch, target = state._target, kind = state._kind;
-    const content = [ (state._mode === "queue" && !text.startsWith("/do ") ? "/do " : "") + text, ...state._attachments.map(a => "Attached file: " + a.path) ].filter(Boolean).join("\n");
+    const content = retryClientId ? text : [ (state._mode === "queue" && !text.startsWith("/do ") ? "/do " : "") + text, ...state._attachments.map(a => "Attached file: " + a.path) ].filter(Boolean).join("\n");
+    const clientId = retryClientId || (crypto.randomUUID ? crypto.randomUUID() : "msg-" + Date.now() + "-" + Math.random().toString(16).slice(2));
     const body = kind === "dm" ? {
         content: content,
-        reply_to_id: state._reply?.id || null
+        reply_to_id: state._reply?.id || null,
+        client_msg_id: clientId
     } : {
         content: content,
         author: "You",
         reply_to_id: state._reply?.id || null
     };
-    await api(kind === "dm" ? "/api/dm/" + enc(target) + "/messages" : "/api/channels/" + enc(target) + "/messages", body);
+    const res = await api(kind === "dm" ? "/api/dm/" + enc(target) + "/messages" : "/api/channels/" + enc(target) + "/messages", body);
     if (epoch !== state._epoch) return;
-    $("draft").value = "";
-    saveDraft();
-    state._attachments = [];
-    state._reply = null;
+    if (!retryClientId) {
+        $("draft").value = "";
+        saveDraft();
+        state._attachments = [];
+        state._reply = null;
+    }
     renderChips();
     await loadMessages();
+    if (res?.reply_error) {
+        const bar = $("notice");
+        bar.replaceChildren(node("span", "Message saved, reply failed: " + res.reply_error), button("Retry reply", () => run(() => sendMessage(content, clientId))), button("Provider Setup", () => settings("Providers & models")));
+        bar.hidden = false;
+    }
 }
 
 async function fileBase64(file) {
@@ -1372,7 +1381,7 @@ function settings(pane = "General") {
     if (pane === "General") form(box, ui, [ [ "theme", "Theme", "select", [ "system", "dark", "light" ] ], [ "hardware_acceleration", "Use hardware acceleration (restart required)", "checkbox" ], [ "language", "Language" ], [ "timezone", "Timezone" ], [ "spellcheck", "Spellcheck", "checkbox" ], [ "notifications_enabled", "Desktop alerts", "checkbox" ], [ "notification_sound", "Alert sound", "checkbox" ], [ "suppress_notifications_when_active", "Suppress when active", "checkbox" ], [ "quiet_hours_start", "Quiet hours start" ], [ "quiet_hours_end", "Quiet hours end" ], [ "microphone_device", "Microphone device" ] ], v => savePrefs(v));
     if (pane === "Computer") {
         form(box, ui, [ [ "computer_execution_mode", "Execution on this computer", "select", [ [ "ask", "Ask every time" ], [ "always", "Always" ], [ "never", "Never" ] ] ], [ "route_traffic_through_computer", "Route traffic through this computer", "checkbox" ], [ "auto_review_approvals", "Auto-review eligible approvals", "checkbox" ] ], v => savePrefs(v));
-        box.append(node("p", "Immutable blocklist and irreversible-action gates remain enforced."), button("Helper health", async () => textView("Computer health", await api("/api/system/health"))), button("Live Computer", liveComputer), button(state._data.status?.paused ? "Resume" : "Pause", () => mutate("/api/system/pause", {
+        box.append(node("p", "Immutable blocklist and irreversible-action gates remain enforced."), button("DT Doctor", async () => textView("DT Doctor", await api("/api/v1/doctor"))), button("Live Computer", liveComputer), button(state._data.status?.paused ? "Resume" : "Pause", () => mutate("/api/system/pause", {
             paused: !state._data.status?.paused
         })), node("h3", "Custom Rules"));
         form(box, {
@@ -1403,6 +1412,24 @@ function settings(pane = "General") {
         box.append(node("p", "Version " + (state._data.version || "")), button("Check for Updates", async () => textView("Updates", await api("/api/system/updates/check", {}))), button("Download & Verify Update", () => confirmAction("Download verified update", async () => textView("Verified Update", await api("/api/system/updates/download", {
             confirmed: true
         })))), button("Export Support Bundle", async () => textView("Support Bundle", await api("/api/system/support-bundle", {}))));
+        const compWrap = node("div");
+        box.append(node("h3", "Local Components"), compWrap);
+        const loadComps = async () => {
+            try {
+                const data = await api("/api/system/components");
+                compWrap.replaceChildren();
+                for (const c of data.components || []) {
+                    const mb = (Number(c.total_size_bytes || 0) / 1048576).toFixed(1) + " MB";
+                    compWrap.append(row(node("span", `${c.id} · ${mb} · ${c.status}`), button(c.status === "failed" ? "Retry" : c.status === "verified" ? "Verify" : "Install", async () => {
+                        await api(`/api/system/components/${enc(c.id)}/${c.status === "verified" ? "verify" : "install"}`, {});
+                        await loadComps();
+                    })));
+                }
+            } catch (e) {
+                compWrap.replaceChildren(node("small", e.message));
+            }
+        };
+        run(loadComps);
         form(box, {
             note: "",
             include_diagnostics: false
@@ -1518,7 +1545,7 @@ function connectApps(tab = "Apps") {
 }
 
 function shortcuts() {
-    textView("Keyboard Shortcuts", "Cmd/Ctrl+N — New Bot\nCmd/Ctrl+K — Commands & Search\nCmd/Ctrl+B — Sidebar\nCmd/Ctrl+Alt+B — Details\nCmd/Ctrl+, — Settings\nCmd/Ctrl+Shift+M — Connect Apps\nCmd/Ctrl+Shift+F — Bot filter\nCmd/Ctrl+Shift+A — Attach\nCmd/Ctrl+D — Dictation\nCmd/Ctrl+[ / ] — Back / Forward\nCmd/Ctrl+1…5 — Workspaces\nEnter — Send; Shift+Enter — Newline\nEscape — Dismiss top layer");
+    textView("Keyboard Shortcuts", "Cmd/Ctrl+N — New Bot\nCmd/Ctrl+K — Commands & Search\nCmd/Ctrl+B — Sidebar\nCmd/Ctrl+Alt+B — Details\nCmd/Ctrl+, — Settings\nCmd/Ctrl+Shift+M — Studio / Templates\nCmd/Ctrl+Shift+F — Bot filter\nCmd/Ctrl+Shift+A — Attach\nCmd/Ctrl+D — Dictation\nCmd/Ctrl+[ / ] — Back / Forward\nCmd/Ctrl+1…5 — Workspaces\nEnter — Send; Shift+Enter — Newline\nEscape — Dismiss top layer");
 }
 
 function palette() {
@@ -1728,17 +1755,38 @@ function escapeLayer() {
 }
 
 function dictation() {
+    if (state._rec) {
+        state._rec.stop();
+        state._rec = null;
+        $("dictate").classList.remove("active");
+        return;
+    }
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Speech) {
-        notice("Enable Microphone permission / Local Whisper adapter in Connect Apps.");
+        run(async () => {
+            const st = await api("/api/voice/status");
+            const bar = $("notice");
+            bar.replaceChildren(node("span", st.stt_installed ? "Browser speech unavailable; local Whisper STT is installed." : "Browser speech unavailable and local Whisper STT is not installed."), button("Local Components", () => settings("Updates")));
+            bar.hidden = false;
+        });
         return;
     }
     const recognition = new Speech;
+    state._rec = recognition;
+    $("dictate").classList.add("active");
     recognition.onresult = e => {
         $("draft").value += e.results[0][0].transcript;
         composerChanged();
     };
-    recognition.onerror = e => notice(e.error);
+    recognition.onerror = e => {
+        state._rec = null;
+        $("dictate").classList.remove("active");
+        notice("Dictation error: " + e.error);
+    };
+    recognition.onend = () => {
+        state._rec = null;
+        $("dictate").classList.remove("active");
+    };
     recognition.start();
 }
 
@@ -1841,7 +1889,7 @@ document.addEventListener("keydown", e => {
     };
     if (e.shiftKey && key === "m") {
         e.preventDefault();
-        connectApps();
+        templates();
     } else if (e.shiftKey && key === "a") {
         e.preventDefault();
         $("file").click();

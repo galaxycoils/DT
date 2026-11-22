@@ -1,94 +1,186 @@
-import React, { useState } from "react";
-import { View, Text, Pressable, ScrollView } from "react-native";
-import { darkTokens } from "../lib/tokens";
-import { mobileV1Endpoint } from "../lib/api";
-
-const DEFAULT_ROUTINES = [
-  {
-    id: "morning-brief",
-    name: "Morning Research & Calendar Brief",
-    botId: "muse",
-    schedule: "09:00 · America/Los_Angeles",
-    quietHours: "22:00–07:00",
-    lastOutcome: "queued",
-  },
-  {
-    id: "repo-health",
-    name: "Worktree & Safety Invariant Patrol",
-    botId: "guardian",
-    schedule: "14:00 · UTC",
-    quietHours: "23:00–06:00",
-    lastOutcome: "skipped_quiet_hours",
-  },
-];
+import React, { useCallback, useState } from "react";
+import { Button, Pressable, ScrollView, Text, useColorScheme, View } from "react-native";
+import { useFocusEffect } from "expo-router";
+import {
+  connectedRequest,
+  listRoutineRuns,
+  listRoutines,
+  triggerRoutine,
+  type Routine,
+  type RoutineRun,
+} from "../lib/api";
+import { darkTokens, lightTokens } from "../lib/tokens";
 
 export default function RoutinesScreen() {
+  const scheme = useColorScheme();
+  const tokens = scheme === "light" ? lightTokens : darkTokens;
+  const [routines, setRoutines] = useState<Routine[]>([]);
+  const [selected, setSelected] = useState<Routine | null>(null);
+  const [runs, setRuns] = useState<RoutineRun[]>([]);
   const [outcomes, setOutcomes] = useState<Record<string, string>>({});
-  const endpoint = mobileV1Endpoint("", "/routines");
+  const [status, setStatus] = useState("Loading routines…");
 
-  function handleTrigger(id: string) {
-    setOutcomes((prev) => ({
-      ...prev,
-      [id]: prev[id] === "queued" ? "duplicate" : "queued",
-    }));
+  const reload = useCallback((signal?: AbortSignal) => {
+    setStatus("Loading routines…");
+    void listRoutines(signal)
+      .then((items) => {
+        if (signal?.aborted) return;
+        setRoutines(items);
+        setStatus(items.length ? "" : "No routines configured.");
+      })
+      .catch((error) => {
+        if (signal?.aborted) return;
+        setRoutines([]);
+        setSelected(null);
+        setRuns([]);
+        setStatus(error instanceof Error ? error.message : "Could not load routines.");
+      });
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      const controller = new AbortController();
+      reload(controller.signal);
+      return () => controller.abort();
+    }, [reload]),
+  );
+
+  async function showRuns(routine: Routine) {
+    setStatus("Loading run history…");
+    setSelected(routine);
+    setRuns([]);
+    try {
+      const history = await listRoutineRuns(routine.id);
+      setRuns(Array.isArray(history) ? history : []);
+      setStatus(history.length ? "" : "No recorded runs yet.");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not load runs.");
+    }
+  }
+
+  async function triggerTest(routine: Routine) {
+    setStatus("Starting test run…");
+    try {
+      await connectedRequest(`/routines/${encodeURIComponent(routine.id)}/test`, {
+        method: "POST",
+        body: "{}",
+      });
+      await showRuns(routine);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not start test run.");
+    }
+  }
+
+  async function handleTriggerNow(routine: Routine) {
+    setStatus("Triggering routine…");
+    try {
+      const deliveryId = `mobile-${routine.id}-${Date.now()}`;
+      const res = await triggerRoutine(routine.id, deliveryId);
+      setOutcomes((prev) => ({ ...prev, [routine.id]: res.status || "queued" }));
+      await showRuns(routine);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "Could not trigger routine.");
+    }
   }
 
   return (
     <ScrollView
-      style={{ flex: 1, backgroundColor: darkTokens.background }}
+      style={{ flex: 1, backgroundColor: tokens.background }}
       contentContainerStyle={{ padding: 16, gap: 12 }}
     >
-      <Text style={{ color: darkTokens.foreground, fontSize: 20, fontWeight: "700" }}>
+      <Text style={{ color: tokens.foreground, fontSize: 20, fontWeight: "700" }}>
         Routines & Run History
       </Text>
-      <Text style={{ color: darkTokens.mutedForeground, fontSize: 12 }}>
-        Endpoint: {endpoint} · Idempotent delivery_id deduplication
+      <Text style={{ color: tokens.mutedForeground, fontSize: 12 }}>
+        /api/v1/routines · Idempotent delivery_id deduplication
       </Text>
 
-      {DEFAULT_ROUTINES.map((rtn) => {
-        const status = outcomes[rtn.id] || rtn.lastOutcome;
+      {routines.map((routine) => {
+        const isSelected = selected?.id === routine.id;
         return (
           <View
-            key={rtn.id}
+            key={routine.id}
             style={{
-              padding: 15,
-              backgroundColor: darkTokens.card,
+              backgroundColor: tokens.card,
+              borderColor: isSelected ? tokens.primary : tokens.border,
+              borderWidth: 1,
               borderRadius: 16,
+              padding: 15,
               gap: 8,
             }}
           >
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-              <Text style={{ color: darkTokens.foreground, fontSize: 15, fontWeight: "600" }}>
-                {rtn.name}
+            <Pressable accessibilityRole="button" onPress={() => void showRuns(routine)}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                <Text style={{ color: tokens.foreground, fontSize: 15, fontWeight: "600", flex: 1 }}>
+                  {routine.name}
+                </Text>
+                {routine.bot_id ? (
+                  <Text style={{ color: tokens.link, fontSize: 12, fontWeight: "600" }}>
+                    @{routine.bot_id}
+                  </Text>
+                ) : null}
+              </View>
+              <Text style={{ color: tokens.mutedForeground, fontSize: 13, marginTop: 2 }}>
+                {routine.enabled ? "Enabled" : "Disabled"}
+                {routine.next_run_utc ? ` · Next: ${routine.next_run_utc}` : ""}
               </Text>
-              <Text style={{ color: darkTokens.link, fontSize: 12, fontWeight: "600" }}>
-                @{rtn.botId}
+            </Pressable>
+            {outcomes[routine.id] ? (
+              <Text style={{ color: tokens.faintForeground, fontSize: 12 }}>
+                Outcome: {outcomes[routine.id]}
               </Text>
-            </View>
-            <Text style={{ color: darkTokens.mutedForeground, fontSize: 12 }}>
-              Schedule: {rtn.schedule} · Quiet hours: {rtn.quietHours}
-            </Text>
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
-              <Text style={{ color: darkTokens.faintForeground, fontSize: 12 }}>
-                Outcome: {status}
-              </Text>
+            ) : null}
+            <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 4 }}>
               <Pressable
-                onPress={() => handleTrigger(rtn.id)}
+                accessibilityRole="button"
+                onPress={() => void handleTriggerNow(routine)}
                 style={{
                   paddingHorizontal: 12,
-                  paddingVertical: 6,
+                  paddingVertical: 7,
                   borderRadius: 10,
-                  backgroundColor: darkTokens.dialog,
+                  backgroundColor: tokens.dialog,
+                  borderColor: tokens.border,
+                  borderWidth: 1,
                 }}
               >
-                <Text style={{ color: darkTokens.foreground, fontSize: 12, fontWeight: "600" }}>
+                <Text style={{ color: tokens.foreground, fontSize: 12, fontWeight: "600" }}>
                   Trigger Now
                 </Text>
               </Pressable>
+              <Button title="Run History" color={tokens.primary} onPress={() => void showRuns(routine)} />
+              <Button title="Test Run" color={tokens.primary} onPress={() => void triggerTest(routine)} />
             </View>
           </View>
         );
       })}
+
+      {status ? (
+        <Text accessibilityLiveRegion="polite" style={{ color: tokens.mutedForeground }}>
+          {status}
+        </Text>
+      ) : null}
+
+      {selected ? (
+        <View
+          style={{
+            backgroundColor: tokens.card,
+            borderColor: tokens.border,
+            borderWidth: 1,
+            borderRadius: 12,
+            padding: 12,
+            gap: 6,
+          }}
+        >
+          <Text accessibilityRole="header" style={{ color: tokens.foreground, fontWeight: "600" }}>
+            {selected.name} · Run History
+          </Text>
+          {runs.map((run) => (
+            <Text key={run.id} style={{ color: tokens.foreground, fontSize: 13 }}>
+              {run.status} · {new Date(run.fired_at).toLocaleString()}
+            </Text>
+          ))}
+        </View>
+      ) : null}
     </ScrollView>
   );
 }

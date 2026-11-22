@@ -7,13 +7,13 @@
 
 use crate::ui::{
     cache::{BoundedTextureCache, MarkdownLayoutCache},
-    chat::{TranscriptRow, draw_chat_canvas},
+    chat::{ChatCanvasAction, ComposerFailure, ConnectionBanner, TranscriptRow, draw_chat_canvas},
     details_drawer::draw_bot_details_drawer,
     hotkeys::handle_global_hotkeys,
     modals::draw_active_modal,
     sidebar::draw_adaptive_sidebar,
     split_page::draw_split_page_panel,
-    state::{BotDetailsTab, GrokUiState, WorkspaceSection},
+    state::{BotDetailsTab, GrokUiState, SettingsPane, WorkspaceSection},
     theme::GrokPalette,
     workspace_views::draw_workspace_section_view,
 };
@@ -98,8 +98,12 @@ enum PendingKind {
     PreviewBotFile,
     LibraryPage,
     ChannelHistory(String),
+    ChannelPost(String),
     DirectChatHistory(String),
-    PostDirectChat(String),
+    PostDirectChat {
+        bot_id: String,
+        client_msg_id: Option<String>,
+    },
     SearchMessages,
     ListSections,
     ListRules,
@@ -149,7 +153,26 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
         DaemonRequest::ManageSystem { op, .. }
             if matches!(
                 op.as_str(),
-                "get_bot_avatar" | "install_update" | "support_bundle" | "health" | "feedback"
+                "get_bot_avatar"
+                    | "install_update"
+                    | "support_bundle"
+                    | "health"
+                    | "feedback"
+                    | "components_list"
+                    | "components_install"
+                    | "components_verify"
+                    | "voice_status"
+                    | "voice_start"
+                    | "voice_consent"
+                    | "voice_transcribe"
+                    | "voice_speak"
+                    | "voice_barge_in"
+                    | "voice_stop"
+                    | "marketplace_list"
+                    | "marketplace_install"
+                    | "marketplace_remove"
+                    | "billing_status"
+                    | "connector_probe"
             ) =>
         {
             PendingKind::ToolResult(op.clone())
@@ -161,10 +184,20 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
         DaemonRequest::ChannelHistory { channel_id } => {
             PendingKind::ChannelHistory(channel_id.clone())
         }
+        DaemonRequest::ChannelPost { channel_id, .. } => {
+            PendingKind::ChannelPost(channel_id.clone())
+        }
         DaemonRequest::GetDirectChatHistory { bot_id, .. } => {
             PendingKind::DirectChatHistory(bot_id.clone())
         }
-        DaemonRequest::PostDirectChat { bot_id, .. } => PendingKind::PostDirectChat(bot_id.clone()),
+        DaemonRequest::PostDirectChat {
+            bot_id,
+            client_msg_id,
+            ..
+        } => PendingKind::PostDirectChat {
+            bot_id: bot_id.clone(),
+            client_msg_id: client_msg_id.clone(),
+        },
         DaemonRequest::SearchMessages { .. } => PendingKind::SearchMessages,
         DaemonRequest::ManageBotSection { op, .. } if op == "list" => PendingKind::ListSections,
         DaemonRequest::ManageCustomRule { op, .. } if op == "list" => PendingKind::ListRules,
@@ -218,15 +251,82 @@ fn pending_kind(request: &DaemonRequest) -> PendingKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum DaemonConnectionState {
+    #[default]
+    Starting,
+    Ready,
+    Disconnected,
+}
+
+impl DaemonConnectionState {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Starting => "Starting",
+            Self::Ready => "Ready",
+            Self::Disconnected => "Disconnected",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DraftClearReceipt {
+    target: String,
+    content: String,
+    attachments: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct InFlightDirectSend {
+    client_msg_id: String,
+    bot_id: String,
+    content: String,
+    reply_to_id: Option<String>,
+    attachments: Vec<String>,
+    streaming: String,
+    persisted: bool,
+    completed: bool,
+    uncertain: bool,
+    reply_error: Option<String>,
+    provider_setup_required: bool,
+}
+
+fn error_needs_provider_setup(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    [
+        "api key",
+        "credential",
+        "missing key",
+        "no configured",
+        "not signed in",
+        "sign in",
+        "unauthorized",
+        "authentication",
+        "oauth",
+        "model",
+        "provider",
+        "revalidation",
+        "401",
+        "403",
+        "404",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 #[derive(Default)]
 struct ViewState {
     status: String,
+    conn_state: DaemonConnectionState,
+    conn_detail: String,
     paused: bool,
     error: Option<String>,
+    composer_error: Option<String>,
     messages: Vec<(String, String)>,
     dm_messages: Vec<Value>,
     dm_bot_id: String,
     streaming: String,
+    pending_direct_sends: Vec<InFlightDirectSend>,
     tasks: Vec<Value>,
     bots: Vec<Value>,
     sections: Vec<Value>,
@@ -249,10 +349,11 @@ struct ViewState {
     attachment_paths: Vec<(String, String)>,
     channel_messages: Vec<Value>,
     channel_history_id: String,
+    pending_channel_refresh: Option<String>,
     approvals: Vec<(String, String, String)>,
     connected: bool,
     sending: bool,
-    clear_drafts: Vec<(String, String)>,
+    clear_drafts: Vec<DraftClearReceipt>,
     active_chat: Option<String>,
     completed_chat: Option<String>,
     activity_posts: Vec<Value>,
@@ -299,12 +400,62 @@ impl ViewState {
         }
     }
 
+    fn reconcile_message_against_pending(&mut self, msg: &Value) {
+        let msg_id = msg["id"].as_str().unwrap_or("");
+        let req_id = msg["request_id"].as_str().unwrap_or("");
+        let reply_to = msg["reply_to_id"].as_str().unwrap_or("");
+        let role = msg["role"].as_str().unwrap_or("");
+
+        if role == "user" {
+            for entry in &mut self.pending_direct_sends {
+                if ((!msg_id.is_empty() && entry.client_msg_id == msg_id)
+                    || (!req_id.is_empty() && entry.client_msg_id == req_id))
+                    && !entry.persisted
+                {
+                    entry.persisted = true;
+                    entry.uncertain = false;
+                    self.clear_drafts.push(DraftClearReceipt {
+                        target: format!("dm:{}", entry.bot_id),
+                        content: entry.content.clone(),
+                        attachments: entry.attachments.clone(),
+                    });
+                }
+            }
+        } else if role == "assistant" {
+            self.pending_direct_sends.retain(|entry| {
+                let matches_reply = !reply_to.is_empty() && entry.client_msg_id == reply_to;
+                let matches_req = !req_id.is_empty() && entry.client_msg_id == req_id;
+                !(matches_reply || matches_req)
+            });
+        }
+    }
+
+    fn merge_dm_message(&mut self, msg: Value) {
+        let id = msg["id"].as_str().unwrap_or("").to_string();
+        if id.is_empty() {
+            return;
+        }
+        self.reconcile_message_against_pending(&msg);
+        if let Some(existing) = self
+            .dm_messages
+            .iter_mut()
+            .find(|m| m["id"].as_str() == Some(id.as_str()))
+        {
+            *existing = msg;
+        } else {
+            self.dm_messages.push(msg);
+        }
+        self.dm_messages
+            .sort_by_key(|m| m["seq"].as_u64().unwrap_or(u64::MAX));
+    }
+
     fn merge_dm_history(&mut self, bot_id: &str, value: &Value) {
         if self.dm_bot_id != bot_id {
             return;
         }
         if let Some(messages) = value["messages"].as_array().or_else(|| value.as_array()) {
             for message in messages {
+                self.reconcile_message_against_pending(message);
                 if let Some(existing) = self
                     .dm_messages
                     .iter_mut()
@@ -316,8 +467,83 @@ impl ViewState {
                 }
             }
             self.dm_messages
-                .sort_by_key(|m| m["seq"].as_u64().unwrap_or(0));
+                .sort_by_key(|m| m["seq"].as_u64().unwrap_or(u64::MAX));
         }
+    }
+
+    fn merge_channel_message(&mut self, channel_id: &str, msg: Value) {
+        if !self.channel_history_id.is_empty() && self.channel_history_id != channel_id {
+            return;
+        }
+        let id = msg["id"].as_str().unwrap_or("");
+        if id.is_empty() {
+            return;
+        }
+        if let Some(existing) = self
+            .channel_messages
+            .iter_mut()
+            .find(|m| m["id"].as_str() == Some(id))
+        {
+            *existing = msg;
+        } else {
+            self.channel_messages.push(msg);
+        }
+        self.channel_messages.sort_by(|a, b| {
+            let sa = a["seq"].as_u64();
+            let sb = b["seq"].as_u64();
+            match (sa, sb) {
+                (Some(x), Some(y)) => x.cmp(&y),
+                _ => a["timestamp"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(b["timestamp"].as_str().unwrap_or("")),
+            }
+        });
+    }
+
+    fn streaming_for_bot(&self, bot_id: &str) -> String {
+        if bot_id.is_empty() {
+            return self.streaming.clone();
+        }
+        for entry in self.pending_direct_sends.iter().rev() {
+            if entry.bot_id == bot_id && !entry.completed && !entry.streaming.is_empty() {
+                return entry.streaming.clone();
+            }
+        }
+        String::new()
+    }
+
+    fn failure_for_bot(&self, bot_id: &str) -> Option<(String, String, Option<String>, bool)> {
+        if let Some(entry) = self
+            .pending_direct_sends
+            .iter()
+            .rev()
+            .find(|e| e.bot_id == bot_id && e.completed && e.reply_error.is_some())
+        {
+            let err = entry.reply_error.clone().unwrap_or_default();
+            let headline = if entry.persisted {
+                "Message saved, reply failed".to_string()
+            } else if entry.uncertain {
+                "Send uncertain — check saved status or retry".to_string()
+            } else {
+                "Send failed — draft preserved".to_string()
+            };
+            return Some((
+                headline,
+                err,
+                Some(entry.client_msg_id.clone()),
+                entry.provider_setup_required,
+            ));
+        }
+        if let Some(err) = &self.composer_error {
+            return Some((
+                "Message error".to_string(),
+                err.clone(),
+                None,
+                error_needs_provider_setup(err),
+            ));
+        }
+        None
     }
 
     fn finish_chat(&mut self, id: String, text: String) {
@@ -413,13 +639,27 @@ impl ViewState {
                 message_id,
                 delta,
                 done,
-            } if self.active_chat.as_ref() == Some(&message_id)
-                && self.completed_chat.as_ref() != Some(&message_id) =>
-            {
-                self.streaming.push_str(&delta);
-                if done {
-                    let text = std::mem::take(&mut self.streaming);
-                    self.finish_chat(message_id, text);
+            } => {
+                if self.active_chat.as_ref() == Some(&message_id)
+                    && self.completed_chat.as_ref() != Some(&message_id)
+                {
+                    self.streaming.push_str(&delta);
+                    if done {
+                        let text = std::mem::take(&mut self.streaming);
+                        self.finish_chat(message_id.clone(), text);
+                    }
+                }
+                if let Some(entry) = self
+                    .pending_direct_sends
+                    .iter_mut()
+                    .find(|e| e.client_msg_id == message_id)
+                {
+                    if !delta.is_empty() {
+                        entry.streaming.push_str(&delta);
+                    }
+                    if done {
+                        entry.completed = true;
+                    }
                 }
             }
             DaemonEvent::TaskFinished {
@@ -430,9 +670,31 @@ impl ViewState {
                 if ok { "Completed" } else { "Task update" }.into(),
                 format!("{task_id}\n{message}"),
             )),
-            DaemonEvent::ApprovalResolved { request_id }
-            | DaemonEvent::ApprovalExpired { request_id } => {
-                self.approvals.retain(|(id, _, _)| id != &request_id)
+            DaemonEvent::ApprovalResolved { request_id } => {
+                self.approvals.retain(|(id, _, _)| id != &request_id);
+                for m in &mut self.dm_messages {
+                    if m.get("card")
+                        .and_then(|c| c.get("request_id"))
+                        .and_then(|v| v.as_str())
+                        == Some(request_id.as_str())
+                        && m["card"]["status"].as_str() == Some("pending")
+                    {
+                        m["card"]["status"] = serde_json::json!("resolved");
+                    }
+                }
+            }
+            DaemonEvent::ApprovalExpired { request_id } => {
+                self.approvals.retain(|(id, _, _)| id != &request_id);
+                for m in &mut self.dm_messages {
+                    if m.get("card")
+                        .and_then(|c| c.get("request_id"))
+                        .and_then(|v| v.as_str())
+                        == Some(request_id.as_str())
+                        && m["card"]["status"].as_str() == Some("pending")
+                    {
+                        m["card"]["status"] = serde_json::json!("expired");
+                    }
+                }
             }
             DaemonEvent::ApprovalRequested {
                 request_id,
@@ -453,14 +715,36 @@ impl ViewState {
             }
             DaemonEvent::DirectMessageAdded { bot_id, message } => {
                 if self.dm_bot_id.is_empty() || self.dm_bot_id == bot_id {
-                    let msg_id = message["id"].as_str().unwrap_or("");
-                    if !self
-                        .dm_messages
-                        .iter()
-                        .any(|m| m["id"].as_str() == Some(msg_id))
-                    {
-                        self.dm_messages.push(message);
+                    self.merge_dm_message(message);
+                } else {
+                    self.reconcile_message_against_pending(&message);
+                }
+            }
+            DaemonEvent::ChannelMessage {
+                channel_id,
+                author,
+                bot_id,
+                content,
+                timestamp,
+            } => {
+                let synth_id = format!("ev-{channel_id}-{timestamp}-{author}");
+                if self.channel_history_id.is_empty() || self.channel_history_id == channel_id {
+                    if !self.channel_messages.iter().any(|m| {
+                        m["author"].as_str() == Some(author.as_str())
+                            && m["content"].as_str() == Some(content.as_str())
+                            && m["timestamp"].as_str() == Some(timestamp.as_str())
+                    }) {
+                        self.channel_messages.push(serde_json::json!({
+                            "id": synth_id,
+                            "channel_id": channel_id,
+                            "author": author,
+                            "bot_id": bot_id,
+                            "content": content,
+                            "timestamp": timestamp,
+                            "reactions": [],
+                        }));
                     }
+                    self.pending_channel_refresh = Some(channel_id);
                 }
             }
             DaemonEvent::MessageReactionUpdated {
@@ -565,11 +849,12 @@ impl Shared {
     }
 }
 
-type OutboundRequest = (DaemonRequest, Option<(String, String)>);
+type OutboundRequest = (DaemonRequest, Option<DraftClearReceipt>);
 
 struct NativeApp {
     shared: Shared,
     requests: tokio::sync::mpsc::Sender<OutboundRequest>,
+    retry_notify: Arc<tokio::sync::Notify>,
     live_computer_active: Arc<AtomicBool>,
     live_computer_notify: Arc<tokio::sync::Notify>,
     ui_state: GrokUiState,
@@ -580,6 +865,7 @@ struct NativeApp {
     draft: String,
     draft_target: String,
     other_drafts: Vec<(String, String)>,
+    other_attachments: Vec<(String, Vec<String>)>,
     bot: String,
     task_mode: bool,
     search: String,
@@ -616,6 +902,8 @@ impl NativeApp {
             &mut self.draft_target,
             &mut self.draft,
             &mut self.other_drafts,
+            &mut self.ui_state.pending_attachments,
+            &mut self.other_attachments,
             target,
         );
     }
@@ -624,6 +912,9 @@ impl NativeApp {
         data.draft.clone_from(&self.draft);
         data.draft_target = Some(self.draft_target.clone());
         data.other_drafts.clone_from(&self.other_drafts);
+        data.pending_attachments
+            .clone_from(&self.ui_state.pending_attachments);
+        data.other_attachments.clone_from(&self.other_attachments);
         data.bot.clone_from(&self.bot);
         data.task_mode = self.task_mode;
     }
@@ -654,42 +945,133 @@ impl NativeApp {
         text: String,
         messages: &[(String, String)],
         reply_to_id: Option<String>,
-        clear_draft: Option<String>,
+        draft_text: Option<String>,
+        attachments: Vec<String>,
     ) {
         let message_id = uuid::Uuid::new_v4().to_string();
         let active_bot = self.bot.clone();
-        self.shared.update(|state| {
-            state.active_chat = Some(message_id.clone());
-            state.completed_chat = None;
-            state.streaming.clear();
-            state.dm_bot_id = active_bot.clone();
+        let receipt = draft_text.map(|content| DraftClearReceipt {
+            target: self.draft_target.clone(),
+            content,
+            attachments: attachments.clone(),
         });
-        // Bot DMs are persisted and answered by the daemon (`PostDirectChat`); the legacy
-        // streaming chat path is only used when no bot roster is available.
         let request = if active_bot.is_empty() {
+            self.shared.update(|state| {
+                state.active_chat = Some(message_id.clone());
+                state.completed_chat = None;
+                state.streaming.clear();
+                state.dm_bot_id = active_bot.clone();
+                state.composer_error = None;
+            });
             DaemonRequest::SendChatMessageV2 {
                 message_id,
                 text: text.clone(),
                 history: conversation_context(messages),
             }
         } else {
+            self.shared.update(|state| {
+                state.completed_chat = None;
+                state.dm_bot_id = active_bot.clone();
+                state.composer_error = None;
+                state.pending_direct_sends.retain(|e| {
+                    !(e.bot_id == active_bot && e.completed && e.reply_error.is_some())
+                });
+                state.pending_direct_sends.push(InFlightDirectSend {
+                    client_msg_id: message_id.clone(),
+                    bot_id: active_bot.clone(),
+                    content: text.clone(),
+                    reply_to_id: reply_to_id.clone(),
+                    attachments: attachments.clone(),
+                    streaming: String::new(),
+                    persisted: false,
+                    completed: false,
+                    uncertain: false,
+                    reply_error: None,
+                    provider_setup_required: false,
+                });
+            });
             DaemonRequest::PostDirectChat {
                 bot_id: active_bot,
                 content: text.clone(),
                 reply_to_id,
                 thread_id: None,
+                client_msg_id: Some(message_id),
             }
         };
-        let clear_draft = clear_draft.map(|text| (self.draft_target.clone(), text));
-        if self.requests.try_send((request, clear_draft)).is_ok() {
+        if self.requests.try_send((request, receipt)).is_ok() {
             self.shared.update(|s| {
                 s.sending = true;
                 s.error = None;
-                s.messages.push(("You".into(), text));
+                if self.bot.is_empty() {
+                    s.messages.push(("You".into(), text));
+                }
             });
         } else {
             self.shared.update(|s| {
-                s.error = Some("Request queue is busy; your draft is preserved".into())
+                s.composer_error =
+                    Some("Request queue is busy; your draft and attachments are preserved".into());
+                s.error = Some("Request queue is busy; your draft is preserved".into());
+            });
+        }
+    }
+
+    fn retry_pending_direct_send(&self, client_msg_id: &str) {
+        let entry = self.shared.state.lock().ok().and_then(|s| {
+            s.pending_direct_sends
+                .iter()
+                .find(|e| e.client_msg_id == client_msg_id)
+                .cloned()
+        });
+        let Some(entry) = entry else {
+            return;
+        };
+        // Reconcile against already loaded history by UUID before resending.
+        if let Ok(state) = self.shared.state.lock() {
+            let has_reply = state.dm_messages.iter().any(|m| {
+                m["role"].as_str() == Some("assistant")
+                    && (m["reply_to_id"].as_str() == Some(client_msg_id)
+                        || m["request_id"].as_str() == Some(client_msg_id))
+            });
+            if has_reply {
+                drop(state);
+                self.shared.update(|s| {
+                    s.pending_direct_sends
+                        .retain(|e| e.client_msg_id != client_msg_id);
+                    s.composer_error = None;
+                });
+                return;
+            }
+        }
+        let req = DaemonRequest::PostDirectChat {
+            bot_id: entry.bot_id.clone(),
+            content: entry.content.clone(),
+            reply_to_id: entry.reply_to_id.clone(),
+            thread_id: None,
+            client_msg_id: Some(entry.client_msg_id.clone()),
+        };
+        let receipt = DraftClearReceipt {
+            target: format!("dm:{}", entry.bot_id),
+            content: entry.content.clone(),
+            attachments: entry.attachments.clone(),
+        };
+        self.shared.update(|s| {
+            if let Some(e) = s
+                .pending_direct_sends
+                .iter_mut()
+                .find(|e| e.client_msg_id == client_msg_id)
+            {
+                e.completed = false;
+                e.reply_error = None;
+                e.provider_setup_required = false;
+                e.streaming.clear();
+            }
+            s.sending = true;
+            s.composer_error = None;
+        });
+        if let Err(err) = self.requests.try_send((req, Some(receipt))) {
+            self.shared.update(|s| {
+                s.sending = false;
+                s.composer_error = Some(format!("Request queue is busy: {err}"));
             });
         }
     }
@@ -813,6 +1195,28 @@ impl eframe::App for NativeApp {
         let previous_modal = self.ui_state.active_modal.clone();
         // 1. Handle global GrokBot hotkeys & 5-tier Escape stack
         let hotkey_outcome = handle_global_hotkeys(ctx, &mut self.ui_state);
+        if let Some(collapsed) = hotkey_outcome.sidebar_collapsed_toggled {
+            self.send(DaemonRequest::SaveUiSettings {
+                ui: serde_json::json!({ "sidebar_collapsed": collapsed }),
+            });
+        }
+        if hotkey_outcome.toggle_dictation {
+            if self.ui_state.dictation_active {
+                self.ui_state.dictation_active = false;
+                self.ui_state.voice_active = false;
+                self.send(DaemonRequest::ManageSystem {
+                    op: "voice_stop".into(),
+                    payload: Value::Null,
+                });
+            } else {
+                self.ui_state.dictation_active = true;
+                self.ui_state.voice_active = false;
+                self.send(DaemonRequest::ManageSystem {
+                    op: "voice_start".into(),
+                    payload: serde_json::json!({ "bot_id": self.bot, "mode": "dictate" }),
+                });
+            }
+        }
 
         if previous_section != self.ui_state.section {
             match self.ui_state.section {
@@ -892,7 +1296,40 @@ impl eframe::App for NativeApp {
                             let _ = self.settings_config.providers.upsert_profile(prof, false);
                         }
                     }
-                    self.ui_state.responses[key] = value;
+                    if key.starts_with("voice_") {
+                        let status_val = value
+                            .get("status")
+                            .cloned()
+                            .unwrap_or_else(|| value.clone());
+                        let active = status_val["active"].as_bool().unwrap_or(false);
+                        let mode = status_val["mode"].as_str().unwrap_or("idle");
+                        self.ui_state.voice_active = active && mode != "dictate";
+                        self.ui_state.dictation_active = active && mode == "dictate";
+                        if key == "voice_transcribe"
+                            && let Some(text) = value["text"].as_str()
+                            && !text.trim().is_empty()
+                        {
+                            if !self.draft.is_empty() && !self.draft.ends_with(' ') {
+                                self.draft.push(' ');
+                            }
+                            self.draft.push_str(text.trim());
+                        }
+                        self.ui_state.responses["voice"] = status_val;
+                    } else if key == "components_install" || key == "components_verify" {
+                        self.ui_state.responses[key] = value;
+                        self.send(DaemonRequest::ManageSystem {
+                            op: "components_list".into(),
+                            payload: Value::Null,
+                        });
+                    } else if key == "marketplace_install" || key == "marketplace_remove" {
+                        self.ui_state.responses[key] = value;
+                        self.send(DaemonRequest::ManageSystem {
+                            op: "marketplace_list".into(),
+                            payload: Value::Null,
+                        });
+                    } else {
+                        self.ui_state.responses[key] = value;
+                    }
                 }
             }
         }
@@ -965,14 +1402,16 @@ impl eframe::App for NativeApp {
 
         // 3. Snapshot ViewState without holding mutex across egui layout
         let (
-            status,
+            conn_state,
+            conn_detail,
             _paused,
-            error,
+            _error,
             connected,
             messages,
             dm_messages,
             channel_messages,
             streaming,
+            failure_banner,
             tasks,
             bots,
             sections,
@@ -1020,12 +1459,27 @@ impl eframe::App for NativeApp {
             if let Some((id, secret)) = state.revealed_secret.take() {
                 self.ui_state.revealed_secrets.insert(id, secret);
             }
-            for (target, sent) in std::mem::take(&mut state.clear_drafts) {
-                if target == self.draft_target && self.draft.trim() == sent {
-                    self.draft.clear();
+            for receipt in std::mem::take(&mut state.clear_drafts) {
+                if receipt.target == self.draft_target {
+                    let mut composed = self.draft.trim().to_string();
+                    for att in &self.ui_state.pending_attachments {
+                        if !composed.is_empty() {
+                            composed.push('\n');
+                        }
+                        composed.push_str(&format!("Attached file: {att}"));
+                    }
+                    if self.draft.trim() == receipt.content || composed == receipt.content {
+                        self.draft.clear();
+                    }
+                    if self.ui_state.pending_attachments == receipt.attachments {
+                        self.ui_state.pending_attachments.clear();
+                    }
                 }
-                self.other_drafts
-                    .retain(|(key, draft)| *key != target || draft.trim() != sent);
+                self.other_drafts.retain(|(key, draft)| {
+                    *key != receipt.target || draft.trim() != receipt.content
+                });
+                self.other_attachments
+                    .retain(|(key, atts)| *key != receipt.target || *atts != receipt.attachments);
             }
             if state.runtime_file_dirty {
                 self.identity_bot = state.runtime_file_bot.clone();
@@ -1039,15 +1493,26 @@ impl eframe::App for NativeApp {
             {
                 self.identity_sha256 = state.runtime_file_sha256.clone();
             }
+            let streaming_view = state.streaming_for_bot(&self.bot);
+            let failure_view = if self.ui_state.active_chat_kind == "dm" {
+                state.failure_for_bot(&self.bot)
+            } else {
+                state
+                    .composer_error
+                    .as_ref()
+                    .map(|e| ("Message error".to_string(), e.clone(), None, false))
+            };
             (
-                state.status.clone(),
+                state.conn_state,
+                state.conn_detail.clone(),
                 state.paused,
                 state.error.clone(),
                 state.connected,
                 state.messages.clone(),
                 state.dm_messages.clone(),
                 state.channel_messages.clone(),
-                state.streaming.clone(),
+                streaming_view,
+                failure_view,
                 state.tasks.clone(),
                 state.bots.clone(),
                 state.sections.clone(),
@@ -1218,18 +1683,28 @@ impl eframe::App for NativeApp {
 
         // 11. Central Canvas (`Bots` Chat Canvas OR Full-Canvas `Feed` / `Goals` / `Spaces` / `Audit`)
         let rows = self.build_transcript_rows(&dm_messages, &channel_messages, &messages);
-        let status_line = if let Some(err) = &error {
-            format!("⚠ {err}")
-        } else {
-            status.clone()
+        let conn_banner = ConnectionBanner {
+            label: conn_state.label(),
+            detail: &conn_detail,
+            connected,
         };
+        let failure_struct =
+            failure_banner
+                .as_ref()
+                .map(
+                    |(headline, detail, retry_id, provider_setup)| ComposerFailure {
+                        headline,
+                        detail,
+                        retry_client_id: retry_id.as_deref(),
+                        provider_setup: *provider_setup,
+                    },
+                );
 
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(palette.bg_canvas))
             .show(ctx, |ui| {
                 if self.ui_state.section == WorkspaceSection::Bots {
-                    let mut pending_send: Option<(String, Option<String>)> = None;
-                    let mut outbound_reqs: Vec<DaemonRequest> = Vec::new();
+                    let mut actions: Vec<ChatCanvasAction> = Vec::new();
                     draw_chat_canvas(
                         ui,
                         ctx,
@@ -1245,53 +1720,197 @@ impl eframe::App for NativeApp {
                         &mut self.search,
                         &search_hits,
                         &mut self.draft,
-                        connected,
+                        &conn_banner,
                         sending,
-                        &status_line,
-                        |req| outbound_reqs.push(req),
-                        |text, reply_to_id| pending_send = Some((text, reply_to_id)),
+                        failure_struct.as_ref(),
+                        |action| actions.push(action),
                     );
-                    for req in outbound_reqs {
-                        self.send(req);
-                    }
-                    if let Some((text, reply_to_id)) = pending_send {
-                        let receipt = Some((self.draft_target.clone(), text.clone()));
-                        if self.ui_state.active_chat_kind == "channel" {
-                            let req = DaemonRequest::ChannelPost {
-                                channel_id: self.channel.clone(),
-                                author: "human".into(),
-                                content: text.clone(),
-                            };
-                            let _ = self.requests.try_send((req, receipt));
-                        } else if self.task_mode || text.starts_with("/do ") {
-                            let instruction = text
-                                .strip_prefix("/do ")
-                                .unwrap_or(&text)
-                                .trim()
-                                .to_string();
-                            let req = DaemonRequest::QueueTask {
-                                bot_id: Some(self.bot.clone()),
-                                channel_id: Some(self.channel.clone()),
-                                instruction,
-                                priority: 0,
-                            };
-                            if self.requests.try_send((req, receipt)).is_ok() {
+                    for action in actions {
+                        match action {
+                            ChatCanvasAction::Request(req) => self.send(req),
+                            ChatCanvasAction::RetryConnection => {
                                 self.shared.update(|s| {
-                                    s.sending = true;
-                                    s.error = None;
-                                    s.messages.push(("You".into(), text));
+                                    s.conn_state = DaemonConnectionState::Starting;
+                                    s.conn_detail.clear();
+                                });
+                                self.retry_notify.notify_one();
+                            }
+                            ChatCanvasAction::OpenProviderSetup => {
+                                self.ui_state.settings_pane = SettingsPane::Providers;
+                                self.ui_state.active_modal =
+                                    Some(crate::ui::state::ActiveModal::Settings);
+                            }
+                            ChatCanvasAction::OpenLocalComponents => {
+                                self.ui_state.settings_pane = SettingsPane::SystemAndUpdates;
+                                self.ui_state.active_modal =
+                                    Some(crate::ui::state::ActiveModal::Settings);
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "components_list".into(),
+                                    payload: Value::Null,
                                 });
                             }
-                        } else {
-                            self.enqueue_chat_message(
-                                text.clone(),
-                                &messages,
-                                reply_to_id,
-                                Some(text),
-                            );
+                            ChatCanvasAction::ToggleVoice => {
+                                if self.ui_state.voice_active {
+                                    self.ui_state.voice_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_stop".into(),
+                                        payload: Value::Null,
+                                    });
+                                } else {
+                                    self.ui_state.voice_active = true;
+                                    self.ui_state.dictation_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_start".into(),
+                                        payload: serde_json::json!({
+                                            "bot_id": self.bot,
+                                            "mode": "voice",
+                                        }),
+                                    });
+                                }
+                            }
+                            ChatCanvasAction::ToggleDictation => {
+                                if self.ui_state.dictation_active {
+                                    self.ui_state.dictation_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_stop".into(),
+                                        payload: Value::Null,
+                                    });
+                                } else {
+                                    self.ui_state.dictation_active = true;
+                                    self.ui_state.voice_active = false;
+                                    self.send(DaemonRequest::ManageSystem {
+                                        op: "voice_start".into(),
+                                        payload: serde_json::json!({
+                                            "bot_id": self.bot,
+                                            "mode": "dictate",
+                                        }),
+                                    });
+                                }
+                            }
+                            ChatCanvasAction::VoiceConsent(granted) => {
+                                if !granted {
+                                    self.ui_state.voice_active = false;
+                                    self.ui_state.dictation_active = false;
+                                }
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_consent".into(),
+                                    payload: serde_json::json!({
+                                        "granted": granted,
+                                        "bot_id": self.bot,
+                                    }),
+                                });
+                            }
+                            ChatCanvasAction::VoiceSpeak(text) => {
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_speak".into(),
+                                    payload: serde_json::json!({ "text": text }),
+                                });
+                            }
+                            ChatCanvasAction::VoiceBargeIn => {
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_barge_in".into(),
+                                    payload: Value::Null,
+                                });
+                            }
+                            ChatCanvasAction::VoiceStop => {
+                                self.ui_state.voice_active = false;
+                                self.ui_state.dictation_active = false;
+                                self.send(DaemonRequest::ManageSystem {
+                                    op: "voice_stop".into(),
+                                    payload: Value::Null,
+                                });
+                            }
+                            ChatCanvasAction::RetryPending { client_msg_id } => {
+                                self.retry_pending_direct_send(&client_msg_id);
+                            }
+                            ChatCanvasAction::Submit { text, reply_to_id } => {
+                                let atts = self.ui_state.pending_attachments.clone();
+                                let receipt = DraftClearReceipt {
+                                    target: self.draft_target.clone(),
+                                    content: text.clone(),
+                                    attachments: atts.clone(),
+                                };
+                                if self.ui_state.active_chat_kind == "channel" {
+                                    let req = DaemonRequest::ChannelPost {
+                                        channel_id: self.channel.clone(),
+                                        author: "human".into(),
+                                        content: text,
+                                    };
+                                    if self.requests.try_send((req, Some(receipt))).is_ok() {
+                                        self.shared.update(|s| {
+                                            s.sending = true;
+                                            s.composer_error = None;
+                                        });
+                                    } else {
+                                        self.shared.update(|s| {
+                                            s.composer_error = Some(
+                                                "Request queue is busy; your draft is preserved"
+                                                    .into(),
+                                            );
+                                        });
+                                    }
+                                } else if self.task_mode || text.starts_with("/do ") {
+                                    let instruction = text
+                                        .strip_prefix("/do ")
+                                        .unwrap_or(&text)
+                                        .trim()
+                                        .to_string();
+                                    let req = DaemonRequest::QueueTask {
+                                        bot_id: Some(self.bot.clone()),
+                                        channel_id: Some(self.channel.clone()),
+                                        instruction,
+                                        priority: 0,
+                                    };
+                                    if self.requests.try_send((req, Some(receipt))).is_ok() {
+                                        self.shared.update(|s| {
+                                            s.sending = true;
+                                            s.composer_error = None;
+                                            s.messages.push(("You".into(), text));
+                                        });
+                                    } else {
+                                        self.shared.update(|s| {
+                                            s.composer_error = Some(
+                                                "Request queue is busy; your draft is preserved"
+                                                    .into(),
+                                            );
+                                        });
+                                    }
+                                } else {
+                                    self.enqueue_chat_message(
+                                        text.clone(),
+                                        &messages,
+                                        reply_to_id,
+                                        Some(text),
+                                        atts,
+                                    );
+                                }
+                            }
                         }
                     }
                 } else {
+                    egui::Frame::NONE
+                        .fill(palette.bg_canvas)
+                        .inner_margin(egui::Margin::symmetric(16, 8))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.small(format!(
+                                    "Daemon: {}{}",
+                                    conn_banner.label,
+                                    if conn_banner.detail.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" · {}", conn_banner.detail)
+                                    }
+                                ));
+                                if ui.small_button("Retry").clicked() {
+                                    self.shared.update(|s| {
+                                        s.conn_state = DaemonConnectionState::Starting;
+                                        s.conn_detail.clear();
+                                    });
+                                    self.retry_notify.notify_one();
+                                }
+                            });
+                        });
                     draw_workspace_section_view(
                         ui,
                         ctx,
@@ -1400,6 +2019,29 @@ impl eframe::App for NativeApp {
                 });
         }
 
+        if previous_modal != self.ui_state.active_modal {
+            match self.ui_state.active_modal {
+                Some(crate::ui::state::ActiveModal::ConnectApps) => {
+                    self.send(DaemonRequest::ManageSystem {
+                        op: "marketplace_list".into(),
+                        payload: Value::Null,
+                    });
+                    self.send(DaemonRequest::ManageSystem {
+                        op: "billing_status".into(),
+                        payload: Value::Null,
+                    });
+                }
+                Some(crate::ui::state::ActiveModal::Settings)
+                    if self.ui_state.settings_pane == SettingsPane::SystemAndUpdates =>
+                {
+                    self.send(DaemonRequest::ManageSystem {
+                        op: "components_list".into(),
+                        payload: Value::Null,
+                    });
+                }
+                _ => {}
+            }
+        }
         if previous_modal.is_some() && previous_modal != self.ui_state.active_modal {
             use zeroize::Zeroize;
             self.ui_state.vault_secret_draft.zeroize();
@@ -1418,6 +2060,8 @@ impl eframe::App for NativeApp {
                 d.draft != self.draft
                     || d.draft_target.as_deref() != Some(self.draft_target.as_str())
                     || d.other_drafts != self.other_drafts
+                    || d.pending_attachments != self.ui_state.pending_attachments
+                    || d.other_attachments != self.other_attachments
                     || d.bot != self.bot
                     || d.task_mode != self.task_mode
             };
@@ -1430,83 +2074,179 @@ impl eframe::App for NativeApp {
 
 async fn background(
     config: GmConfig,
+    cli_config_path: Option<std::path::PathBuf>,
     shared: Shared,
     mut requests: tokio::sync::mpsc::Receiver<OutboundRequest>,
+    retry_notify: Arc<tokio::sync::Notify>,
     live_computer_active: Arc<AtomicBool>,
     live_computer_notify: Arc<tokio::sync::Notify>,
 ) {
     let refresh_notify = Arc::new(tokio::sync::Notify::new());
 
-    // 1. Event subscription stream (pushes DaemonEvents and triggers refresh ONLY on actual state changes)
+    // Start local daemon asynchronously after window creation so launch never blocks the first frame.
+    let spawn_cfg = config.clone();
+    let spawn_cli = cli_config_path.clone();
+    tokio::spawn(async move {
+        crate::ensure_daemon_running(&spawn_cfg, spawn_cli.as_deref()).await;
+    });
+
+    // 1. Event subscription stream with 2-second subscription deadline & 2-second retry loop.
     let events_config = config.clone();
     let events_shared = shared.clone();
     let events_notify = Arc::clone(&refresh_notify);
+    let sub_retry_notify = Arc::clone(&retry_notify);
+    let respawn_cfg = config.clone();
+    let respawn_cli = cli_config_path.clone();
     tokio::spawn(async move {
+        let mut first_attempt = true;
         loop {
-            if let Ok(mut connection) = connect(&events_config.daemon_socket_path).await {
-                let result: Result<()> = async {
-                    write_ipc_message(
-                        &mut connection,
-                        &IpcMessage {
-                            id: 1,
-                            payload: DaemonRequest::SubscribeEvents,
-                        },
-                    )
-                    .await?;
-                    let _: IpcMessage<DaemonResponse> = read_ipc_message(&mut connection).await?;
-                    events_shared.update(|s| s.connected = true);
-                    // Reconcile persisted history after subscription, including reconnects.
-                    events_notify.notify_one();
-                    let bot = events_shared
-                        .state
-                        .lock()
-                        .map(|s| s.dm_bot_id.clone())
-                        .unwrap_or_default();
-                    if !bot.is_empty()
-                        && let Ok(DaemonResponse::JsonPayload(value)) = rpc(
-                            &events_config,
-                            DaemonRequest::GetDirectChatHistory {
-                                bot_id: bot.clone(),
-                                before_seq: None,
-                                limit: Some(50),
+            if first_attempt {
+                events_shared.update(|s| {
+                    s.conn_state = DaemonConnectionState::Starting;
+                    s.connected = false;
+                });
+                first_attempt = false;
+            }
+            let result: Result<()> = async {
+                let mut connection =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        let mut connection = connect(&events_config.daemon_socket_path).await?;
+                        write_ipc_message(
+                            &mut connection,
+                            &IpcMessage {
+                                id: 1,
+                                payload: DaemonRequest::SubscribeEvents,
                             },
                         )
-                        .await
-                    {
-                        events_shared.update(|s| {
-                            s.merge_dm_history(&bot, &value);
-                        });
-                    }
-                    loop {
-                        let response: IpcMessage<DaemonResponse> =
+                        .await?;
+                        let _: IpcMessage<DaemonResponse> =
                             read_ipc_message(&mut connection).await?;
-                        if let DaemonResponse::Event(event) = response.payload {
-                            let wake_refresh = matches!(
-                                event,
-                                DaemonEvent::ActivityUpdated { .. }
-                                    | DaemonEvent::TaskFinished { .. }
-                                    | DaemonEvent::BotUpdated { .. }
-                                    | DaemonEvent::RoutineUpdated { .. }
-                                    | DaemonEvent::RoutineRunRecorded { .. }
-                                    | DaemonEvent::TaskUpdated { .. }
-                                    | DaemonEvent::BudgetUpdated { .. }
-                            );
-                            events_shared.update(|s| s.event(event));
-                            if wake_refresh {
-                                events_notify.notify_one();
-                            }
+                        Ok::<_, GmError>(connection)
+                    })
+                    .await
+                    .map_err(|_| {
+                        GmError::Timeout("Daemon subscription timed out after 2s".into())
+                    })??;
+
+                // Mark Ready only after both event subscription and initial workspace load succeed.
+                match rpc(&events_config, DaemonRequest::GetBootstrapState).await? {
+                    DaemonResponse::JsonPayload(bootstrap) => {
+                        events_shared.update(|s| s.apply_bootstrap(bootstrap));
+                    }
+                    other => {
+                        return Err(GmError::Ipc(format!(
+                            "Unexpected bootstrap response: {other:?}"
+                        )));
+                    }
+                }
+                let (bot, chan) = events_shared
+                    .state
+                    .lock()
+                    .map(|s| (s.dm_bot_id.clone(), s.channel_history_id.clone()))
+                    .unwrap_or_default();
+                if !bot.is_empty()
+                    && let Ok(DaemonResponse::JsonPayload(value)) = rpc(
+                        &events_config,
+                        DaemonRequest::GetDirectChatHistory {
+                            bot_id: bot.clone(),
+                            before_seq: None,
+                            limit: Some(50),
+                        },
+                    )
+                    .await
+                {
+                    events_shared.update(|s| {
+                        s.merge_dm_history(&bot, &value);
+                    });
+                }
+                if !chan.is_empty()
+                    && let Ok(DaemonResponse::JsonPayload(value)) = rpc(
+                        &events_config,
+                        DaemonRequest::ChannelHistory {
+                            channel_id: chan.clone(),
+                        },
+                    )
+                    .await
+                {
+                    events_shared.update(|s| {
+                        if s.channel_history_id == chan {
+                            s.channel_messages = value.as_array().cloned().unwrap_or_default();
+                        }
+                    });
+                }
+
+                events_shared.update(|s| {
+                    s.conn_state = DaemonConnectionState::Ready;
+                    s.conn_detail.clear();
+                    s.connected = true;
+                    s.error = None;
+                });
+
+                loop {
+                    let response: IpcMessage<DaemonResponse> =
+                        read_ipc_message(&mut connection).await?;
+                    if let DaemonResponse::Event(event) = response.payload {
+                        let wake_refresh = matches!(
+                            event,
+                            DaemonEvent::ActivityUpdated { .. }
+                                | DaemonEvent::TaskFinished { .. }
+                                | DaemonEvent::BotUpdated { .. }
+                                | DaemonEvent::RoutineUpdated { .. }
+                                | DaemonEvent::RoutineRunRecorded { .. }
+                                | DaemonEvent::TaskUpdated { .. }
+                                | DaemonEvent::BudgetUpdated { .. }
+                        );
+                        events_shared.update(|s| s.event(event));
+                        let chan_refresh = events_shared
+                            .state
+                            .lock()
+                            .ok()
+                            .and_then(|mut s| s.pending_channel_refresh.take());
+                        if let Some(ch_id) = chan_refresh {
+                            let ch_cfg = events_config.clone();
+                            let ch_shared = events_shared.clone();
+                            tokio::spawn(async move {
+                                if let Ok(DaemonResponse::JsonPayload(value)) = rpc(
+                                    &ch_cfg,
+                                    DaemonRequest::ChannelHistory {
+                                        channel_id: ch_id.clone(),
+                                    },
+                                )
+                                .await
+                                    && let Some(items) = value.as_array()
+                                {
+                                    ch_shared.update(|s| {
+                                        if s.channel_history_id == ch_id {
+                                            for item in items {
+                                                s.merge_channel_message(&ch_id, item.clone());
+                                            }
+                                        }
+                                    });
+                                }
+                            });
+                        }
+                        if wake_refresh {
+                            events_notify.notify_one();
                         }
                     }
                 }
-                .await;
-                if let Err(error) = result {
-                    events_shared.update(|s| {
-                        s.connected = false;
-                        s.error = Some(error.to_string());
-                    });
+            }
+            .await;
+            if let Err(error) = result {
+                let detail = error.to_string();
+                events_shared.update(|s| {
+                    s.connected = false;
+                    s.conn_state = DaemonConnectionState::Disconnected;
+                    s.conn_detail = detail.clone();
+                    s.error = Some(detail);
+                });
+            }
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                _ = sub_retry_notify.notified() => {
+                    crate::ensure_daemon_running(&respawn_cfg, respawn_cli.as_deref()).await;
                 }
             }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     });
 
@@ -1575,14 +2315,50 @@ async fn background(
                 Ok(response) => {
                     let mut refresh_after = false;
                     request_shared.update(|s| {
-                        if let Some(draft) = draft {
+                        if draft.is_some() {
                             s.sending = false;
-                            if !matches!(&response, DaemonResponse::Error(_)) {
-                                s.clear_drafts.push(draft);
-                            }
+                        }
+                        if let Some(receipt) = draft.clone()
+                            && !matches!(&response, DaemonResponse::Error(_))
+                        {
+                            s.clear_drafts.push(receipt);
                         }
                         s.error = None;
                         match (kind, response) {
+                            (PendingKind::ChannelPost(_), DaemonResponse::Error(err)) => {
+                                s.composer_error = Some(err.clone());
+                                s.error = Some(err);
+                            }
+                            (
+                                PendingKind::ChannelPost(channel_id),
+                                DaemonResponse::JsonPayload(value),
+                            ) => {
+                                s.composer_error = None;
+                                s.merge_channel_message(&channel_id, value);
+                                refresh_after = true;
+                            }
+                            (
+                                PendingKind::PostDirectChat { client_msg_id, .. },
+                                DaemonResponse::Error(err),
+                            ) => {
+                                if let Some(cid) = client_msg_id
+                                    && let Some(entry) = s
+                                        .pending_direct_sends
+                                        .iter_mut()
+                                        .find(|e| e.client_msg_id == cid)
+                                {
+                                    entry.completed = true;
+                                    entry.uncertain = !entry.persisted;
+                                    entry.provider_setup_required =
+                                        error_needs_provider_setup(&err);
+                                    entry.reply_error = Some(err.clone());
+                                }
+                                s.composer_error = Some(err.clone());
+                                s.error = Some(err);
+                            }
+                            (_, DaemonResponse::Error(err)) => {
+                                s.error = Some(err);
+                            }
                             (PendingKind::Avatar(id), DaemonResponse::JsonPayload(value)) => {
                                 s.tool_results.insert(format!("avatar:{id}"), value);
                             }
@@ -1640,9 +2416,10 @@ async fn background(
                                 PendingKind::ChannelHistory(channel_id),
                                 DaemonResponse::JsonPayload(value),
                             ) => {
-                                if s.channel_history_id == channel_id {
-                                    s.channel_messages =
-                                        value.as_array().cloned().unwrap_or_default();
+                                if s.channel_history_id == channel_id
+                                    && let Some(items) = value.as_array()
+                                {
+                                    s.channel_messages = items.clone();
                                 }
                             }
                             (
@@ -1652,24 +2429,50 @@ async fn background(
                                 s.merge_dm_history(&bot_id, &value);
                             }
                             (
-                                PendingKind::PostDirectChat(bot_id),
+                                PendingKind::PostDirectChat {
+                                    bot_id,
+                                    client_msg_id,
+                                },
                                 DaemonResponse::JsonPayload(value),
                             ) => {
-                                for key in ["user_message", "assistant_message"] {
-                                    let msg = value[key].clone();
-                                    let id = msg["id"].as_str().unwrap_or("").to_string();
-                                    if s.dm_bot_id == bot_id
-                                        && !id.is_empty()
-                                        && !s
-                                            .dm_messages
-                                            .iter()
-                                            .any(|m| m["id"].as_str() == Some(id.as_str()))
-                                    {
-                                        s.dm_messages.push(msg);
+                                if value["user_message"].is_object() {
+                                    let umsg = value["user_message"].clone();
+                                    if s.dm_bot_id == bot_id || s.dm_bot_id.is_empty() {
+                                        s.merge_dm_message(umsg);
+                                    } else {
+                                        s.reconcile_message_against_pending(&umsg);
                                     }
                                 }
-                                s.active_chat = None;
-                                s.streaming.clear();
+                                if value["assistant_message"].is_object() {
+                                    let amsg = value["assistant_message"].clone();
+                                    if s.dm_bot_id == bot_id || s.dm_bot_id.is_empty() {
+                                        s.merge_dm_message(amsg);
+                                    } else {
+                                        s.reconcile_message_against_pending(&amsg);
+                                    }
+                                }
+                                if let Some(reply_err) = value["reply_error"].as_str() {
+                                    let needs_setup = value["provider_setup_required"]
+                                        .as_bool()
+                                        .unwrap_or_else(|| error_needs_provider_setup(reply_err));
+                                    let cid = client_msg_id.or_else(|| {
+                                        value["user_message"]["id"].as_str().map(str::to_string)
+                                    });
+                                    if let Some(cid) = cid
+                                        && let Some(entry) = s
+                                            .pending_direct_sends
+                                            .iter_mut()
+                                            .find(|e| e.client_msg_id == cid)
+                                    {
+                                        entry.persisted = true;
+                                        entry.completed = true;
+                                        entry.uncertain = false;
+                                        entry.provider_setup_required = needs_setup;
+                                        entry.reply_error = Some(reply_err.to_string());
+                                    }
+                                } else {
+                                    s.composer_error = None;
+                                }
                                 if value["queued_task"].is_object() {
                                     refresh_after = true;
                                 }
@@ -1830,14 +2633,22 @@ async fn background(
                 }
                 Err(error) => {
                     let msg = error.to_string();
+                    let reconcile_bot = match &kind {
+                        PendingKind::PostDirectChat { bot_id, .. } => Some(bot_id.clone()),
+                        _ => None,
+                    };
+                    let reconcile_cid = match &kind {
+                        PendingKind::PostDirectChat { client_msg_id, .. } => client_msg_id.clone(),
+                        _ => None,
+                    };
                     request_shared.update(|s| {
-                        if let Some((_, draft)) = &draft
+                        if let Some(receipt) = &draft
                             && s.completed_chat != s.active_chat
                             && let Some((role, _)) = s
                                 .messages
                                 .iter_mut()
                                 .rev()
-                                .find(|(role, text)| role == "You" && text == draft)
+                                .find(|(role, text)| role == "You" && *text == receipt.content)
                         {
                             *role = "Unsent".into();
                         }
@@ -1848,7 +2659,21 @@ async fn background(
                                 s.messages.push(("Interrupted response".into(), partial));
                             }
                         }
+                        if let Some(cid) = &reconcile_cid
+                            && let Some(entry) = s
+                                .pending_direct_sends
+                                .iter_mut()
+                                .find(|e| e.client_msg_id == *cid)
+                        {
+                            entry.completed = true;
+                            entry.uncertain = !entry.persisted;
+                            entry.provider_setup_required = error_needs_provider_setup(&msg);
+                            entry.reply_error = Some(msg.clone());
+                        }
                         match kind {
+                            PendingKind::PostDirectChat { .. } | PendingKind::ChannelPost(_) => {
+                                s.composer_error = Some(msg.clone());
+                            }
                             PendingKind::ListActivity | PendingKind::RateActivity => {
                                 s.activity_notice = msg.clone();
                             }
@@ -1873,6 +2698,27 @@ async fn background(
                         }
                         s.error = Some(msg);
                     });
+                    // Reconcile uncertain direct send against persisted daemon history by UUID.
+                    if let Some(bot_id) = reconcile_bot {
+                        let rec_cfg = request_config.clone();
+                        let rec_shared = request_shared.clone();
+                        tokio::spawn(async move {
+                            if let Ok(DaemonResponse::JsonPayload(value)) = rpc(
+                                &rec_cfg,
+                                DaemonRequest::GetDirectChatHistory {
+                                    bot_id: bot_id.clone(),
+                                    before_seq: None,
+                                    limit: Some(50),
+                                },
+                            )
+                            .await
+                            {
+                                rec_shared.update(|s| {
+                                    s.merge_dm_history(&bot_id, &value);
+                                });
+                            }
+                        });
+                    }
                 }
             }
         });
@@ -1906,7 +2752,11 @@ fn conversation_context(messages: &[(String, String)]) -> Vec<ChatTurn> {
     turns
 }
 
-pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
+pub fn run(
+    config: GmConfig,
+    config_path: std::path::PathBuf,
+    cli_config_path: Option<std::path::PathBuf>,
+) -> Result<()> {
     let runtime = tokio::runtime::Handle::current();
     eframe::run_native(
         "DT",
@@ -1982,12 +2832,15 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
             let settings_config = config.clone();
             let config_original = std::fs::read(&config_path).ok();
             let (sender, receiver) = tokio::sync::mpsc::channel(64);
+            let retry_notify = Arc::new(tokio::sync::Notify::new());
             let live_computer_active = Arc::new(AtomicBool::new(false));
             let live_computer_notify = Arc::new(tokio::sync::Notify::new());
             runtime.spawn(background(
                 config,
+                cli_config_path,
                 shared.clone(),
                 receiver,
+                Arc::clone(&retry_notify),
                 Arc::clone(&live_computer_active),
                 Arc::clone(&live_computer_notify),
             ));
@@ -2002,6 +2855,7 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
             ui_state.sidebar_saved_width = ui_state.sidebar_width;
             ui_state.details_saved_width = ui_state.details_width;
             ui_state.sidebar_manual_override = Some(!settings_config.ui.sidebar_collapsed);
+            ui_state.pending_attachments = restored.pending_attachments;
             if config_original.is_none() {
                 ui_state.settings_pane = crate::ui::state::SettingsPane::Providers;
                 ui_state.active_modal = Some(crate::ui::state::ActiveModal::Settings);
@@ -2009,6 +2863,7 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
             Ok(Box::new(NativeApp {
                 shared,
                 requests: sender,
+                retry_notify,
                 live_computer_active,
                 live_computer_notify,
                 ui_state,
@@ -2019,6 +2874,7 @@ pub fn run(config: GmConfig, config_path: std::path::PathBuf) -> Result<()> {
                 draft: restored.draft,
                 draft_target,
                 other_drafts: restored.other_drafts,
+                other_attachments: restored.other_attachments,
                 bot: restored.bot,
                 task_mode: restored.task_mode,
                 search: String::new(),
@@ -2214,6 +3070,109 @@ mod tests {
             }),
             PendingKind::Mutation
         );
+    }
+
+    #[test]
+    fn direct_stream_targets_originating_conversation_and_dedups_by_id() {
+        let mut state = ViewState {
+            dm_bot_id: "muse".into(),
+            ..Default::default()
+        };
+        let cid = "client-uuid-99";
+        state.pending_direct_sends.push(InFlightDirectSend {
+            client_msg_id: cid.into(),
+            bot_id: "muse".into(),
+            content: "hello".into(),
+            reply_to_id: None,
+            attachments: vec!["notes.md".into()],
+            streaming: String::new(),
+            persisted: false,
+            completed: false,
+            uncertain: false,
+            reply_error: None,
+            provider_setup_required: false,
+        });
+        state.event(DaemonEvent::ChatTokenV1 {
+            message_id: cid.into(),
+            delta: "partial ".into(),
+            done: false,
+        });
+        assert_eq!(state.streaming_for_bot("muse"), "partial ");
+        assert_eq!(state.streaming_for_bot("coder"), "");
+
+        // Confirm persistence from event, then merge identical message again from RPC/reconnect.
+        let user_val = serde_json::json!({
+            "id": cid,
+            "seq": 1,
+            "bot_id": "muse",
+            "role": "user",
+            "author": "You",
+            "content": "hello",
+            "request_id": cid,
+            "created_at": "2026-11-18T00:00:00Z"
+        });
+        state.event(DaemonEvent::DirectMessageAdded {
+            bot_id: "muse".into(),
+            message: user_val.clone(),
+        });
+        assert_eq!(state.clear_drafts.len(), 1);
+        assert_eq!(state.clear_drafts[0].attachments, vec!["notes.md"]);
+        state.merge_dm_history("muse", &serde_json::json!({ "messages": [user_val] }));
+        assert_eq!(state.dm_messages.len(), 1);
+
+        let reply_val = serde_json::json!({
+            "id": "dm-reply-1",
+            "seq": 2,
+            "bot_id": "muse",
+            "role": "assistant",
+            "author": "Muse",
+            "content": "partial done",
+            "reply_to_id": cid,
+            "request_id": cid,
+            "created_at": "2026-11-18T00:00:01Z"
+        });
+        state.merge_dm_message(reply_val.clone());
+        state.merge_dm_history("muse", &serde_json::json!({ "messages": [reply_val] }));
+        assert_eq!(state.dm_messages.len(), 2);
+        assert!(state.pending_direct_sends.is_empty());
+        assert_eq!(state.streaming_for_bot("muse"), "");
+    }
+
+    #[test]
+    fn post_persistence_failure_flags_provider_setup_and_group_receipt_merges() {
+        let mut state = ViewState {
+            dm_bot_id: "muse".into(),
+            channel_history_id: "general".into(),
+            ..Default::default()
+        };
+        state.pending_direct_sends.push(InFlightDirectSend {
+            client_msg_id: "uuid-fail-1".into(),
+            bot_id: "muse".into(),
+            content: "hi".into(),
+            reply_to_id: None,
+            attachments: vec![],
+            streaming: String::new(),
+            persisted: true,
+            completed: true,
+            uncertain: false,
+            reply_error: Some("Missing API key for OpenAI".into()),
+            provider_setup_required: true,
+        });
+        let (headline, _, retry_id, provider_setup) = state.failure_for_bot("muse").unwrap();
+        assert_eq!(headline, "Message saved, reply failed");
+        assert_eq!(retry_id.as_deref(), Some("uuid-fail-1"));
+        assert!(provider_setup);
+
+        let group_msg = serde_json::json!({
+            "id": "ch-1",
+            "channel_id": "general",
+            "author": "human",
+            "content": "team update",
+            "timestamp": "2026-11-18T00:00:00Z"
+        });
+        state.merge_channel_message("general", group_msg.clone());
+        state.merge_channel_message("general", group_msg);
+        assert_eq!(state.channel_messages.len(), 1);
     }
 }
 

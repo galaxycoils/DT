@@ -19,6 +19,10 @@ pub(super) struct SessionData {
     pub draft_target: Option<String>,
     #[serde(default)]
     pub other_drafts: Vec<(String, String)>,
+    #[serde(default)]
+    pub pending_attachments: Vec<String>,
+    #[serde(default)]
+    pub other_attachments: Vec<(String, Vec<String>)>,
     pub bot: String,
     pub task_mode: bool,
 }
@@ -30,6 +34,8 @@ impl Default for SessionData {
             draft: String::new(),
             draft_target: None,
             other_drafts: vec![],
+            pending_attachments: vec![],
+            other_attachments: vec![],
             bot: "muse".into(),
             task_mode: false,
         }
@@ -40,6 +46,8 @@ pub(super) fn switch_draft(
     target: &mut String,
     draft: &mut String,
     other_drafts: &mut Vec<(String, String)>,
+    pending_attachments: &mut Vec<String>,
+    other_attachments: &mut Vec<(String, Vec<String>)>,
     next: String,
 ) {
     if *target == next {
@@ -50,11 +58,20 @@ pub(super) fn switch_draft(
         .position(|(key, _)| *key == next)
         .map(|index| other_drafts.remove(index).1)
         .unwrap_or_default();
+    let next_atts = other_attachments
+        .iter()
+        .position(|(key, _)| *key == next)
+        .map(|index| other_attachments.remove(index).1)
+        .unwrap_or_default();
     let previous = std::mem::replace(target, next);
     let mut previous_draft = std::mem::replace(draft, next_draft);
     previous_draft.truncate(previous_draft.floor_char_boundary(128 * 1024));
     if !previous_draft.is_empty() {
-        other_drafts.push((previous, previous_draft));
+        other_drafts.push((previous.clone(), previous_draft));
+    }
+    let previous_atts = std::mem::replace(pending_attachments, next_atts);
+    if !previous_atts.is_empty() {
+        other_attachments.push((previous, previous_atts));
     }
     while other_drafts.len() > 32
         || other_drafts
@@ -64,6 +81,9 @@ pub(super) fn switch_draft(
             > 512 * 1024
     {
         other_drafts.remove(0);
+    }
+    while other_attachments.len() > 32 {
+        other_attachments.remove(0);
     }
 }
 pub(super) struct SessionStore {
@@ -172,21 +192,49 @@ mod tests {
         let mut target = format!("dm:{}", legacy.bot);
         let mut draft = legacy.draft;
         let mut other = legacy.other_drafts;
+        let mut atts = vec!["notes.md".to_string()];
+        let mut other_atts = legacy.other_attachments;
 
-        switch_draft(&mut target, &mut draft, &mut other, "dm:coder".into());
+        switch_draft(
+            &mut target,
+            &mut draft,
+            &mut other,
+            &mut atts,
+            &mut other_atts,
+            "dm:coder".into(),
+        );
         assert!(draft.is_empty());
+        assert!(atts.is_empty());
         draft = "Coder draft".into();
         switch_draft(
             &mut target,
             &mut draft,
             &mut other,
+            &mut atts,
+            &mut other_atts,
             "channel:general".into(),
         );
         assert!(draft.is_empty());
-        switch_draft(&mut target, &mut draft, &mut other, "dm:muse".into());
+        switch_draft(
+            &mut target,
+            &mut draft,
+            &mut other,
+            &mut atts,
+            &mut other_atts,
+            "dm:muse".into(),
+        );
         assert_eq!(draft, "Muse draft");
-        switch_draft(&mut target, &mut draft, &mut other, "dm:coder".into());
+        assert_eq!(atts, vec!["notes.md".to_string()]);
+        switch_draft(
+            &mut target,
+            &mut draft,
+            &mut other,
+            &mut atts,
+            &mut other_atts,
+            "dm:coder".into(),
+        );
         assert_eq!(draft, "Coder draft");
+        assert!(atts.is_empty());
     }
 
     #[test]

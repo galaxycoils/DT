@@ -373,9 +373,323 @@ impl Drop for ManagedVoiceRuntime {
     }
 }
 
+/// Shared daemon/companion controller for interactive Voice & Dictation sessions.
+/// Enforces explicit microphone consent, bounded audio buffers, local-only endpoints,
+/// and immediate child-process teardown on stop, barge-in, or consent revocation.
+#[derive(Clone)]
+pub struct VoiceSessionManager {
+    storage_dir: std::path::PathBuf,
+    cfg: VoiceConfig,
+    session: std::sync::Arc<parking_lot::Mutex<Option<VoiceSession>>>,
+    mode: std::sync::Arc<parking_lot::Mutex<String>>,
+    last_error: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
+    playback_child: std::sync::Arc<parking_lot::Mutex<Option<std::process::Child>>>,
+}
+
+impl VoiceSessionManager {
+    pub fn new(storage_dir: std::path::PathBuf) -> Self {
+        Self::with_config(storage_dir, VoiceConfig::default())
+    }
+
+    pub fn with_config(storage_dir: std::path::PathBuf, cfg: VoiceConfig) -> Self {
+        Self {
+            storage_dir,
+            cfg,
+            session: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            mode: std::sync::Arc::new(parking_lot::Mutex::new("idle".into())),
+            last_error: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            playback_child: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
+    fn find_installed_component(&self, id: &str) -> Option<std::path::PathBuf> {
+        let dir = self.storage_dir.join("components").join(id);
+        let entries = std::fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("payload.bin");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    fn kill_playback(&self) {
+        if let Some(mut child) = self.playback_child.lock().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    pub fn status(&self) -> serde_json::Value {
+        let sess = self.session.lock().clone();
+        let mode = self.mode.lock().clone();
+        let last_error = self.last_error.lock().clone();
+        let stt_model = self.find_installed_component("whisper-stt-base-en");
+        let tts_model = self.find_installed_component("speech_tts");
+        let active = sess.as_ref().is_some_and(|s| {
+            !matches!(s.state, VoiceSessionState::Idle | VoiceSessionState::Ended)
+        });
+        serde_json::json!({
+            "active": active,
+            "mode": if active { mode } else { "idle".into() },
+            "state": sess.as_ref().map(|s| s.state).unwrap_or(VoiceSessionState::Idle),
+            "session_id": sess.as_ref().map(|s| s.session_id.clone()),
+            "bot_id": sess.as_ref().map(|s| s.bot_id.clone()),
+            "consent_acknowledged": sess.as_ref().is_some_and(|s| s.consent_acknowledged),
+            "input_device": sess.as_ref().map(|s| s.input_device.clone()).unwrap_or_else(|| "default".into()),
+            "transcript": sess.as_ref().map(|s| s.transcript.clone()).unwrap_or_default(),
+            "last_error": last_error,
+            "stt_installed": stt_model.is_some(),
+            "tts_installed": tts_model.is_some(),
+            "stt_model_path": stt_model.as_ref().map(|p| p.display().to_string()),
+            "tts_model_path": tts_model.as_ref().map(|p| p.display().to_string()),
+            "stt_endpoint": self.cfg.stt_endpoint,
+            "tts_endpoint": self.cfg.tts_endpoint,
+            "consent_prompt": self.cfg.consent_prompt,
+            "install_component": if stt_model.is_none() { Some("whisper-stt-base-en") } else { None },
+        })
+    }
+
+    pub fn start(&self, bot_id: &str, mode: &str) -> serde_json::Value {
+        self.kill_playback();
+        let clean_mode = if mode.eq_ignore_ascii_case("dictate") {
+            "dictate"
+        } else {
+            "voice"
+        };
+        let bot = if bot_id.trim().is_empty() {
+            "muse"
+        } else {
+            bot_id.trim()
+        };
+        let mut sess = VoiceSession::start(bot);
+        // Preserve explicit consent requirement on every fresh session.
+        sess.consent_acknowledged = false;
+        *self.session.lock() = Some(sess);
+        *self.mode.lock() = clean_mode.into();
+        *self.last_error.lock() = None;
+        self.status()
+    }
+
+    pub fn set_consent(&self, granted: bool, bot_id: Option<&str>) -> serde_json::Value {
+        if !granted {
+            self.kill_playback();
+            if let Some(ref mut sess) = *self.session.lock() {
+                sess.revoke_consent();
+            }
+            *self.mode.lock() = "idle".into();
+            *self.last_error.lock() = None;
+            return self.status();
+        }
+        let mut guard = self.session.lock();
+        if guard.is_none()
+            || matches!(
+                guard.as_ref().map(|s| s.state),
+                Some(VoiceSessionState::Ended | VoiceSessionState::Idle)
+            )
+        {
+            *guard = Some(VoiceSession::start(bot_id.unwrap_or("muse")));
+            *self.mode.lock() = "voice".into();
+        }
+        if let Some(ref mut sess) = *guard {
+            sess.acknowledge_consent();
+            sess.resume();
+        }
+        drop(guard);
+        *self.last_error.lock() = None;
+        self.status()
+    }
+
+    pub fn set_input_device(&self, device: &str) -> serde_json::Value {
+        if let Some(ref mut sess) = *self.session.lock() {
+            sess.set_input_device(device.trim());
+        }
+        self.status()
+    }
+
+    pub fn barge_in(&self) -> serde_json::Value {
+        self.kill_playback();
+        if let Some(ref mut sess) = *self.session.lock() {
+            sess.request_barge_in();
+        }
+        self.status()
+    }
+
+    pub fn stop(&self) -> serde_json::Value {
+        self.kill_playback();
+        if let Some(ref mut sess) = *self.session.lock() {
+            sess.end();
+        }
+        *self.mode.lock() = "idle".into();
+        self.status()
+    }
+
+    pub async fn transcribe_wav(&self, wav_bytes: &[u8]) -> Result<serde_json::Value> {
+        let mut sess = self.session.lock().clone().ok_or_else(|| {
+            GmError::SafetyViolation("Start a voice or dictation session first".into())
+        })?;
+        if !sess.consent_acknowledged {
+            let msg = "Microphone consent is required before recording or transcribing audio";
+            *self.last_error.lock() = Some(msg.into());
+            return Err(GmError::SafetyViolation(msg.into()));
+        }
+        if wav_bytes.is_empty() {
+            let msg = "No audio captured";
+            *self.last_error.lock() = Some(msg.into());
+            return Err(GmError::Config(msg.into()));
+        }
+        if wav_bytes.len() > MAX_AUDIO_BUFFER_BYTES {
+            let msg = format!(
+                "Audio buffer ({} bytes) exceeds bounded limit ({MAX_AUDIO_BUFFER_BYTES} bytes)",
+                wav_bytes.len()
+            );
+            *self.last_error.lock() = Some(msg.clone());
+            return Err(GmError::SafetyViolation(msg));
+        }
+
+        let engine = LocalVoiceEngine::new(self.cfg.clone())?;
+        match engine.transcribe_wav(&mut sess, wav_bytes).await {
+            Ok(text) => {
+                *self.session.lock() = Some(sess);
+                *self.last_error.lock() = None;
+                Ok(serde_json::json!({
+                    "text": text,
+                    "engine": "local_whisper_http",
+                    "status": self.status(),
+                }))
+            }
+            Err(http_err) => {
+                // Fallback to installed `whisper-cli` + verified `whisper-stt-base-en` payload if available.
+                if let Some(model_path) = self.find_installed_component("whisper-stt-base-en") {
+                    let tmp_wav = std::env::temp_dir()
+                        .join(format!("dt-voice-{}.wav", uuid::Uuid::new_v4().simple()));
+                    std::fs::write(&tmp_wav, wav_bytes)?;
+                    let output = std::process::Command::new("whisper-cli")
+                        .arg("-m")
+                        .arg(&model_path)
+                        .arg("-f")
+                        .arg(&tmp_wav)
+                        .arg("-nt")
+                        .output();
+                    let _ = std::fs::remove_file(&tmp_wav);
+                    if let Ok(out) = output
+                        && out.status.success()
+                    {
+                        let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                        if !text.is_empty() {
+                            sess.append_turn("caller", &text, true);
+                        }
+                        sess.state = VoiceSessionState::Listening;
+                        *self.session.lock() = Some(sess);
+                        *self.last_error.lock() = None;
+                        return Ok(serde_json::json!({
+                            "text": text,
+                            "engine": "whisper_cli",
+                            "status": self.status(),
+                        }));
+                    }
+                }
+                let hint = if self
+                    .find_installed_component("whisper-stt-base-en")
+                    .is_none()
+                {
+                    format!(
+                        "Local speech runtime is not installed or running ({http_err}). Install 'whisper-stt-base-en' in Settings -> Local Components."
+                    )
+                } else {
+                    format!(
+                        "Whisper STT server at {} is not reachable ({http_err}). Start local Whisper or use browser speech recognition.",
+                        self.cfg.stt_endpoint
+                    )
+                };
+                sess.state = VoiceSessionState::Listening;
+                *self.session.lock() = Some(sess);
+                *self.last_error.lock() = Some(hint.clone());
+                Err(GmError::Platform(hint))
+            }
+        }
+    }
+
+    pub async fn speak(&self, text: &str) -> Result<serde_json::Value> {
+        let clean = text.trim();
+        if clean.is_empty() {
+            return Err(GmError::Config("Nothing to speak".into()));
+        }
+        let mut sess = self
+            .session
+            .lock()
+            .clone()
+            .unwrap_or_else(|| VoiceSession::start("muse"));
+        self.kill_playback();
+        let engine = LocalVoiceEngine::new(self.cfg.clone())?;
+        if let Ok(audio_bytes) = engine.synthesize_speech(&mut sess, clean).await {
+            *self.session.lock() = Some(sess);
+            *self.last_error.lock() = None;
+            return Ok(serde_json::json!({
+                "spoken": true,
+                "engine": "local_http_tts",
+                "bytes": audio_bytes.len(),
+                "status": self.status(),
+            }));
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if std::path::Path::new("/usr/bin/say").is_file() {
+                let child = std::process::Command::new("/usr/bin/say")
+                    .arg(clean)
+                    .spawn()?;
+                *self.playback_child.lock() = Some(child);
+                sess.append_turn(sess.bot_id.clone(), clean, true);
+                sess.state = VoiceSessionState::Speaking;
+                *self.session.lock() = Some(sess);
+                *self.last_error.lock() = None;
+                return Ok(serde_json::json!({
+                    "spoken": true,
+                    "engine": "macos_say",
+                    "status": self.status(),
+                }));
+            }
+        }
+
+        let hint = "Local TTS runtime is not running. Install 'speech_tts' in Settings -> Local Components or start the local TTS server.";
+        *self.last_error.lock() = Some(hint.into());
+        Err(GmError::Platform(hint.into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_voice_session_manager_consent_and_stop() {
+        let dir = std::env::temp_dir().join(format!("dt-voice-mgr-{}", uuid::Uuid::new_v4()));
+        let mgr = VoiceSessionManager::new(dir.clone());
+        let s0 = mgr.status();
+        assert_eq!(s0["active"], false);
+        assert_eq!(s0["consent_acknowledged"], false);
+
+        let s1 = mgr.start("muse", "dictate");
+        assert_eq!(s1["active"], true);
+        assert_eq!(s1["mode"], "dictate");
+        assert_eq!(s1["consent_acknowledged"], false);
+        // Must fail without consent.
+        assert!(mgr.transcribe_wav(b"RIFFtest").await.is_err());
+
+        let s2 = mgr.set_consent(true, Some("muse"));
+        assert_eq!(s2["consent_acknowledged"], true);
+        // Oversized buffer rejected cleanly.
+        let oversized = vec![0u8; MAX_AUDIO_BUFFER_BYTES + 1];
+        assert!(mgr.transcribe_wav(&oversized).await.is_err());
+
+        // Revoking consent ends session immediately.
+        let s3 = mgr.set_consent(false, None);
+        assert_eq!(s3["active"], false);
+        assert_eq!(s3["consent_acknowledged"], false);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn test_managed_voice_lifecycle_and_bounded_buffers() {

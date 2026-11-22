@@ -178,8 +178,7 @@ impl OpenBotSupervisor {
                     }
                 } else {
                     return Err(GmError::Provider(
-                        "This legacy ChatGPT connection needs a fresh sign-in with Grok Muse."
-                            .into(),
+                        "This legacy ChatGPT connection needs a fresh sign-in with DT.".into(),
                     ));
                 }
             }
@@ -541,7 +540,7 @@ impl OpenBotSupervisor {
                     return (StatusCode::BAD_REQUEST, Html("This sign-in callback is invalid or already used."));
                 }
                 let result = async {
-                    if query.contains_key("error") { return Err(GmError::Provider("Sign-in was declined. You can try again in Grok Muse.".into())); }
+                    if query.contains_key("error") { return Err(GmError::Provider("Sign-in was declined. You can try again in DT.".into())); }
                     let code = query.get("code").ok_or_else(|| GmError::Provider("Missing authorization code".into()))?;
                     let issued = query.get("client_id").map(String::as_str).unwrap_or(&attempt.client_id);
                     let bundle = gm_llm::complete_chatgpt_sign_in(&provider_http_client()?, &attempt, issued, code).await?;
@@ -552,8 +551,8 @@ impl OpenBotSupervisor {
                 }.await;
                 if let Err(error) = &result { supervisor.fail_sign_in(&profile, error.to_string()); }
                 let _ = completed.send(true);
-                if result.is_ok() { (StatusCode::OK, Html("<title>Grok Muse</title><h1>Signed in</h1><p>Return to Grok Muse to choose and verify a model.</p>")) }
-                else { (StatusCode::BAD_REQUEST, Html("<title>Grok Muse</title><h1>Sign-in could not finish</h1><p>Return to Grok Muse for details and retry.</p>")) }
+                if result.is_ok() { (StatusCode::OK, Html("<title>DT</title><h1>Signed in</h1><p>Return to DT to choose and verify a model.</p>")) }
+                else { (StatusCode::BAD_REQUEST, Html("<title>DT</title><h1>Sign-in could not finish</h1><p>Return to DT for details and retry.</p>")) }
             }
         }));
         let owner = self.clone();
