@@ -58,3 +58,31 @@ The public `v1.0.0` release lacked a detached `dt-release.sig` asset and predate
   2. Start `postgres`, `dt-server`, and `tls-proxy` (`docker compose up -d`).
   3. Verify `GET /api/v1/health/ready` returns `200 OK` without invoking a model.
   4. Re-enroll a client (`POST /api/v1/auth/enroll`), verify attachments open and match checksums, verify workspace isolation (`403` cross-tenant), and review any held external jobs before resuming workers.
+
+## 6. Renewing Signed Metadata
+
+Signed update and component catalog metadata includes a mandatory `expires_at` timestamp. CI enforces a 30-day expiry guard (`test_signed_metadata_not_expiring_soon` in `tools/test_release_tools.py`) that fails before metadata approaches expiration.
+
+- **When to renew**: Run metadata renewal before the 30-day CI threshold (or whenever promoting a newly certified release onto `update-metadata`).
+- **Local / CLI renewal (`tools/renew-update-metadata.py`)**:
+  ```sh
+  python3 tools/renew-update-metadata.py --help
+  GM_RELEASE_PUBLIC_KEY_HEX="<32-byte-ed25519-pubkey-hex>" \
+  GM_RELEASE_SIGNING_KEY_PEM="$(cat release-signing-key.pem)" \
+  python3 tools/renew-update-metadata.py \
+    --repo galaxycoils/DT \
+    --version 1.0.4 \
+    --commit <40-char-commit-sha> \
+    --sequence <strictly-increasing-integer> \
+    --release-dir <path-to-verified-release-assets> \
+    --metadata-dir <path-to-update-metadata-checkout> \
+    [--promote-first]
+  ```
+  `--sequence` **must strictly increase** on every run (anti-rollback protection), and `--promote-first` is passed when promoting a new release version onto `update-metadata` for the first time.
+- **GitHub Actions workflow (`.github/workflows/renew-update-metadata.yml`)**:
+  Trigger `Renew signed update metadata` (`workflow_dispatch`) with required inputs:
+  - `version`: Release version whose immutable assets remain on GitHub Releases (e.g., `1.0.4`).
+  - `sequence`: Monotonically increasing metadata sequence number (must be greater than the currently published `sequence`).
+  - `commit`: Frozen 40-character lowercase commit SHA matching `refs/tags/v<version>`.
+  - `promote_first` (optional boolean): Set to `true` when first promoting a new release version.
+

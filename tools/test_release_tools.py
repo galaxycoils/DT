@@ -92,12 +92,13 @@ class EvidenceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = pathlib.Path(folder)
             data = self.fixture(root)
+            version = json.loads((ROOT / 'docs/release/release-inventory.json').read_text())['version']
             EVIDENCE['validate'](data, 'a' * 40, root)
             mutations = [
                 lambda d: d.update(source='fixture'),
                 lambda d: d.pop('candidate_hashes'),
-                lambda d: d['candidate_hashes']['installers'].pop('DT-1.0.2-windows-aarch64-setup.exe'),
-                lambda d: d['candidate_hashes']['installers'].pop('dt_1.0.2_arm64.deb'),
+                lambda d: d['candidate_hashes']['installers'].pop(f'DT-{version}-windows-aarch64-setup.exe'),
+                lambda d: d['candidate_hashes']['installers'].pop(f'dt_{version}_arm64.deb'),
                 lambda d: d.update(commit='b' * 40),
                 lambda d: d['targets'].pop(),
                 lambda d: d.update(targets=[t for t in d['targets'] if t['session'] != 'wayland']),
@@ -315,6 +316,28 @@ class EvidenceTests(unittest.TestCase):
         caddy = (ROOT / 'deploy/docker/Caddyfile').read_text()
         self.assertIn('reverse_proxy', caddy)
 
+    def test_versions_are_in_sync(self):
+        import tomllib
+        cargo = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
+        web = json.loads((ROOT / 'clients/web/package.json').read_text())['version']
+        mobile = json.loads((ROOT / 'clients/mobile/package.json').read_text())['version']
+        app = json.loads((ROOT / 'clients/mobile/app.json').read_text())['expo']['version']
+        self.assertEqual({cargo, web, mobile, app}, {cargo}, f'version drift: cargo={cargo} web={web} mobile={mobile} app={app}')
+        self.assertNotIn('1.0.0', (ROOT / '.github/workflows/ci.yml').read_text(), 'ci.yml must not hard-code a version')
+
+    def test_signed_metadata_not_expiring_soon(self):
+        from datetime import datetime, timedelta, timezone
+        limit = datetime.now(timezone.utc) + timedelta(days=30)
+        for rel in ('docs/release/component-catalog.json', 'docs/release/release-inventory.json'):
+            p = ROOT / rel
+            if not p.exists():
+                continue
+            exp = json.loads(p.read_text()).get('expires_at')
+            if exp:
+                when = datetime.fromisoformat(exp.replace('Z', '+00:00'))
+                self.assertGreater(when, limit, f'{rel} expires {exp} (<30 days). Run tools/renew-update-metadata.py')
+
 
 if __name__ == '__main__':
     unittest.main()
+
