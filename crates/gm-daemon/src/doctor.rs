@@ -1006,6 +1006,7 @@ async fn run_doctor_inner(
     };
 
     let web_dist_opt = crate::resolve_web_dist(config);
+    let web_install_hint = "Extract the DT web client bundle or build clients/web, then set DT_WEB_DIST to its dist directory.";
     push_hint_check(
         "web_app_present",
         "web",
@@ -1014,11 +1015,9 @@ async fn run_doctor_inner(
         if web_dist_opt.is_some() {
             "React web app bundle available for `dt serve` at `/app/`".into()
         } else {
-            "React web app not installed. Run `npm run build --prefix clients/web` or set `DT_WEB_DIST`.".into()
+            web_install_hint.into()
         },
-        web_dist_opt.is_none().then(|| {
-            "React web app not installed. Run `npm run build --prefix clients/web` or set `DT_WEB_DIST`.".into()
-        }),
+        web_dist_opt.is_none().then(|| web_install_hint.into()),
     );
 
     let missing_components: Vec<String> = component_mgr

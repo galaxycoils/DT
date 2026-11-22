@@ -12,7 +12,7 @@ test("web client uses cookie sessions with CSRF, targets /api/v1, and carries Ra
   assert.match(apiSrc, /\/approvals\//);
   assert.match(apiSrc, /\/system\/providers/);
   assert.match(apiSrc, /\/routines\/.*\/trigger/);
-  assert.match(apiSrc, /credentials:\s*"include"/);
+  assert.match(apiSrc, /credentials:\s*token \? "omit" : "include"/);
   assert.match(apiSrc, /X-DT-CSRF-Token/);
   assert.ok(!apiSrc.includes("localStorage") && !apiSrc.includes("sessionStorage"), "Hosted bearer tokens must not be stored in browser storage");
   const mainSrc = fs.readFileSync(path.join(root, "src/main.tsx"), "utf8");

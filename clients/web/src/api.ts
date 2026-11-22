@@ -119,6 +119,8 @@ export interface HostedSessionInfo {
   expires_at: string;
 }
 
+export type ConnectionMode = "local" | "hosted";
+
 export function buildV1Path(suffix: string): string {
   const clean = suffix.startsWith("/") ? suffix : `/${suffix}`;
   return `/api/v1${clean}`;
@@ -222,7 +224,7 @@ export class DtV1Client {
     this.activeControllers.clear();
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+  private async request<T>(path: string, init?: RequestInit, pairingToken?: string): Promise<T> {
     const controller = new AbortController();
     this.activeControllers.add(controller);
     const externalSignal = init?.signal;
@@ -236,13 +238,14 @@ export class DtV1Client {
     }
     try {
       const method = (init?.method ?? "GET").toUpperCase();
+      const token = pairingToken ?? this.memoryToken;
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
-        "X-DT-Workspace-Id": this.workspaceId,
+        ...(pairingToken === undefined ? { "X-DT-Workspace-Id": this.workspaceId } : {}),
         ...(init?.headers as Record<string, string> | undefined),
       };
-      if (this.memoryToken) {
-        headers.Authorization = `Bearer ${this.memoryToken}`;
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
       }
       if (this.csrfToken && method !== "GET" && method !== "HEAD") {
         headers["X-DT-CSRF-Token"] = this.csrfToken;
@@ -250,7 +253,7 @@ export class DtV1Client {
       const resp = await fetch(`${this.baseUrl}${buildV1Path(path)}`, {
         ...init,
         signal: controller.signal,
-        credentials: "include",
+        credentials: token ? "omit" : "include",
         headers,
       });
       if (!resp.ok) {
@@ -264,6 +267,33 @@ export class DtV1Client {
         externalSignal.removeEventListener("abort", onExternalAbort);
       }
     }
+  }
+
+  private isSameOriginLoopback(): boolean {
+    const origin = window.location.origin;
+    const url = new URL(this.baseUrl || origin, origin);
+    return url.origin === origin &&
+      (url.hostname === "localhost" || url.hostname === "[::1]" || /^127(?:\.\d+){3}$/.test(url.hostname));
+  }
+
+  async connectionMode(signal: AbortSignal): Promise<ConnectionMode> {
+    const { hosted_backend } = await this.request<{ hosted_backend: string }>("/health/ready", {
+      signal,
+      cache: "no-store",
+    });
+    if (hosted_backend === "sqlite" || hosted_backend === "postgres") return "hosted";
+    if (hosted_backend === "local" && this.isSameOriginLoopback()) return "local";
+    throw new Error("Open DT on the local loopback address or connect to a hosted DT server.");
+  }
+
+  async connectLocal(token: string): Promise<string> {
+    if (!this.isSameOriginLoopback() || !token) {
+      throw new Error("Local pairing requires a loopback URL and Companion token.");
+    }
+    const workspace = await this.request<{ active_workspace: string }>("/workspaces", undefined, token);
+    this.memoryToken = token;
+    this.workspaceId = workspace.active_workspace;
+    return workspace.active_workspace;
   }
 
   async restoreSession(signal?: AbortSignal): Promise<HostedSessionInfo> {
@@ -394,6 +424,10 @@ export class DtV1Client {
 
   async signOut() {
     this.abortAllRequests();
+    if (this.memoryToken) {
+      this.memoryToken = "";
+      return;
+    }
     try {
       const res = await this.request<{ signed_out: boolean }>("/auth/logout", {
         method: "POST",
@@ -489,8 +523,11 @@ export class DtV1Client {
     });
   }
 
-  getSpaceUrl(slug: string) {
-    return this.request<{ url: string }>(`/spaces/${encodeURIComponent(slug)}/url`);
+  getSpaceUrl(slug: string, signal?: AbortSignal) {
+    return this.request<{ url: string; preview_parent_origin?: string | null }>(
+      `/spaces/${encodeURIComponent(slug)}/url`,
+      { signal },
+    );
   }
 
   listConnectors(signal?: AbortSignal) {
@@ -539,6 +576,71 @@ export class DtV1Client {
 
   eventsUrl(afterSeq?: number): string {
     return `${this.baseUrl}${workspaceEventsPath(this.workspaceId, afterSeq)}`;
+  }
+
+  async subscribeLocalEvents(
+    signal: AbortSignal,
+    onEvent: (event: string) => void,
+    onUnauthorized: () => void,
+  ): Promise<void> {
+    const url = this.eventsUrl();
+    const token = this.memoryToken;
+    let lastEventId = "";
+    while (!signal.aborted) {
+      try {
+        const response = await fetch(url, {
+          headers: {
+            Accept: "text/event-stream",
+            Authorization: `Bearer ${token}`,
+            ...(lastEventId ? { "Last-Event-ID": lastEventId } : {}),
+          },
+          signal,
+          cache: "no-store",
+          credentials: "omit",
+          redirect: "error",
+        });
+        if (response.status === 401 || response.status === 403) {
+          onUnauthorized();
+          return;
+        }
+        if (!response.ok || !response.body) throw new Error("DT event stream unavailable");
+        onEvent("open");
+        const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+        try {
+          let buffer = "";
+          while (!signal.aborted) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += value;
+            let boundary: RegExpExecArray | null;
+            while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
+              const frame = buffer.slice(0, boundary.index);
+              buffer = buffer.slice(boundary.index + boundary[0].length);
+              const id = /^id: *([1-9]\d*)\r?$/m.exec(frame)?.[1];
+              if (id) lastEventId = id;
+              const type = /^event: *([^\r\n]+)\r?$/m.exec(frame)?.[1];
+              if (type) onEvent(type);
+            }
+          }
+        } finally {
+          await reader.cancel().catch(() => {});
+          reader.releaseLock();
+        }
+      } catch {
+        // Retry transient disconnects with the last complete event ID.
+      }
+      if (!signal.aborted) {
+        await new Promise<void>((resolve) => {
+          const done = () => {
+            clearTimeout(timer);
+            signal.removeEventListener("abort", done);
+            resolve();
+          };
+          const timer = setTimeout(done, 1000);
+          signal.addEventListener("abort", done, { once: true });
+        });
+      }
+    }
   }
 }
 

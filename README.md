@@ -1,269 +1,89 @@
-# DT — Native Hybrid Desktop, Web, Mobile & Self-Hostable Agent (`v1.0.4`)
+# DT v1.0.5
 
-<p align="center">
-  <strong>Fast computer-use · Proactive personal agent · OpenBot multi-agent coworker suite · Unified DT Doctor recovery</strong><br/>
-  Native Rust desktop (macOS, Windows 11, Ubuntu 24.04 X11/Wayland) · Same-origin React Web (`/app/`) · Expo Mobile · Voice/SIP/Meetings · Hosted PostgreSQL Control Plane
-</p>
+DT is a native desktop agent with web and mobile clients. It combines computer use, a persistent coworker workspace, and configurable model routing. Run it on your own machine or host workspaces behind HTTPS with PostgreSQL.
 
-<p align="center">
-  <a href="https://galaxycoils.github.io/DT/"><strong>🌐 Live Interactive Front Page</strong></a> ·
-  <a href="https://github.com/galaxycoils/DT/releases/latest"><strong>📦 Latest Release & Binaries</strong></a> ·
-  <a href="docs/release/coverage-inventory.json"><strong>✅ 36/36 Coverage Inventory</strong></a> ·
-  <a href="docs/OPERATIONS.md"><strong>🛠️ Operations Guide</strong></a> ·
-  <a href="docs/SUPPORT_MATRIX.md"><strong>🖥️ Support Matrix</strong></a> ·
-  <a href="docs/PRIVACY.md"><strong>🔒 Privacy & Discretion</strong></a>
-</p>
+[Downloads](https://github.com/galaxycoils/DT/releases/tag/v1.0.5) · [Release notes](docs/releases/v1.0.5.md) · [Interactive demo](https://galaxycoils.github.io/DT/) · [Operations guide](docs/OPERATIONS.md)
 
----
+## What's new
 
-## 📦 Download Prebuilt Release Binaries
+- The React client at `/app/` accepts the local Companion token on loopback. It keeps the token in memory and resumes the live stream after transient disconnects, including mid-reply.
+- Page previews run on a separate loopback port in a scripts-only sandbox. The client explains when you need the daemon's canonical URL or a newer daemon.
+- Hosted workspaces use enrollment, secure cookies, and CSRF protection. Caddy redirects the HTTPS root to `/app/` and forwards the app and v1 API to DT.
+- Doctor and the setup guide explain how to supply the web bundle and choose between background and foreground operation.
 
-Download verified release packages and prebuilt binaries from [**GitHub Releases**](https://github.com/galaxycoils/DT/releases):
+## Downloads
 
-| Platform / Architecture | Package / Binary Asset | Binaries & Components Included | Verification |
-| :--- | :--- | :--- | :--- |
-| **Ubuntu 24.04 LTS (x86_64)** | [`dt_1.0.4_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/dt_1.0.4_amd64.deb) | `/usr/bin/{dt,gm,dt-doctor,gm-daemon,gm-cu-helper,gm-ui}`, `/usr/share/dt/web`, systemd user units, desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
-| **Ubuntu 24.04 LTS (ARM64)** | [`dt_1.0.4_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/dt_1.0.4_arm64.deb) | ARM64 Debian package with `/usr/share/dt/web`, systemd user units, and desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
-| **Linux Generic (x86_64)** | [`DT-1.0.4-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-linux-x86_64-binaries.tar.gz) | Standalone release binaries (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) + `share/dt/web` | `.sha256` |
-| **macOS Apple Silicon (ARM64)** | [`DT-1.0.4-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-macos-aarch64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
-| **macOS Intel (x86_64)** | [`DT-1.0.4-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-macos-x86_64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
-| **Windows 11 (x86_64)** | [`DT-1.0.4-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-windows-x86_64-setup.exe) | NSIS per-user installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
-| **Windows 11 (ARM64)** | [`DT-1.0.4-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-windows-aarch64-setup.exe) | NSIS per-user ARM64 installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
-| **React Web Client Bundle** | [`DT-1.0.4-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-web-client.tar.gz) | Production Vite build (`index.html`, Rakazo token CSS, JS bundle for `/app/`) | `.sha256` |
+| Platform | Asset |
+| --- | --- |
+| Ubuntu 24.04 x86-64 | [`dt_1.0.5_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/dt_1.0.5_amd64.deb) |
+| Ubuntu 24.04 ARM64 | [`dt_1.0.5_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/dt_1.0.5_arm64.deb) |
+| Linux x86-64 standalone | [`DT-1.0.5-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-linux-x86_64-binaries.tar.gz) |
+| macOS Apple Silicon | [`DT-1.0.5-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-macos-aarch64.dmg) |
+| macOS Intel | [`DT-1.0.5-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-macos-x86_64.dmg) |
+| Windows 11 x64 | [`DT-1.0.5-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-windows-x86_64-setup.exe) |
+| Windows 11 ARM64 | [`DT-1.0.5-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-windows-aarch64-setup.exe) |
+| React web client | [`DT-1.0.5-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-web-client.tar.gz) |
 
-```bash
-# Verify any downloaded release package with its SHA-256 sidecar:
-shasum -a 256 -c dt_1.0.4_amd64.deb.sha256
-```
+Download the package and its matching `.sha256` file into the same directory. Run `sha256sum -c <asset>.sha256` on Linux or `shasum -a 256 -c <asset>.sha256` on macOS. On Windows, compare `Get-FileHash -Algorithm SHA256 <asset>` with the sidecar. The installers also have build metadata and SBOMs.
 
----
+These are CI-built packages. The macOS apps use ad hoc signatures and the Windows installers ship without Authenticode. See [release readiness](docs/release-readiness.md) for native certification and signed update requirements.
 
-## ✨ What's New in `v1.0.4` (Unified Release, Same-Origin `/app` Hosting & PostgreSQL CI)
+## Run DT locally
 
-1. **Unified Backend & Cross-Device UX (`v1.0.2` + `v1.0.3` merged cleanly)**:
-   - Brings the pinned 15-entry `component-catalog.json` (valid through `2027-11-19`), active PostgreSQL hosted control plane (`PostgresHostedStore` / `HostedPlaneBackend`), consent-gated `VoiceSessionManager`, redesigned native desktop UI, and `tools/renew-update-metadata.py` together with the interactive React Web & Expo Mobile UX elevation and full CLI/`/api/v1` parity.
-2. **One-Command Same-Origin React Web App Hosting (`dt serve` → `/app/`)**:
-   - `dt serve` automatically discovers and hosts the built React web client at **`http://127.0.0.1:7433/app/`** (bundled inside Ubuntu `.deb` at `/usr/share/dt/web` and Docker via `DT_WEB_DIST=/usr/share/dt/web`) with SPA fallback, immutable asset caching, strict CSP, and traversal blocking — plus `cargo run -p xtask -- dev` for instant Vite hot reload (`http://localhost:5173/`).
-3. **Real PostgreSQL 16 CI Verification & Actionable First-Run `dt doctor` Hints**:
-   - Added 7 real PostgreSQL 16 integration tests (`crates/gm-openbot/tests/postgres_hosted.rs`) proven in CI (`postgres-integration`), non-failing `dt doctor` first-run hints (`web_app_present`, `optional_components`, `hosted_database`, `metadata_expiry`), synchronized `1.0.4` versions with drift & 30-day metadata-expiry guards, and **0 `npm audit` vulnerabilities** across both clients.
-4. **100% Release Coverage Inventory Verification (`docs/release/coverage-inventory.json`, `tools/test_release_tools.py`)**:
-   - All **36/36 required `test_ids`** across all **28 required capability rows** (including `WEB-APP-01` and `HOST-PG-01`) are enforced by `test_coverage_inventory_test_ids_exist_in_codebase`, alongside **422/422 passing workspace tests** under `cargo nextest`.
+1. **Ubuntu:** Install the matching `.deb`, then run `dt service install`.
+2. **macOS:** Open the disk image and run `Install DT.pkg`. Add `/Applications/DT.app/Contents/MacOS` to your shell's `PATH`. Run `dt onboard` and `dt permissions --open-missing`, then run `dt service install`.
+3. **Windows:** Run the matching setup executable. Run `dt service install` from the installed `bin` directory and check the background tasks with `dt service status`.
 
----
+Run `dt doctor check` to find the active storage directory and inspect readiness. To run in the foreground, stop the background daemon first, then run `dt serve`. Both processes use an exclusive storage lease.
 
-## What's in DT
+Open the React app at [http://127.0.0.1:7433/app/](http://127.0.0.1:7433/app/) and enter the token from the storage directory's `companion-token` file, or use the configured `GROK_MUSE_COMPANION_TOKEN`. The built-in Companion UI is available at [http://127.0.0.1:7433/](http://127.0.0.1:7433/).
 
-- **Pinned Local Components**: 8 optional local runtimes and models (`qwen2-vl-2b`, `smolvlm`, `smolvlm2`, `vlm_worker`, `whisper-stt-base-en`, `speech_tts`, `vm_image`, `vm_firmware` — 15 OS/architecture entries pinned with Ed25519 signatures and SHA-256 checksums in [`docs/release/component-catalog.json`](docs/release/component-catalog.json)). Pull local models from the CLI with `dt models list` / `dt models pull <id>` or install and verify optional components from the Desktop / Companion Settings UI (`/api/system/components`).
-- **PostgreSQL Hosted Mode**: Set `DT_DATABASE_URL=postgres://...` (or `DATABASE_URL`) when running `dt serve` to enable `PostgresHostedStore` (migrations V1–V4, row-level tenant isolation, and SHA-256-verified SQLite-to-PostgreSQL migration).
-- **Consent-Gated Voice & Dictation**: Managed local Whisper STT and TTS sessions via `VoiceSessionManager`, requiring explicit user consent with immediate child-process teardown on stop, barge-in, or consent revocation.
-- **Desktop Keyboard Shortcuts**: `Cmd/Ctrl+Shift+M` (Studio — Templates, Skills, Routines & Sections), `Cmd/Ctrl+B` (toggle sidebar collapse), `Cmd/Ctrl+Shift+F` (expand sidebar & search conversations), and `Cmd/Ctrl+D` (start/stop dictation), alongside `Cmd/Ctrl+K` (Command Palette), `Cmd/Ctrl+,` (Settings), `Cmd/Ctrl+/` (Shortcuts cheat-sheet), and `Cmd/Ctrl+Alt+B` (Bot Details drawer).
-- **Operations & Recovery**: See [`docs/OPERATIONS.md`](docs/OPERATIONS.md) for installation, `dt-doctor` recovery & snapshot restore, component downloads, spending controls, hosted backup/restore, and device revocation.
+### Install or replace the React bundle
 
----
+The Ubuntu packages, standalone Linux archive, and Docker image include the React build. For macOS and Windows, verify and extract the matching web client archive. Copy the contents of `dist` into the `web` subdirectory of your DT storage directory, then restart the background daemon. For foreground use, set `DT_WEB_DIST` to the extracted `dist` directory before starting `dt serve`.
 
-## 🎯 Goal State & Performance Budgets (G1–G8)
+Use the v1.0.5 daemon and web bundle together. For split-view Pages, open the canonical `127.0.0.1` app URL on the machine running DT.
 
-| Gate | Target Budget | Verification & Architecture |
-| :--- | :--- | :--- |
-| **G1 Native** | **Zero Electron / Chromium** | Native Rust `egui`/Glow/WGPU desktop UI (`gm-ui`) + per-user CU helper (`gm-cu-helper`) + unprivileged daemon (`gm-daemon`) + `dt` / `dt-doctor` CLIs. |
-| **G2 Footprint** | **`< 50 MB` idle RSS** | Whole process tree idle RSS (`< 120 MB` with desktop UI open), measured via `footprint` / `ps`. |
-| **G3 Hot Path** | **`< 2 ms` capture, `< 30 ms` AX** | Frame fetch `< 2 ms` p99, AX snapshot `< 30 ms` p95, downscale + JPEG `q=70` `< 15 ms` p95, action dispatch `< 5 ms` p99. |
-| **G4 Agent Step** | **`< 1.5 s` median, `< 4.0 s` p95** | Fast-route end-to-end agent step latency including streaming model inference (`xtask bench-llm`). |
-| **G5 Quality** | **`≥ 70%` pass, `0` violations** | 25-task evaluation suite + v0.2.0 SoM/MCP suite + 10-scenario OpenBot/Muse governance suite (**100% / 40 of 40 passing** in `xtask eval`). |
-| **G6 Proactive** | **`≥ 80%` precision, `≤ 3`/day** | Quiet Gate (22:00–08:00), max 3 notices/day, `$0.50`/day proactive spend cap, `done`/`later`/`stop` feedback semantics (`xtask simulate-dogfood`). |
-| **G7 Safety** | **`< 100 ms` emergency kill** | 3-tier action classification (`Read`, `Reversible`, `Irreversible`), blocklist & workspace confinement (`RULE-BLK-001`..`RULE-SEC-006`), `DISCRETION.md` deny-wins privacy guard, and append-only `audit.jsonl`. |
-| **G8 Routing** | **5-Tier Provider Precedence** | `Routine → Bot → Workspace → Account → Legacy` across ChatGPT OAuth (`/v1/responses`), OpenAI API, Kilo Gateway, OpenRouter, Nous Portal OAuth, Meta Muse, xAI Grok, Custom Endpoints, and Local VLM. |
+## Self-host with PostgreSQL
 
----
+Set `DT_DOMAIN` for Caddy and `DT_DATABASE_URL` for the PostgreSQL 16 service, using the Compose hostname `postgres` and database `dt_hosted`. Provide the Compose password and hosted master-key files using `DT_POSTGRES_PASSWORD_FILE` and `DT_HOSTED_MASTER_KEY_FILE`. Set `DT_COMPANION_TOKEN` for operator access.
 
-## 🏗️ System Architecture
-
-```text
- ┌────────────────────────────────────────────────────────────────────────────────┐
- │  Clients: Native Rust Desktop (gm-ui) · Companion Web · React Web · Expo Mobile │
- │  • Shared Rakazo Tokens (ui/design-tokens.json)   • Geometric Coworker Avatars │
- │  • Command Palette (⌘K / Ctrl+K)                  • Split-View Space Sandbox   │
- └───────────────────┬──────────────────────────────────────────┬─────────────────┘
-                     │ Local UDS / SID Named Pipe               │ HTTPS /api/v1 + SSE
- ┌───────────────────▼──────────────────────────────────────────▼─────────────────┐
- │                         gm-daemon / dt (Unprivileged)                          │
- │  ┌──────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐  │
- │  │ OpenBot Supervisor   │  │ 5-Tier LLM Router    │  │ Security & Privacy   │  │
- │  │ • @muse @researcher  │  │ • ChatGPT PKCE OAuth │  │ • Tier 1/2/3 Gateway │  │
- │  │   @coder @guardian   │  │ • Nous / Kilo / OR   │  │ • DISCRETION.md      │  │
- │  │ • SQLite WAL Queue   │  │ • Muse / Grok / Local│  │ • Two-Phase Forget   │  │
- │  │ • Routines & Bridges │  │ • $100 Budget Ledger │  │ • Opaque Secret Vault│  │
- │  └──────────┬───────────┘  └──────────┬───────────┘  └──────────┬───────────┘  │
- │             │                         │                         │              │
- │  ┌──────────▼───────────┐  ┌──────────▼───────────┐  ┌──────────▼───────────┐  │
- │  │ Hosted Control Plane │  │ Voice & Meetings     │  │ DT Doctor & Updater  │  │
- │  │ • PostgreSQL / SQLite│  │ • Local Whisper/TTS  │  │ • Journaled Repairs  │  │
- │  │ • AES-256-GCM + HKDF │  │ • Asterisk ARI SIP   │  │ • SQLite VACUUM INTO │  │
- │  │ • Cookie + CSRF Auth │  │ • Zoom RTMS & Meet   │  │ • Ed25519 Manifests  │  │
- │  └──────────────────────┘  └──────────────────────┘  └──────────────────────┘  │
- └───────────────────────────────────────┬────────────────────────────────────────┘
-                                         │ Local UDS / SID Named Pipe + POSIX SHM Ring
- ┌───────────────────────────────────────▼────────────────────────────────────────┐
- │                 gm-cu-helper (Per-User Native Desktop Helper)                  │
- │  • macOS: ScreenCaptureKit, Accessibility (AXUIElement), CoreGraphics, EventKit│
- │  • Windows 11: Windows.Graphics.Capture, UI Automation (UIA), SendInput        │
- │  • Ubuntu 24.04: X11 XShm/XTest + Wayland XDG Desktop Portal / PipeWire / EIS  │
- └────────────────────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 🧩 Workspace Crates
-
-| Crate | Responsibility |
-| :--- | :--- |
-| **[`crates/gm-core`](crates/gm-core)** | Domain types (`AxSnapshot`, `ComputerAction`, provider profiles), length-prefixed IPC protocol, Windows SID SDDL validation, config schemas. |
-| **[`crates/gm-platform`](crates/gm-platform)** | Cross-platform `Platform` trait (`capture`, `ax_snapshot`, `act`, `windows`, `permissions`), macOS/Windows/Linux native backends, POSIX SHM frame ring. |
-| **[`crates/gm-cu-helper`](crates/gm-cu-helper)** | Per-user native desktop helper holding TCC / desktop capture permissions across daemon upgrades. |
-| **[`crates/gm-llm`](crates/gm-llm)** | Multi-provider client (`/v1/chat/completions` & `/v1/responses` SSE), ChatGPT & Nous PKCE/OAuth, 5-tier router, budget manager, release budget ledger. |
-| **[`crates/gm-safety`](crates/gm-safety)** | Action tier classifier, `< 100 ms` kill switch, blocklist manager, path/symlink confinement, secret scrubber, untrusted data fencing, `AuditLogger`. |
-| **[`crates/gm-memory`](crates/gm-memory)** | SQLite FTS5 personal memory store, `ProvenanceStore` citation ledger, two-phase redacted `ForgetPlanner`/`ForgetExecutor`, fenced `MemoryImporter`. |
-| **[`crates/gm-muse`](crates/gm-muse)** | Bundled upstream Muse prompt & 9 core skills (`UPSTREAM.md` SHA-256 verified), cache-friendly `MusePromptBuilder`, CAS `SharedFileStore`, `SkillRegistry`. |
-| **[`crates/gm-goals`](crates/gm-goals)** | Durable goals & 1-level subgoals (`GOAL.md`), `QuietGate`, `HeartbeatWorker`, `FeedStore`, dogfood tracker, nightly review & self-improvement jobs. |
-| **[`crates/gm-agent`](crates/gm-agent)** | Autonomous computer-use loop, negative-origin & DPI-aware Set-of-Marks (SoM) compositor, stagnation detector, MCP bridge, *"Take the Wheel"* handoff. |
-| **[`crates/gm-openbot`](crates/gm-openbot)** | Multi-agent supervisor, persistent `BotRoster`, crash-safe SQLite `DurableTaskQueue`, channels, routines, `DiscretionStore`, Static Spaces, Voice/SIP/Zoom/Meet, Hosted Control Plane, `/api/v1` + Companion Web server. |
-| **[`crates/gm-vlm-candle`](crates/gm-vlm-candle)** | Native Rust local Vision-Language Model inference (`Qwen2-VL-2B-Instruct`, `SmolVLM2`) and safetensors model registry. |
-| **[`crates/gm-daemon`](crates/gm-daemon)** | Background orchestrator, IPC control server, unified `dt-doctor` engine, SHA-256 patch reviewer, Ed25519 signed updater, chunked component installer, `dt` / `gm` CLI. |
-| **[`crates/gm-ui`](crates/gm-ui)** | Native Rust `egui`/Glow/WGPU desktop shell with virtualized 10k-message transcript, 5-tier Escape stack, smart arrow composer, and LRU texture cache. |
-| **[`crates/gm-eval`](crates/gm-eval)** | 25-task G5 evaluation suite, v0.2.0 SoM/MCP suite, and 10-scenario OpenBot/Muse governance evaluation suite. |
-| **[`xtask`](xtask)** | Build & release automation (`bundle`, `dmg`, `verify-dmg`, `install`, `notarize`, `bench-hotpath`, `bench-rss`, `bench-llm`, `eval`, `simulate-dogfood`, `budget-ledger`, `certify`, `test-all`). |
-
----
-
-## 🚀 Quick Start & Installation
-
-Open the web app anytime: run `dt serve` → open **`http://127.0.0.1:7433/app/`** (or Companion UI at `http://127.0.0.1:7433/`).
-
-### 1. Ubuntu 24.04 LTS (`.deb` Package)
-```bash
-sudo apt install ./dt_1.0.4_amd64.deb
-dt doctor check
-dt service install
-dt serve   # opens Companion UI at http://127.0.0.1:7433/ and React app at http://127.0.0.1:7433/app/
-```
-
-### 2. macOS Apple Silicon & Intel (`.dmg` / `Install DT.pkg`)
-1. Download `DT-1.0.4-macos-aarch64.dmg` (or `x86_64`) and verify its `.sha256` sidecar.
-2. Open the disk image and run `Install DT.pkg` (or drag `DT.app` to `/Applications`).
-3. Run onboarding and grant Accessibility / Screen Recording permissions:
-   ```bash
-   dt onboard
-   dt permissions --open-missing
-   dt service install
-   ```
-
-### 3. Windows 11 (`x86_64` & `ARM64`)
-1. Run `DT-1.0.4-windows-x86_64-setup.exe` (installs under `%PROGRAMFILES%\DT\bin`).
-2. Verify installation readiness and user background tasks:
-   ```powershell
-   dt doctor check
-   dt service status
-   ```
-
-### 4. Self-Hosted Docker Compose + Automatic Caddy TLS
-```bash
+```sh
 cd deploy/docker
 docker compose up -d --build
 ```
-The production multi-stage [Dockerfile](deploy/docker/Dockerfile) runs unprivileged as `USER dt` (`uid 10001`) with a built-in `dt-doctor check --json` healthcheck and internal loopback binding behind `tls-proxy`.
 
-### 5. Building from Source
-DT expects the pinned sibling `Darius` checkout (`f47a4ce980abecb751c9f5c79e1c424a20100433`) alongside the repository:
-```bash
+Open the deployment's HTTPS hostname and connect with a workspace enrollment token. Use `/api/v1/health/ready` to check readiness and the active backend. See the [operations guide](docs/OPERATIONS.md) for backups, restore, and device revocation.
+
+## Build from source
+
+Use the Rust toolchain pinned in `rust-toolchain.toml` and Node.js 22. DT's Rust workspace uses the sibling Darius checkout at the pinned commit below.
+
+```sh
 git clone https://github.com/galaxycoils/darius.git Darius
 git -C Darius checkout f47a4ce980abecb751c9f5c79e1c424a20100433
-
-git clone https://github.com/galaxycoils/DT.git DT
+git clone --branch v1.0.5 https://github.com/galaxycoils/DT.git DT
 cd DT
 ./tools/bootstrap.sh
-
-# Build all native binaries (dt, gm, dt-doctor, gm-daemon, gm-cu-helper, gm-ui)
 cargo build --release --locked --workspace --bins
-
-# Develop: start dt serve (http://127.0.0.1:7433/ & /app/) + Vite hot-reload (http://localhost:5173/)
-cargo run -p xtask -- dev
-# Or point the Vite dev proxy at another running server:
-DT_API=http://127.0.0.1:7433 npm run dev --prefix clients/web
+npm ci --prefix clients/web
+npm run build --prefix clients/web
+DT_WEB_DIST="$PWD/clients/web/dist" target/release/dt serve
 ```
 
----
+For development, `cargo run --locked -p xtask -- dev` starts DT and Vite. The React source is in [`clients/web`](clients/web), the Expo source is in [`clients/mobile`](clients/mobile), and the native desktop and backend are in [`crates`](crates).
 
-## 💻 CLI Command Reference (`dt` & `gm` alias)
+## Verify and troubleshoot
 
-All commands work identically via `dt` (primary CLI) and `gm` (backwards-compatible alias):
-
-| Command | Arguments | Description |
-| :--- | :--- | :--- |
-| `dt doctor` | `[check\|repair\|resume <run_id>] [--json]` | Run unified DT Doctor checks, journaled safe repairs (max 2 attempts), or resume an interrupted run. |
-| `dt do` | `"<instruction>"` | Execute an autonomous computer-use task via native Accessibility + SoM vision fallback. |
-| `dt daemon` | `[--config <path>]` | Start the unprivileged background daemon and proactive scheduler. |
-| `dt serve` | `[--bind 127.0.0.1:7433]` | Launch the Companion Web UI, `/api/v1/*` REST + SSE server, and `/admin/audit` governance dashboard. |
-| `dt chat` | `[--system "<prompt>"]` | Interactive terminal REPL with `/memory`, `/status`, `/do`, `/history`, and live token streaming. |
-| `dt status` | — | Display live daemon health, CU helper connectivity, active task, and daily spend. |
-| `dt kill` | — | Trigger the emergency `< 100 ms` kill switch halting all active agent work. |
-| `dt permissions` | `[--open-missing] [--open <pane>] [--json]` | Inspect and request OS privacy permissions (`screen`, `accessibility`, `calendar`, `reminders`). |
-| `dt service` | `<install\|status\|uninstall>` | Manage per-user background services (macOS LaunchAgents, Linux systemd user units, Windows SID tasks). |
-| `dt bots` | `<list\|show\|create\|rm> [--json]` | Manage the OpenBot persistent coworker roster (`@muse`, `@researcher`, `@coder`, `@guardian`, custom bots). |
-| `dt queue` | `<list\|add\|pause\|resume\|cancel\|reassign\|backup\|restore>` | Manage the crash-safe SQLite WAL FIFO task queue across coworkers. |
-| `dt channels` | `<list\|post\|history\|assign\|set-instructions\|archive\|restore>` | Manage multi-bot channels (`#general`, `#research`, `#ops`) and `@bot` mention dispatch. |
-| `dt routines` | `<list\|runs\|trigger <id> [--delivery-id <id>]> [--json]` | Inspect scheduled routines, run history, or trigger an immediate deduplicated routine delivery. |
-| `dt skills` | `<list\|search <query>\|show <name>> [--json]` | Search and inspect bundled Muse skills and connectors via progressive disclosure. |
-| `dt goals` | `<list\|create\|subgoal\|complete\|delete> [--json]` | Manage durable personal goals and 1-level subgoals (`goals/<slug>/GOAL.md`). |
-| `dt spaces` | `<list\|create <slug>\|url <slug>> [--json]` | Create and inspect isolated Static Spaces served on the dedicated loopback Spaces origin. |
-| `dt forget` | `<plan "<request>"\|confirm <plan_id>> [--json]` | Two-phase redacted discretionary Forget across SQLite memory, files, and goal workspaces. |
-| `dt import-memory` | `[--file <path>\|--input "<text>"] [--apply --report-sha256 <hex>]` | Import portable memory notes with untrusted fencing and SHA-256 dry-run approval. |
-| `dt patch` | `<patch_file> [--repo <dir>] [--approve-sha256 <hex>]` | Inspect a unified diff patch and apply it atomically after SHA-256 digest approval. |
-| `dt diagnostics` | `<check\|export\|prune-backups [--keep <N>]\|recover-database <db>>` | Run local health checks, export redacted support bundles, prune snapshots, or recover corrupt SQLite DBs. |
-| `dt models` | `<list\|pull <id>\|rm <id>> [--json]` | Manage local Vision-Language Models (`qwen2-vl-2b`, `smolvlm2-2.2b`). |
-| `dt update` | `[--check] [--force] [--json]` | Verify Ed25519-signed release manifests and renewable update metadata with rollback protection. |
-
----
-
-## 🧪 Verification & Release Certification Suites
-
-Run the full pre-shipping verification battery locally:
-
-```bash
-# 1. Rust formatting & zero-warning workspace linter
+```sh
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
-
-# 2. Full 422-test workspace unit & integration suite
-cargo nextest run --locked --workspace
-
-# 3. Real headless X11 desktop capture, focus, keyboard & pointer test (Linux)
-tools/test-native-x11.sh
-
-# 4. Shared token generation, Companion Web UI (< 64 KiB cap) & headless Chromium smoke test
-python3 tools/generate-ui-tokens.py
-npm run build --prefix tools/companion
-npm test --prefix tools/companion
-node --test tools/tests/companion-events.test.cjs
-npm run smoke --prefix tools/companion
-
-# 5. React Web Client & Expo Mobile Client build and contract tests
-npm run typecheck --prefix clients/web && npm run build --prefix clients/web && npm test --prefix clients/web
-npm test --prefix clients/mobile
-
-# 6. Release tools, 36/36 coverage inventory contract & workspace guest agent tests
-python3 tools/test_release_tools.py -v
-python3 tools/workspace-guest/test_agent.py -v
-
-# 7. xtask evaluation, latency, budget ledger & dogfood gates
-cargo run --locked -p xtask -- eval
-cargo run --locked -p xtask -- bench-llm
-cargo run --locked -p xtask -- simulate-dogfood
-cargo run --locked -p xtask -- budget-ledger --json
-cargo run --locked -p xtask -- certify all --allow-incomplete --json
+cargo test --locked --workspace
+npm run typecheck --prefix clients/web
+npm test --prefix clients/web
+python3 tools/test_release_tools.py
 ```
 
----
+The [browser smoke runner](tools/companion/README.md) uses isolated storage and mock inference. The [support matrix](docs/SUPPORT_MATRIX.md) and [coverage inventory](docs/release/coverage-inventory.md) track platform and feature verification. For installation and recovery issues, start with [troubleshooting](docs/TROUBLESHOOTING.md).
 
-## 📄 License
-
-MIT License. See [LICENSE](LICENSE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for details.
+[Changelog](CHANGELOG.md) · [Contributing](CONTRIBUTING.md) · [Privacy](docs/PRIVACY.md) · [License](LICENSE)

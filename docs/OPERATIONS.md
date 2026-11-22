@@ -1,4 +1,4 @@
-# DT Operator & Support Guide (v1.0.4)
+# DT Operator & Support Guide
 
 This guide covers installation, permissions, local component downloads, spending controls, backup/restore, device revocation, update recovery, and security reporting for **DT** (`galaxycoils/DT`).
 
@@ -8,19 +8,11 @@ This guide covers installation, permissions, local component downloads, spending
 - **Private Security Vulnerability Reporting**: <https://github.com/galaxycoils/DT/security/advisories/new>
 - **Diagnostic Bundle Preview & Export**: Run `dt diagnostics export --output dt-support.json` only after reviewing the scrubbed JSON bundle locally. Support exports are generated from an allowlist and verified byte-for-byte against registered secrets and identifying home/storage paths.
 
-## 2. Clean Installation & Upgrades (Including v1.0.0 -> v1.0.1)
+## 2. Installation and upgrades
 
-### Desktop Targets
-- **macOS (Apple Silicon & Intel)**: Open `DT-1.0.1-macos-aarch64.dmg` or `DT-1.0.1-macos-x86_64.dmg` and run `Install DT.pkg` (installs `DT.app` and `DTCUHelper.app`).
-- **Windows 11 (x64 & ARM64)**: Run `DT-1.0.1-windows-x86_64-setup.exe` or `DT-1.0.1-windows-aarch64-setup.exe`. User data under `%APPDATA%\DT` / `%APPDATA%\GrokMuse` is preserved across upgrades and uninstalls.
-- **Ubuntu 24.04 (amd64 & arm64)**: Install `dt_1.0.1_amd64.deb` or `dt_1.0.1_arm64.deb` via App Center or `sudo apt install ./dt_1.0.1_<arch>.deb`.
+Use the [release download table](../README.md#downloads) to find the package and checksum for your system. Follow the [local setup instructions](../README.md#run-dt-locally) for platform permissions and web bundle placement.
 
-### Upgrading from v1.0.0
-The public `v1.0.0` release lacked a detached `dt-release.sig` asset and predates Windows ARM64 and Linux ARM64 manifest entries. When upgrading an existing `v1.0.0` installation:
-1. Quit the UI and stop background services (`dt service uninstall` or stop LaunchAgent/systemd/Task Scheduler).
-2. Run `dt doctor check --json` and ensure no active writers hold `.dt-storage.lease`.
-3. Download and verify the signed graphical installer for your OS/architecture (`Install DT.pkg`, NSIS `.exe`, or `.deb`) and verify its SHA-256 against `<asset>.sha256` and `<asset>.sig` using the pinned publisher key.
-4. Install the new package and run `dt doctor repair --json`.
+For manual upgrades, quit the UI and stop the background service or foreground server before installing. Run `dt doctor check --json` after installation, then start the service again. Use a web bundle that matches the installed daemon.
 
 ## 3. Permissions & Recovery (`dt-doctor` / `dt doctor`)
 

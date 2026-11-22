@@ -17,9 +17,9 @@ rejects combined raw CSS/JS above 64 KiB. HTML remains a separate document.
 Always finish generation before starting Cargo: Rust embeds matching assets at
 compile time. CI regenerates them and rejects an uncommitted difference.
 
-For real-browser verification, build `gm-daemon`, set `CHROME_BIN` to a local
-Chromium/Chrome executable, then run `npm run smoke --prefix tools/companion`.
-The runner creates temporary configuration/storage, uses mock inference, verifies
-bearer auth, DOM interactions, persisted messages/bots/settings, isolated Spaces
-and publish confirmation, and removes its server/storage afterward. Set
+For real-browser verification, build `gm-daemon` and run `npm ci --prefix clients/web`
+and `npm run build --prefix clients/web`. Set `CHROME_BIN` to a local Chromium
+executable and run `npm run smoke --prefix tools/companion`. The runner uses
+temporary storage and mock inference to verify the Companion and React clients,
+including React pairing, event reconnect, and sandboxed Page previews. Set
 `GM_SMOKE_ARTIFACT_DIR` to retain desktop/mobile screenshots.

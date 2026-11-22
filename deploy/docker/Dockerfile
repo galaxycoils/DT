@@ -18,7 +18,6 @@ COPY clients/web/ ./
 RUN npm run typecheck && npm run build
 
 FROM caddy:2.9-alpine@sha256:b4e3952384eb9524a887633ce65c752dd7c71314d2c2acf98cd5c715aaa534f0 AS tls-proxy
-COPY --from=web-builder /web/dist /srv/dt-web
 COPY deploy/docker/Caddyfile /etc/caddy/Caddyfile
 
 FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS dt-server

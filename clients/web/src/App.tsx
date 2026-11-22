@@ -6,6 +6,7 @@ import {
   parseMessageCard,
   type ActivityPost,
   type Channel,
+  type ConnectionMode,
   type ConnectorSummary,
   type DirectMessage,
   type GoalItem,
@@ -61,6 +62,19 @@ export type ViewTab =
   | "settings";
 
 export const DRAFT_STORAGE_KEY = "dt-web-drafts-v1-scoped";
+
+const WORKSPACE_REFRESH_EVENTS = [
+  "open",
+  "DIRECT_MESSAGE_ADDED",
+  "CARD_UPDATED",
+  "STATE_INVALIDATED",
+  "TASK_UPDATED",
+  "ROUTINE_UPDATED",
+  "ROUTINE_QUEUED",
+  "BOT_UPDATED",
+  "CHANNEL_UPDATED",
+  "RESYNC_REQUIRED",
+];
 
 const NAV_TABS: Array<{ id: ViewTab; label: string; icon: string }> = [
   { id: "chats", label: "Chats", icon: "💬" },
@@ -185,9 +199,11 @@ export function App({ client }: { client: DtV1Client }) {
   const [commandQuery, setCommandQuery] = useState("");
 
   const [sessionUser, setSessionUser] = useState<string | null>(null);
-  const [sessionChecked, setSessionChecked] = useState(false);
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode | null>(null);
+  const [connectionAttempt, setConnectionAttempt] = useState(0);
+  const sessionChecked = connectionMode !== null;
   const [workspaceId, setWorkspaceId] = useState(client.getWorkspaceId());
-  const [enrollmentInput, setEnrollmentInput] = useState("");
+  const [credentialInput, setCredentialInput] = useState("");
   const [signInBusy, setSignInBusy] = useState(false);
 
   const [bots, setBots] = useState<BotSummary[]>([]);
@@ -223,7 +239,7 @@ export function App({ client }: { client: DtV1Client }) {
 
   const [spaces, setSpaces] = useState<SpaceSummary[]>([]);
   const [splitSpaceSlug, setSplitSpaceSlug] = useState<string | null>(null);
-  const [splitSpaceUrl, setSplitSpaceUrl] = useState<string | null>(null);
+  const [splitSpacePreview, setSplitSpacePreview] = useState<{ url: string } | { error: string } | null>(null);
   const [newSpaceSlug, setNewSpaceSlug] = useState("");
   const [newSpaceTitle, setNewSpaceTitle] = useState("");
 
@@ -249,7 +265,7 @@ export function App({ client }: { client: DtV1Client }) {
 
   const resizingRef = useRef(false);
   const sessionEpochRef = useRef(0);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const eventStreamRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
@@ -270,7 +286,7 @@ export function App({ client }: { client: DtV1Client }) {
         else if (mobileMenuOpen) setMobileMenuOpen(false);
         else if (splitSpaceSlug) {
           setSplitSpaceSlug(null);
-          setSplitSpaceUrl(null);
+          setSplitSpacePreview(null);
         }
       }
     }
@@ -302,8 +318,8 @@ export function App({ client }: { client: DtV1Client }) {
 
   const clearWorkspaceState = useCallback(() => {
     sessionEpochRef.current += 1;
-    eventSourceRef.current?.close();
-    eventSourceRef.current = null;
+    eventStreamRef.current?.abort();
+    eventStreamRef.current = null;
     client.abortAllRequests();
     setBots([]);
     setChannels([]);
@@ -318,7 +334,7 @@ export function App({ client }: { client: DtV1Client }) {
     setRoutineTriggerResult({});
     setSpaces([]);
     setSplitSpaceSlug(null);
-    setSplitSpaceUrl(null);
+    setSplitSpacePreview(null);
     setFiles([]);
     setFilePreview(null);
     setProviders([]);
@@ -374,22 +390,25 @@ export function App({ client }: { client: DtV1Client }) {
     }
     const controller = new AbortController();
     void client
-      .restoreSession(controller.signal)
-      .then((session) => {
+      .connectionMode(controller.signal)
+      .then(async (mode) => {
+        const session = mode === "hosted"
+          ? await client.restoreSession(controller.signal).catch(() => null)
+          : null;
         if (controller.signal.aborted) return;
-        setWorkspaceId(session.ws_id);
-        setSessionUser(session.user_id);
-      })
-      .catch(() => {
-        if (!controller.signal.aborted) {
-          setSessionUser(null);
+        if (session) {
+          setWorkspaceId(session.ws_id);
+          setSessionUser(session.user_id);
         }
+        setConnectionMode(mode);
       })
-      .finally(() => {
-        if (!controller.signal.aborted) setSessionChecked(true);
+      .catch((err) => {
+        if (!controller.signal.aborted) {
+          setStatusError(err instanceof Error ? err.message : "Could not reach DT");
+        }
       });
     return () => controller.abort();
-  }, [client]);
+  }, [client, connectionAttempt]);
 
   function updateDraft(value: string, raw = false) {
     const transformed = raw ? value : applySmartArrowEdit(draft, value);
@@ -459,6 +478,24 @@ export function App({ client }: { client: DtV1Client }) {
 
   useEffect(() => {
     if (!sessionChecked || !sessionUser) return;
+    const controller = new AbortController();
+    eventStreamRef.current = controller;
+    const refresh = () => setRefreshVersion((version) => version + 1);
+    if (connectionMode === "local") {
+      void client.subscribeLocalEvents(
+        controller.signal,
+        (name) => {
+          if (WORKSPACE_REFRESH_EVENTS.includes(name)) refresh();
+        },
+        () => {
+          void client.signOut();
+          clearWorkspaceState();
+          setSessionUser(null);
+          setStatusError("The Companion token was rejected. Connect again with the current token.");
+        },
+      );
+      return () => controller.abort();
+    }
     const seenSequences = new Set<string>();
     const invalidated = (ev?: Event) => {
       const msg = ev as MessageEvent | undefined;
@@ -466,29 +503,41 @@ export function App({ client }: { client: DtV1Client }) {
         if (seenSequences.has(msg.lastEventId)) return;
         seenSequences.add(msg.lastEventId);
       }
-      setRefreshVersion((version) => version + 1);
+      refresh();
     };
     const events = new EventSource(client.eventsUrl(), { withCredentials: true });
-    eventSourceRef.current = events;
-    for (const name of [
-      "DIRECT_MESSAGE_ADDED",
-      "CARD_UPDATED",
-      "STATE_INVALIDATED",
-      "TASK_UPDATED",
-      "ROUTINE_UPDATED",
-      "ROUTINE_QUEUED",
-      "BOT_UPDATED",
-      "CHANNEL_UPDATED",
-      "RESYNC_REQUIRED",
-    ]) {
+    for (const name of WORKSPACE_REFRESH_EVENTS) {
       events.addEventListener(name, invalidated);
     }
-    events.addEventListener("open", () => invalidated());
-    return () => {
-      events.close();
-      if (eventSourceRef.current === events) eventSourceRef.current = null;
-    };
-  }, [client, sessionChecked, sessionUser, workspaceId]);
+    controller.signal.addEventListener("abort", () => events.close(), { once: true });
+    return () => controller.abort();
+  }, [clearWorkspaceState, client, connectionMode, sessionChecked, sessionUser, workspaceId]);
+
+  useEffect(() => {
+    if (!splitSpaceSlug) return;
+    if (connectionMode !== "local") {
+      setSplitSpacePreview({ error: "Open DT on the computer running it to preview this Page." });
+      return;
+    }
+    const controller = new AbortController();
+    void client.getSpaceUrl(splitSpaceSlug, controller.signal)
+      .then(({ url, preview_parent_origin: origin }) => {
+        if (controller.signal.aborted) return;
+        if (!origin) {
+          setSplitSpacePreview({ error: "Update the DT daemon to v1.0.5 or later to preview Pages." });
+        } else if (origin !== window.location.origin) {
+          setSplitSpacePreview({ error: `Open DT at ${origin}/app/ to preview this Page.` });
+        } else {
+          setSplitSpacePreview({ url });
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setSplitSpacePreview({ error: "Could not load this Page preview. Close it and try again." });
+        }
+      });
+    return () => controller.abort();
+  }, [client, connectionMode, splitSpaceSlug]);
 
   useEffect(() => {
     if (!sessionChecked || !sessionUser) return;
@@ -684,14 +733,10 @@ export function App({ client }: { client: DtV1Client }) {
     }
   }
 
-  async function handleOpenSplitSpace(slug: string) {
+  function handleOpenSplitSpace(slug: string) {
+    if (slug === splitSpaceSlug) return;
+    setSplitSpacePreview(null);
     setSplitSpaceSlug(slug);
-    try {
-      const res = await client.getSpaceUrl(slug);
-      setSplitSpaceUrl(res.url);
-    } catch {
-      setSplitSpaceUrl(`/spaces/v2/${encodeURIComponent(slug)}/`);
-    }
   }
 
   async function handleCreateSpace(e: React.FormEvent) {
@@ -706,7 +751,7 @@ export function App({ client }: { client: DtV1Client }) {
       const sp = await client.listSpaces().catch(() => []);
       if (Array.isArray(sp)) setSpaces(sp);
       setRefreshVersion((v) => v + 1);
-      await handleOpenSplitSpace(slug);
+      handleOpenSplitSpace(slug);
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : "Failed to create Page");
     }
@@ -723,21 +768,27 @@ export function App({ client }: { client: DtV1Client }) {
     }
   }
 
-  async function handleEnrollSignIn(e: React.FormEvent) {
+  async function handleSignIn(e: React.FormEvent) {
     e.preventDefault();
-    if (!enrollmentInput.trim() || signInBusy) return;
+    const token = credentialInput.trim();
+    if (!connectionMode || !token || signInBusy) return;
     setStatusError(null);
     setSignInBusy(true);
+    setCredentialInput("");
     try {
-      const sess = await client.redeemEnrollment(enrollmentInput.trim());
-      setEnrollmentInput("");
-      setWorkspaceId(sess.ws_id);
-      setSessionUser(sess.user_id);
+      const session = connectionMode === "local"
+        ? { ws_id: await client.connectLocal(token), user_id: "local" }
+        : await client.redeemEnrollment(token);
+      if (sessionUser && (session.ws_id !== workspaceId || session.user_id !== sessionUser)) {
+        clearWorkspaceState();
+      }
+      setWorkspaceId(session.ws_id);
+      setSessionUser(session.user_id);
       setView("chats");
       setRefreshVersion((v) => v + 1);
-      setStatusNotice(`Connected to workspace ${sess.ws_id} via HttpOnly session.`);
+      setStatusNotice(`Connected to workspace ${session.ws_id}.`);
     } catch (err) {
-      setStatusError(err instanceof Error ? err.message : "Enrollment token rejected");
+      setStatusError(err instanceof Error ? err.message : "Connection failed");
     } finally {
       setSignInBusy(false);
     }
@@ -819,12 +870,16 @@ export function App({ client }: { client: DtV1Client }) {
   }, [doctor]);
 
   async function handleSignOut() {
+    setSignInBusy(true);
+    setCredentialInput("");
     clearWorkspaceState();
     setSessionUser(null);
     try {
       await client.signOut();
     } catch {
-      // Session cookie is cleared locally even if network fails.
+      setStatusError("DT could not confirm hosted sign-out.");
+    } finally {
+      setSignInBusy(false);
     }
   }
 
@@ -845,13 +900,29 @@ export function App({ client }: { client: DtV1Client }) {
       <div className="dt-signin-shell">
         <div className="dt-signin-card">
           <strong>DT</strong>
-          <p className="dt-muted">Checking workspace session…</p>
+          {statusError ? (
+            <>
+              <p role="alert">{statusError}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setStatusError(null);
+                  setConnectionAttempt((attempt) => attempt + 1);
+                }}
+              >
+                Retry connection
+              </button>
+            </>
+          ) : (
+            <p className="dt-muted">Checking workspace session…</p>
+          )}
         </div>
       </div>
     );
   }
 
   if (!sessionUser) {
+    const credentialLabel = connectionMode === "local" ? "Companion token" : "Operator enrollment token";
     return (
       <div className="dt-signin-shell">
         <div className="dt-signin-card">
@@ -862,26 +933,28 @@ export function App({ client }: { client: DtV1Client }) {
             </button>
           </div>
           <p className="dt-muted" style={{ margin: 0 }}>
-            Enter your operator enrollment token to start a secure, workspace-scoped session.
+            {connectionMode === "local"
+              ? "Enter the Companion token from your DT storage directory."
+              : "Enter your operator enrollment token to connect to your workspace."}
           </p>
           {statusError ? (
             <div role="alert" className="dt-card dt-alert-error" style={{ marginBottom: 0 }}>
               {statusError}
             </div>
           ) : null}
-          <form onSubmit={(e) => void handleEnrollSignIn(e)} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <form onSubmit={(e) => void handleSignIn(e)} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <input
-              value={enrollmentInput}
-              onChange={(e) => setEnrollmentInput(e.target.value)}
+              value={credentialInput}
+              onChange={(e) => setCredentialInput(e.target.value)}
               type="password"
               autoComplete="off"
-              aria-label="Operator enrollment token"
-              placeholder="Paste operator enrollment token…"
+              aria-label={credentialLabel}
+              placeholder={`Paste ${credentialLabel.toLowerCase()}…`}
             />
             <button
               type="submit"
               className="dt-btn-primary"
-              disabled={signInBusy || !enrollmentInput.trim()}
+              disabled={signInBusy || !credentialInput.trim()}
             >
               {signInBusy ? "Connecting…" : "Connect Workspace"}
             </button>
@@ -1266,6 +1339,7 @@ export function App({ client }: { client: DtV1Client }) {
               <button
                 type="button"
                 onClick={() => void handleSignOut()}
+                disabled={signInBusy}
                 style={{
                   padding: "5px 11px",
                   borderRadius: 999,
@@ -1800,7 +1874,7 @@ export function App({ client }: { client: DtV1Client }) {
                           <div className="dt-row">
                             <button
                               type="button"
-                              onClick={() => void handleOpenSplitSpace(s.slug)}
+                              onClick={() => handleOpenSplitSpace(s.slug)}
                             >
                               Open Split View
                             </button>
@@ -2021,7 +2095,7 @@ export function App({ client }: { client: DtV1Client }) {
                 </section>
               ) : view === "settings" ? (
                 <section style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-                  <h2 style={{ margin: 0, fontSize: 20 }}>Settings & Hosted Session</h2>
+                  <h2 style={{ margin: 0, fontSize: 20 }}>Settings & Session</h2>
                   <div className="dt-card" style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 0 }}>
                     <p className="dt-muted" style={{ margin: 0 }}>
                       Signed in as <strong>{sessionUser}</strong> in workspace <strong>{workspaceId}</strong>.
@@ -2030,28 +2104,30 @@ export function App({ client }: { client: DtV1Client }) {
                       <button type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")}>
                         Switch to {theme === "dark" ? "Light" : "Dark"} Theme
                       </button>
-                      <button type="button" className="dt-btn-danger" onClick={() => void handleSignOut()}>
+                      <button type="button" className="dt-btn-danger" disabled={signInBusy} onClick={() => void handleSignOut()}>
                         Sign out
                       </button>
                     </div>
-                    <form onSubmit={(e) => void handleEnrollSignIn(e)} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <input
-                        value={enrollmentInput}
-                        onChange={(e) => setEnrollmentInput(e.target.value)}
-                        type="password"
-                        autoComplete="off"
-                        aria-label="Switch workspace enrollment token"
-                        placeholder="Operator enrollment token (redeemed for HttpOnly; Secure cookie + CSRF)"
-                        style={{ flex: "1 1 260px" }}
-                      />
-                      <button
-                        type="submit"
-                        className="dt-btn-primary"
-                        disabled={signInBusy || !enrollmentInput.trim()}
-                      >
-                        {signInBusy ? "Connecting…" : "Connect Workspace"}
-                      </button>
-                    </form>
+                    {connectionMode === "hosted" && (
+                      <form onSubmit={(e) => void handleSignIn(e)} style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <input
+                          value={credentialInput}
+                          onChange={(e) => setCredentialInput(e.target.value)}
+                          type="password"
+                          autoComplete="off"
+                          aria-label="Switch workspace enrollment token"
+                          placeholder="Operator enrollment token"
+                          style={{ flex: "1 1 260px" }}
+                        />
+                        <button
+                          type="submit"
+                          className="dt-btn-primary"
+                          disabled={signInBusy || !credentialInput.trim()}
+                        >
+                          {signInBusy ? "Connecting…" : "Connect Workspace"}
+                        </button>
+                      </form>
+                    )}
                   </div>
                 </section>
               ) : (
@@ -2394,21 +2470,23 @@ export function App({ client }: { client: DtV1Client }) {
                 type="button"
                 onClick={() => {
                   setSplitSpaceSlug(null);
-                  setSplitSpaceUrl(null);
+                  setSplitSpacePreview(null);
                 }}
               >
                 Close
               </button>
             </header>
-            {splitSpaceUrl ? (
+            {splitSpacePreview && "url" in splitSpacePreview ? (
               <iframe
                 title={`Isolated Space ${splitSpaceSlug}`}
-                src={splitSpaceUrl}
+                src={splitSpacePreview.url}
                 sandbox="allow-scripts"
                 style={{ flex: 1, width: "100%", border: 0, background: "#fff" }}
               />
             ) : (
-              <div style={{ padding: 20, color: "var(--muted-foreground)" }}>Loading isolated Page…</div>
+              <div style={{ padding: 20, color: "var(--muted-foreground)" }}>
+                {splitSpacePreview ? <p role="alert">{splitSpacePreview.error}</p> : "Loading isolated Page…"}
+              </div>
             )}
           </section>
         )}

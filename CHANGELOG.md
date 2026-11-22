@@ -2,6 +2,13 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
+## [v1.0.5] — Local Web Pairing and Live Reconnect (2026-11-22)
+
+- Added memory-only Companion token pairing to the React client on loopback.
+- Preserved the last durable event ID when reconnecting after transient chat deltas.
+- Restored sandboxed Page previews at the canonical daemon origin and surfaced clear errors for incompatible origins and older daemons.
+- Routed Caddy's HTTPS root to the daemon-served React app and refreshed installation, upgrade, and release download instructions.
+
 ## [v1.0.4] — Full Unification, Same-Origin `/app` Web Hosting, PostgreSQL CI Verification & Security Hardening (2026-11-22)
 
 - **Unified `master` (`v1.0.2` Backend + `v1.0.3` UX)**: Merged `codex/dt-stable-release` (`v1.0.2`) into `master` as a 2-parent merge commit with zero backend regressions (line-by-line preservation guard verified): brought pinned 15-entry `component-catalog.json` (valid through `2027-11-19`), active PostgreSQL hosted control plane (`PostgresHostedStore` / `HostedPlaneBackend`), consent-gated `VoiceSessionManager`, redesigned native desktop UI, and `tools/renew-update-metadata.py` + `docs/OPERATIONS.md` onto `master` alongside `v1.0.3`'s interactive UX and CLI parity.

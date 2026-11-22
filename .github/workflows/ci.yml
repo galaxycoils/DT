@@ -130,7 +130,7 @@ jobs:
         working-directory: grok-muse
         run: tools/test-native-x11.sh
 
-      - name: Verify companion in a real browser with isolated daemon storage
+      - name: Verify Companion and React in a real browser with isolated daemon storage
         if: matrix.os == 'ubuntu-24.04'
         working-directory: grok-muse
         env:

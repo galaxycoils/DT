@@ -574,6 +574,8 @@ async fn api_v1_auth_and_csrf_middleware(
 
 pub fn build_companion_router(state: CompanionWebState) -> Router {
     let spaces_port_atomic = state.supervisor.spaces_port_atomic();
+    let local_space_previews =
+        state.hosted_plane.is_none() && state.supervisor.config().muse.enable_spaces;
     let sync_supervisor = state.supervisor.clone();
     Router::new()
         .route("/", get(serve_index))
@@ -808,6 +810,19 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
                         sync_supervisor.emit_agui("STATE_INVALIDATED", "ui", "", serde_json::json!({"path":req_path}));
                     }
                     if is_app_route {
+                        if local_space_previews
+                            && response.status() == StatusCode::OK
+                            && response.headers().get(header::CONTENT_TYPE)
+                                == Some(&HeaderValue::from_static("text/html; charset=utf-8"))
+                        {
+                            let port = sp_atomic.load(Ordering::SeqCst);
+                            if port != 0 {
+                                let csp = format!("{WEB_APP_CSP}; frame-src http://127.0.0.1:{port}");
+                                if let Ok(value) = HeaderValue::from_str(&csp) {
+                                    response.headers_mut().insert(header::CONTENT_SECURITY_POLICY, value);
+                                }
+                            }
+                        }
                         return response;
                     }
                     let csp = if is_html_route {
@@ -993,7 +1008,7 @@ async fn serve_script() -> impl IntoResponse {
 }
 
 const WEB_APP_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
-const WEB_APP_NOT_INSTALLED_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>DT Web App Not Installed</title></head><body><h1>Web app not installed.</h1><p>Build with <code>npm run build --prefix clients/web</code> or set <code>DT_WEB_DIST</code>.</p></body></html>";
+const WEB_APP_NOT_INSTALLED_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>DT Web App Not Installed</title></head><body><h1>Web app not installed.</h1><p>Extract the DT web client bundle or build <code>clients/web</code>, then point <code>DT_WEB_DIST</code> at its <code>dist</code> directory.</p></body></html>";
 
 fn with_web_app_security_headers(resp: impl IntoResponse) -> axum::response::Response {
     let mut response = resp.into_response();
@@ -2168,10 +2183,15 @@ async fn get_space_url_route(
         .spaces()
         .mint_url_for_slug(&slug, sp_port)
         .map_err(map_gm_error)?;
+    let preview_parent_origin = state
+        .hosted_plane
+        .is_none()
+        .then(|| format!("http://127.0.0.1:{}", state.supervisor.companion_port()));
     Ok(Json(serde_json::json!({
         "slug": slug,
         "url": url,
         "spaces_port": sp_port,
+        "preview_parent_origin": preview_parent_origin,
         "expires_in_secs": SPACE_TOKEN_TTL_SECS,
     })))
 }
@@ -7514,6 +7534,7 @@ mod tests {
         };
         let (tx, _rx) = broadcast::channel(32);
         let sup = OpenBotSupervisor::open(cfg, Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        sup.set_spaces_port(17434);
         let bridge = BridgeRouter::new(sup.clone(), Default::default());
         let srv = CompanionWebServer::new(sup, bridge, Some("op-secret".into()), None)
             .with_web_dist(if with_dist { Some(dist_dir) } else { None });
@@ -7541,6 +7562,8 @@ mod tests {
         let csp = header_str(&resp, "content-security-policy");
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("font-src 'self' data:"));
+        assert!(csp.contains("frame-src http://127.0.0.1:17434"));
+        assert!(csp.contains("frame-ancestors 'none'"));
         assert_eq!(header_str(&resp, "x-frame-options"), "DENY");
         let body = resp.text().await.unwrap();
         assert!(body.contains("DT_APP_MARKER"));

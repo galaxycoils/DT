@@ -1,22 +1,16 @@
 {$DT_DOMAIN:localhost} {
-  encode gzip
-  header {
-    Strict-Transport-Security "max-age=31536000; includeSubDomains"
-    X-Content-Type-Options "nosniff"
-    Referrer-Policy "no-referrer"
-  }
-  handle /api/v1/* {
-    reverse_proxy 127.0.0.1:7433
-  }
-  handle /app {
-    reverse_proxy 127.0.0.1:7433
-  }
-  handle /app/* {
-    reverse_proxy 127.0.0.1:7433
-  }
-  handle {
-    root * /srv/dt-web
-    try_files {path} /index.html
-    file_server
-  }
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		>X-Content-Type-Options "nosniff"
+		>Referrer-Policy "no-referrer"
+	}
+	@dt path /app /app/* /api/v1/*
+	handle @dt {
+		reverse_proxy 127.0.0.1:7433
+	}
+	redir / /app/ 308
+	handle {
+		respond 404
+	}
 }
