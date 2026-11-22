@@ -1,53 +1,118 @@
 name: Attach Release Binaries
 
 on:
-  push:
-    branches:
-      - "release-assets-*"
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to attach binaries to"
-        required: false
-        default: "v1.0.3"
+        description: "Release tag to attach binaries to (e.g. v1.0.4)"
+        required: true
+        type: string
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   upload:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout prebuilt release binaries
+      - name: Checkout DT tag
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: release-assets-v1.0.3
-          path: staged-assets
+          ref: ${{ inputs.tag }}
+          path: grok-muse
 
-      - name: Gather cross-platform installers and upload to GitHub Release v1.0.3
+      - name: Checkout Darius
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: galaxycoils/darius
+          ref: f47a4ce980abecb751c9f5c79e1c424a20100433
+          path: Darius
+
+      - name: Install Node for React web client tarball
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Gather tag artifacts, build tarballs, verify SHA-256, and upload to GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ inputs.tag || 'v1.0.3' }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p upload-dir
-          cp -v staged-assets/dist/* upload-dir/
-          mkdir -p prev-assets
-          if gh release download v1.0.2 --repo "$GITHUB_REPOSITORY" --dir prev-assets; then
-            for f in prev-assets/*; do
-              base="$(basename "$f")"
-              if [[ "$base" == *"_amd64.deb"* ]]; then
-                continue
-              fi
-              cp -n "$f" "upload-dir/$base" || true
-              new_name="${base//1.0.2/1.0.3}"
-              if [[ "$new_name" != "$base" && ! -f "upload-dir/$new_name" ]]; then
-                cp "$f" "upload-dir/$new_name"
-                if [[ "$new_name" == *.sha256 ]]; then
-                  sed -i 's/1\.0\.2/1.0.3/g' "upload-dir/$new_name"
-                fi
-              fi
-            done
+          VERSION="${TAG#v}"
+          CARGO_VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("grok-muse/Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          if [[ "$VERSION" != "$CARGO_VERSION" ]]; then
+            echo "Tag version ($VERSION) does not match Cargo.toml ($CARGO_VERSION)" >&2
+            exit 1
           fi
+
+          mkdir -p downloaded upload-dir
+
+          # 1. Prefer completed signed release.yml artifacts for this tag; otherwise use CI tag artifacts
+          REL_RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" -w release.yml --branch "$TAG" --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
+          if [[ -n "$REL_RUN_ID" ]]; then
+            echo "Downloading artifacts from release.yml run $REL_RUN_ID..."
+            gh run download "$REL_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir downloaded
+          else
+            CI_RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" -w ci.yml --branch "$TAG" --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
+            if [[ -n "$CI_RUN_ID" ]]; then
+              echo "Downloading installer artifacts from ci.yml run $CI_RUN_ID..."
+              for art in installer-ubuntu-24.04 installer-ubuntu-24.04-arm installer-windows installer-macos; do
+                gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$art" --dir "downloaded/$art" || true
+              done
+            fi
+          fi
+
+          find downloaded -type f -exec cp -v {} upload-dir/ \;
+
+          # 2. Build React web client bundle tarball + SHA-256
+          npm ci --prefix grok-muse/clients/web
+          npm run typecheck --prefix grok-muse/clients/web
+          npm run build --prefix grok-muse/clients/web
+          WEB_TAR="DT-${VERSION}-web-client.tar.gz"
+          tar -czf "upload-dir/${WEB_TAR}" -C grok-muse/clients/web dist
+          (cd upload-dir && sha256sum "${WEB_TAR}" > "${WEB_TAR}.sha256")
+
+          # 3. Package Linux x86_64 binaries tarball + SHA-256 (from CI-built amd64 .deb, or fallback compile)
+          AMD64_DEB="upload-dir/dt_${VERSION}_amd64.deb"
+          if [[ ! -f "$AMD64_DEB" ]]; then
+            echo "No CI amd64 .deb found; building locally..."
+            sudo DEBIAN_FRONTEND=noninteractive apt-get update
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+              pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev \
+              libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+              libpipewire-0.3-dev libspa-0.2-dev clang
+            rustup toolchain install 1.99.1
+            rustup default 1.99.1
+            cargo build --manifest-path grok-muse/Cargo.toml --release --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+            DT_SKIP_WEB_BUILD=1 bash grok-muse/tools/installers/linux/build-deb.sh "$VERSION" grok-muse/target/release "$AMD64_DEB" amd64
+            (cd upload-dir && sha256sum "$(basename "$AMD64_DEB")" > "$(basename "$AMD64_DEB").sha256")
+          fi
+
+          BIN_STAGE="bin-stage/DT-${VERSION}-linux-x86_64"
+          mkdir -p "${BIN_STAGE}/bin" "${BIN_STAGE}/share/dt"
+          dpkg-deb -x "$AMD64_DEB" deb-extract
+          cp -a deb-extract/usr/bin/. "${BIN_STAGE}/bin/"
+          if [[ -d deb-extract/usr/share/dt/web ]]; then
+            cp -a deb-extract/usr/share/dt/web "${BIN_STAGE}/share/dt/"
+          fi
+          BIN_TAR="DT-${VERSION}-linux-x86_64-binaries.tar.gz"
+          tar -czf "upload-dir/${BIN_TAR}" -C bin-stage "DT-${VERSION}-linux-x86_64"
+          (cd upload-dir && sha256sum "${BIN_TAR}" > "${BIN_TAR}.sha256")
+
+          # 4. Verify every SHA-256 sidecar before uploading
+          (cd upload-dir && for s in *.sha256; do sha256sum -c "$s"; done)
           ls -lh upload-dir/
+
+          # 5. Ensure release exists and upload all assets
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            NOTES_FILE="grok-muse/docs/releases/${TAG}.md"
+            if [[ -f "$NOTES_FILE" ]]; then
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "DT ${TAG}" --notes-file "$NOTES_FILE" --latest
+            else
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "DT ${TAG}" --generate-notes --latest
+            fi
+          fi
           gh release upload "$TAG" upload-dir/* --repo "$GITHUB_REPOSITORY" --clobber
