@@ -1323,10 +1323,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn run_dev() -> Result<(), Box<dyn std::error::Error>> {
-    let status = Command::new("cargo")
+    let dt_build_status = Command::new("cargo")
         .args(["build", "-p", "gm-daemon", "--bin", "dt"])
         .status()?;
-    if !status.success() {
+    if !dt_build_status.success() {
         return Err("Failed to build dt binary".into());
     }
     if !Path::new("clients/web/node_modules").exists() {

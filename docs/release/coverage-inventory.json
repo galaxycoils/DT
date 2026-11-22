@@ -337,6 +337,18 @@
       "required_evidence": ["web-app-hosting-tests"],
       "test_ids": ["test_web_app_serves_index", "test_web_app_blocks_traversal"],
       "required": true
+    },
+    {
+      "id": "HOST-PG-01",
+      "category": "hosted",
+      "name": "Real PostgreSQL hosted control plane migrations (V1-V4), row-level tenant isolation, AES-256-GCM secret vault, and verified SQLite-to-PostgreSQL migration",
+      "surfaces": ["hosted", "postgres", "ci"],
+      "dependencies": ["sqlx", "postgresql-16"],
+      "expected_outcome": "PostgreSQL hosted store applies V1-V4 migrations under advisory lock, enforces tenant isolation and session revocation, authenticates encrypted secrets, and migrates SQLite stores idempotently with SHA-256 backup verification.",
+      "observable_assertion": "All 7 postgres_hosted integration tests execute against a live PostgreSQL instance and report POSTGRES_TEST_RAN.",
+      "required_evidence": ["postgres-integration-ci-log"],
+      "test_ids": ["pg_tenant_isolation", "pg_sqlite_migration_with_verified_backup"],
+      "required": true
     }
   ]
 }

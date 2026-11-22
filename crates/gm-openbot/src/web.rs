@@ -7526,24 +7526,25 @@ mod tests {
         (dir, format!("http://{addr}"), handle)
     }
 
+    fn header_str<'a>(
+        resp: &'a reqwest::Response,
+        name: impl reqwest::header::AsHeaderName,
+    ) -> &'a str {
+        match resp.headers().get(name) {
+            Some(val) => val.to_str().unwrap_or_default(),
+            None => "",
+        }
+    }
+
     #[tokio::test]
     async fn test_web_app_serves_index() {
         let (_dir, base, handle) = spawn_web_app_test_server(true).await;
         let resp = reqwest::get(format!("{base}/app/")).await.unwrap();
         assert_eq!(resp.status(), 200);
-        let csp = resp
-            .headers()
-            .get("content-security-policy")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let csp = header_str(&resp, "content-security-policy");
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("font-src 'self' data:"));
-        assert_eq!(
-            resp.headers()
-                .get("x-frame-options")
-                .and_then(|v| v.to_str().ok()),
-            Some("DENY")
-        );
+        assert_eq!(header_str(&resp, "x-frame-options"), "DENY");
         let body = resp.text().await.unwrap();
         assert!(body.contains("DT_APP_MARKER"));
         handle.abort();
@@ -7558,12 +7559,7 @@ mod tests {
             .unwrap();
         let resp = client.get(format!("{base}/app")).send().await.unwrap();
         assert_eq!(resp.status(), 308);
-        assert_eq!(
-            resp.headers()
-                .get(header::LOCATION)
-                .and_then(|v| v.to_str().ok()),
-            Some("/app/")
-        );
+        assert_eq!(header_str(&resp, header::LOCATION), "/app/");
         handle.abort();
     }
 
@@ -7574,17 +7570,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 200);
-        let ct = resp
-            .headers()
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let ct = header_str(&resp, header::CONTENT_TYPE);
         assert!(ct.starts_with("text/javascript"), "content-type={ct}");
-        let cc = resp
-            .headers()
-            .get(header::CACHE_CONTROL)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+        let cc = header_str(&resp, header::CACHE_CONTROL);
         assert!(cc.contains("immutable"), "cache-control={cc}");
         let body = resp.text().await.unwrap();
         assert!(body.contains("DT_ASSET_MARKER"));

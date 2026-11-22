@@ -25,6 +25,8 @@ pub const MAX_REPAIR_ATTEMPTS: u32 = 2;
 pub enum DoctorCheckOutcome {
     Pass,
     Repaired,
+    Info,
+    Warn,
     ActionRequired,
     RestartRequired,
     Failed,
@@ -139,6 +141,8 @@ impl DoctorReport {
                     summary: match c.outcome {
                         DoctorCheckOutcome::Pass => "Passed",
                         DoctorCheckOutcome::Repaired => "Repaired",
+                        DoctorCheckOutcome::Info => "Info",
+                        DoctorCheckOutcome::Warn => "Warning",
                         DoctorCheckOutcome::ActionRequired => "Local action required",
                         DoctorCheckOutcome::RestartRequired => "Restart required",
                         DoctorCheckOutcome::Failed => "Failed",
@@ -979,6 +983,139 @@ async fn run_doctor_inner(
         next_action: voice_next,
     });
 
+    // First-run informational hints (never Failed or ActionRequired)
+    let mut push_hint_check = |id: &str,
+                               category: &str,
+                               is_ok: bool,
+                               hint_outcome: DoctorCheckOutcome,
+                               summary: String,
+                               next_action: Option<String>| {
+        let outcome = match is_ok {
+            true => DoctorCheckOutcome::Pass,
+            false => hint_outcome,
+        };
+        checks.push(DoctorCheckEntry {
+            id: id.into(),
+            category: category.into(),
+            outcome,
+            attempts: 1_u32,
+            summary,
+            next_action,
+            repair_action: Option::<FixedRepairAction>::None,
+        });
+    };
+
+    let web_dist_opt = crate::resolve_web_dist(config);
+    push_hint_check(
+        "web_app_present",
+        "web",
+        web_dist_opt.is_some(),
+        DoctorCheckOutcome::Info,
+        if web_dist_opt.is_some() {
+            "React web app bundle available for `dt serve` at `/app/`".into()
+        } else {
+            "React web app not installed. Run `npm run build --prefix clients/web` or set `DT_WEB_DIST`.".into()
+        },
+        web_dist_opt.is_none().then(|| {
+            "React web app not installed. Run `npm run build --prefix clients/web` or set `DT_WEB_DIST`.".into()
+        }),
+    );
+
+    let missing_components: Vec<String> = component_mgr
+        .as_ref()
+        .map(|m| {
+            m.list_statuses()
+                .into_iter()
+                .filter(|c| {
+                    !matches!(
+                        c.status,
+                        crate::components::ComponentInstallState::Installed
+                            | crate::components::ComponentInstallState::Verified
+                    )
+                })
+                .map(|c| {
+                    let mb = (c.total_size_bytes / (1024 * 1024)).max(1);
+                    format!("{} ({mb} MB)", c.id)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let first_missing_id = component_mgr.as_ref().and_then(|m| {
+        m.list_statuses()
+            .into_iter()
+            .find(|c| {
+                !matches!(
+                    c.status,
+                    crate::components::ComponentInstallState::Installed
+                        | crate::components::ComponentInstallState::Verified
+                )
+            })
+            .map(|c| {
+                let mb = (c.total_size_bytes / (1024 * 1024)).max(1);
+                (c.id, mb)
+            })
+    });
+    push_hint_check(
+        "optional_components",
+        "components",
+        first_missing_id.is_none(),
+        DoctorCheckOutcome::Info,
+        if missing_components.is_empty() {
+            "All target optional local components are installed".into()
+        } else {
+            format!(
+                "Optional local components available on demand: {}",
+                missing_components.join(", ")
+            )
+        },
+        first_missing_id.map(|(id, mb)| {
+            format!(
+                "Optional: `dt models pull {id}` or install `{id}` in Settings -> Local Components (size: {mb} MB)."
+            )
+        }),
+    );
+
+    let hosted_enabled = std::env::var("DT_HOSTED_ENABLED")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+    let has_pg_url = std::env::var("DT_DATABASE_URL")
+        .or_else(|_| std::env::var("DATABASE_URL"))
+        .ok()
+        .is_some_and(|u| !u.trim().is_empty());
+    let hosted_uses_sqlite = hosted_enabled && !has_pg_url;
+    push_hint_check(
+        "hosted_database",
+        "hosted",
+        !hosted_uses_sqlite,
+        DoctorCheckOutcome::Warn,
+        if hosted_uses_sqlite {
+            "Hosted mode uses SQLite. Set `DT_DATABASE_URL=postgres://…` for multi-user deployments.".into()
+        } else if has_pg_url {
+            "Hosted control plane configured for PostgreSQL".into()
+        } else {
+            "Local single-user mode (hosted control plane disabled)".into()
+        },
+        hosted_uses_sqlite.then(|| {
+            "Hosted mode uses SQLite. Set `DT_DATABASE_URL=postgres://…` for multi-user deployments.".into()
+        }),
+    );
+
+    let catalog_expiring_soon = crate::components::ComponentCatalog::bundled()
+        .ok()
+        .and_then(|cat| chrono::DateTime::parse_from_rfc3339(&cat.expires_at).ok())
+        .is_some_and(|exp| exp.with_timezone(&Utc) <= Utc::now() + chrono::Duration::days(30));
+    push_hint_check(
+        "metadata_expiry",
+        "updates",
+        !catalog_expiring_soon,
+        DoctorCheckOutcome::Warn,
+        if catalog_expiring_soon {
+            "Signed component catalog metadata expires within 30 days. Update DT to refresh signed metadata.".into()
+        } else {
+            "Signed component catalog metadata expiration is healthy (>30 days remaining)".into()
+        },
+        catalog_expiring_soon.then(|| "Update DT to refresh signed metadata.".into()),
+    );
+
     for check in &checks {
         if let Some(next) = &check.next_action
             && !matches!(
@@ -1196,5 +1333,140 @@ mod tests {
         };
         let json = serde_json::to_string(&report.sanitized_for_remote()).unwrap();
         assert!(!json.contains("/Users/secret"));
+    }
+
+    struct DoctorEnvReset;
+    impl Drop for DoctorEnvReset {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("DT_WEB_DIST");
+                std::env::remove_var("DT_HOSTED_ENABLED");
+                std::env::remove_var("DT_DATABASE_URL");
+                std::env::remove_var("DATABASE_URL");
+                std::env::remove_var("DT_COMPONENT_CATALOG_PATH");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_doctor_hint_web_app_present() {
+        let _guard = crate::tests::ENV_MUTEX.lock().await;
+        let _reset = DoctorEnvReset;
+        let root = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("DT_WEB_DIST", root.path().join("missing-dist"));
+        }
+        let config = GmConfig {
+            storage_dir: root.path().join("storage"),
+            socket_path: root.path().join("helper.sock"),
+            daemon_socket_path: root.path().join("daemon.sock"),
+            ..Default::default()
+        };
+        let dist = root.path().join("present-dist");
+        fs::create_dir_all(&dist).unwrap();
+        fs::write(dist.join("index.html"), "<!doctype html>").unwrap();
+        unsafe {
+            std::env::set_var("DT_WEB_DIST", &dist);
+        }
+        let report = run_doctor(&config, DoctorMode::Check, None).await.unwrap();
+        let entry = report
+            .checks
+            .iter()
+            .find(|c| c.id == "web_app_present")
+            .unwrap();
+        assert_eq!(entry.outcome, DoctorCheckOutcome::Pass);
+    }
+
+    #[tokio::test]
+    async fn test_doctor_hint_optional_components() {
+        let _guard = crate::tests::ENV_MUTEX.lock().await;
+        let _reset = DoctorEnvReset;
+        let root = tempfile::tempdir().unwrap();
+        let config = GmConfig {
+            storage_dir: root.path().join("storage"),
+            socket_path: root.path().join("helper.sock"),
+            daemon_socket_path: root.path().join("daemon.sock"),
+            ..Default::default()
+        };
+        let report = run_doctor(&config, DoctorMode::Check, None).await.unwrap();
+        let entry = report
+            .checks
+            .iter()
+            .find(|c| c.id == "optional_components")
+            .unwrap();
+        assert_eq!(entry.outcome, DoctorCheckOutcome::Info);
+        assert!(
+            entry
+                .next_action
+                .as_deref()
+                .unwrap_or("")
+                .contains("Optional:")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_doctor_hint_hosted_database() {
+        let _guard = crate::tests::ENV_MUTEX.lock().await;
+        let _reset = DoctorEnvReset;
+        let root = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("DT_HOSTED_ENABLED", "1");
+            std::env::remove_var("DT_DATABASE_URL");
+            std::env::remove_var("DATABASE_URL");
+        }
+        let config = GmConfig {
+            storage_dir: root.path().join("storage"),
+            socket_path: root.path().join("helper.sock"),
+            daemon_socket_path: root.path().join("daemon.sock"),
+            ..Default::default()
+        };
+        let report = run_doctor(&config, DoctorMode::Check, None).await.unwrap();
+        let entry = report
+            .checks
+            .iter()
+            .find(|c| c.id == "hosted_database")
+            .unwrap();
+        assert_eq!(entry.outcome, DoctorCheckOutcome::Warn);
+        assert!(
+            entry
+                .next_action
+                .as_deref()
+                .unwrap_or("")
+                .contains("DT_DATABASE_URL=postgres://")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_doctor_hint_metadata_expiry() {
+        let _guard = crate::tests::ENV_MUTEX.lock().await;
+        let _reset = DoctorEnvReset;
+        let root = tempfile::tempdir().unwrap();
+        let cat_path = root.path().join("expiring-catalog.json");
+        let mut cat: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/release/component-catalog.json"))
+                .unwrap();
+        cat["expires_at"] =
+            serde_json::Value::String((Utc::now() + chrono::Duration::days(5)).to_rfc3339());
+        fs::write(&cat_path, serde_json::to_string(&cat).unwrap()).unwrap();
+        unsafe {
+            std::env::set_var("DT_COMPONENT_CATALOG_PATH", &cat_path);
+        }
+        let config = GmConfig {
+            storage_dir: root.path().join("storage"),
+            socket_path: root.path().join("helper.sock"),
+            daemon_socket_path: root.path().join("daemon.sock"),
+            ..Default::default()
+        };
+        let report = run_doctor(&config, DoctorMode::Check, None).await.unwrap();
+        let entry = report
+            .checks
+            .iter()
+            .find(|c| c.id == "metadata_expiry")
+            .unwrap();
+        assert_eq!(entry.outcome, DoctorCheckOutcome::Warn);
+        assert_eq!(
+            entry.next_action.as_deref(),
+            Some("Update DT to refresh signed metadata.")
+        );
     }
 }

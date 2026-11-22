@@ -59,7 +59,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Install Node for companion, web, and mobile verification
-        if: runner.os == 'Linux'
+        if: startsWith(matrix.os, 'ubuntu-')
         uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -270,3 +270,58 @@ jobs:
           name: installer-macos
           path: grok-muse/target/dist/DT-*-macos-*.dmg*
           if-no-files-found: error
+
+  postgres-integration:
+    name: postgres-integration
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dt
+          POSTGRES_PASSWORD: dt
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dt"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CARGO_TERM_COLOR: always
+      DT_TEST_DATABASE_URL: postgres://dt:dt@localhost:5432/postgres
+      DT_REQUIRE_POSTGRES_TESTS: "1"
+    steps:
+      - name: Checkout DT
+        uses: actions/checkout@v4
+        with:
+          path: grok-muse
+
+      - name: Checkout Darius
+        uses: actions/checkout@v4
+        with:
+          repository: galaxycoils/darius
+          ref: f47a4ce980abecb751c9f5c79e1c424a20100433
+          path: Darius
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Install Linux system packages
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y \
+            pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libpipewire-0.3-dev libspa-0.2-dev clang
+
+      - name: Run PostgreSQL integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --manifest-path grok-muse/Cargo.toml -p gm-openbot --test postgres_hosted -- --nocapture --test-threads=1 2>&1 | tee pg.log
+          ran=$(grep -c '^POSTGRES_TEST_RAN' pg.log || true)
+          echo "postgres tests ran: $ran"
+          test "$ran" -ge 7
+
