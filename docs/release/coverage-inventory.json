@@ -325,6 +325,18 @@
       "required_evidence": ["updater-expiry-renewal-rollback-tests"],
       "test_ids": ["test_renewable_metadata_expiry_rollback_and_revocation"],
       "required": true
+    },
+    {
+      "id": "WEB-APP-01",
+      "category": "ui",
+      "name": "Same-origin React web app hosted by dt serve at /app with SPA fallback, CSP, immutable asset cache, and path traversal protection",
+      "surfaces": ["serve", "react-web", "installer-deb", "docker"],
+      "dependencies": ["axum", "vite"],
+      "expected_outcome": "dt serve serves built clients/web/dist at /app/ with 308 redirect from /app, immutable caching for /app/assets/*, SPA fallback for extensionless routes, strict CSP, and traversal blocking.",
+      "observable_assertion": "GET /app/ returns 200 with CSP; traversal attempts return 404 without leaking files outside dist.",
+      "required_evidence": ["web-app-hosting-tests"],
+      "test_ids": ["test_web_app_serves_index", "test_web_app_blocks_traversal"],
+      "required": true
     }
   ]
 }

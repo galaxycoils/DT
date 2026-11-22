@@ -308,8 +308,10 @@ class EvidenceTests(unittest.TestCase):
 
     def test_docker_and_installer_contracts(self):
         dockerfile = (ROOT / 'deploy/docker/Dockerfile').read_text()
-        for expected in ('--bin dt', '--bin gm', '--bin gm-daemon', '--bin dt-doctor', 'libpipewire-0.3-dev', 'USER dt', '127.0.0.1:7433'):
+        for expected in ('--bin dt', '--bin gm', '--bin gm-daemon', '--bin dt-doctor', 'libpipewire-0.3-dev', 'USER dt', '127.0.0.1:7433', 'DT_WEB_DIST'):
             self.assertIn(expected, dockerfile)
+        build_deb = (ROOT / 'tools/installers/linux/build-deb.sh').read_text()
+        self.assertIn('usr/share/dt/web', build_deb)
         compose = (ROOT / 'deploy/docker/docker-compose.yml').read_text()
         for expected in ('dt-server:', 'tls-proxy:', '"443:443"'):
             self.assertIn(expected, compose)

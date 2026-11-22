@@ -150,6 +150,7 @@ pub struct CompanionWebState {
     pub workspace_supervisors:
         Arc<parking_lot::RwLock<std::collections::HashMap<String, OpenBotSupervisor>>>,
     pub sanitized_doctor: Option<Arc<parking_lot::RwLock<Option<serde_json::Value>>>>,
+    pub web_dist: Option<PathBuf>,
 }
 
 impl CompanionWebState {
@@ -579,6 +580,14 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
         .route("/companion.css", get(serve_css))
         .route("/companion.js", get(serve_script))
         .route("/admin/audit", get(serve_index))
+        .route(
+            "/app",
+            get(|| async {
+                with_web_app_security_headers(axum::response::Redirect::permanent("/app/"))
+            }),
+        )
+        .route("/app/", get(serve_web_app_index))
+        .route("/app/*path", get(serve_web_app_asset))
         .route("/.well-known/agent.json", get(serve_agent_card))
         .route("/a2a/card", get(serve_agent_card))
         .route("/a2a/tasks", post(create_a2a_task))
@@ -793,9 +802,13 @@ pub fn build_companion_router(state: CompanionWebState) -> Router {
                     let req_path = request.uri().path().to_string();
                     let is_mutation = request.method() != axum::http::Method::GET && req_path.starts_with("/api/");
                     let is_html_route = req_path == "/" || req_path == "/admin/audit";
+                    let is_app_route = req_path == "/app" || req_path.starts_with("/app/");
                     let mut response = next.run(request).await;
                     if is_mutation && response.status().is_success() {
                         sync_supervisor.emit_agui("STATE_INVALIDATED", "ui", "", serde_json::json!({"path":req_path}));
+                    }
+                    if is_app_route {
+                        return response;
                     }
                     let csp = if is_html_route {
                         let spaces_port = sp_atomic.load(Ordering::SeqCst);
@@ -862,6 +875,7 @@ impl CompanionWebServer {
                     std::collections::HashMap::new(),
                 )),
                 sanitized_doctor: None,
+                web_dist: None,
             },
         }
     }
@@ -886,6 +900,11 @@ impl CompanionWebServer {
 
     pub fn with_updates(mut self, updates: Arc<dyn CompanionUpdates>) -> Self {
         self.state.updates = Some(updates);
+        self
+    }
+
+    pub fn with_web_dist(mut self, dir: Option<PathBuf>) -> Self {
+        self.state.web_dist = dir;
         self
     }
 
@@ -971,6 +990,144 @@ async fn serve_script() -> impl IntoResponse {
         [("content-type", "text/javascript; charset=utf-8")],
         COMPANION_UI_JS,
     )
+}
+
+const WEB_APP_CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'";
+const WEB_APP_NOT_INSTALLED_HTML: &str = "<!doctype html><html><head><meta charset=\"utf-8\"><title>DT Web App Not Installed</title></head><body><h1>Web app not installed.</h1><p>Build with <code>npm run build --prefix clients/web</code> or set <code>DT_WEB_DIST</code>.</p></body></html>";
+
+fn with_web_app_security_headers(resp: impl IntoResponse) -> axum::response::Response {
+    let mut response = resp.into_response();
+    for (key, value) in [
+        ("content-security-policy", WEB_APP_CSP),
+        ("x-content-type-options", "nosniff"),
+        ("x-frame-options", "DENY"),
+        ("referrer-policy", "no-referrer"),
+    ] {
+        if let (Ok(hn), Ok(hv)) = (
+            HeaderName::from_bytes(key.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(hn, hv);
+        }
+    }
+    response
+}
+
+fn web_app_mime_for_path(path: &std::path::Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json" | "map") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn serve_web_app_index(State(state): State<CompanionWebState>) -> axum::response::Response {
+    let Some(ref dist_dir) = state.web_dist else {
+        return with_web_app_security_headers((
+            StatusCode::NOT_FOUND,
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                ("cache-control", "no-cache"),
+            ],
+            WEB_APP_NOT_INSTALLED_HTML,
+        ));
+    };
+    let index_path = dist_dir.join("index.html");
+    match tokio::fs::read(&index_path).await {
+        Ok(bytes) => with_web_app_security_headers((
+            StatusCode::OK,
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                ("cache-control", "no-cache"),
+            ],
+            bytes,
+        )),
+        Err(_) => with_web_app_security_headers((
+            StatusCode::NOT_FOUND,
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                ("cache-control", "no-cache"),
+            ],
+            WEB_APP_NOT_INSTALLED_HTML,
+        )),
+    }
+}
+
+async fn serve_web_app_asset(
+    State(state): State<CompanionWebState>,
+    Path(path): Path<String>,
+) -> axum::response::Response {
+    let Some(ref dist_dir) = state.web_dist else {
+        return with_web_app_security_headers((
+            StatusCode::NOT_FOUND,
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                ("cache-control", "no-cache"),
+            ],
+            WEB_APP_NOT_INSTALLED_HTML,
+        ));
+    };
+    if path.is_empty() {
+        return serve_web_app_index(State(state)).await;
+    }
+    if path.contains("..") || path.contains('\\') || path.contains('\0') || path.starts_with('/') {
+        return with_web_app_security_headers((StatusCode::NOT_FOUND, "Not found"));
+    }
+    let Ok(canonical_dist) = tokio::fs::canonicalize(dist_dir).await else {
+        return with_web_app_security_headers((
+            StatusCode::NOT_FOUND,
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                ("cache-control", "no-cache"),
+            ],
+            WEB_APP_NOT_INSTALLED_HTML,
+        ));
+    };
+    let candidate = dist_dir.join(&path);
+    if let Ok(resolved) = tokio::fs::canonicalize(&candidate).await {
+        if !resolved.starts_with(&canonical_dist) {
+            return with_web_app_security_headers((StatusCode::NOT_FOUND, "Not found"));
+        }
+        if let Ok(meta) = tokio::fs::metadata(&resolved).await
+            && meta.is_file()
+            && let Ok(bytes) = tokio::fs::read(&resolved).await
+        {
+            let mime = web_app_mime_for_path(&resolved);
+            let cache = if path.starts_with("assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "no-cache"
+            };
+            return with_web_app_security_headers((
+                StatusCode::OK,
+                [("content-type", mime), ("cache-control", cache)],
+                bytes,
+            ));
+        }
+    }
+    let has_extension = std::path::Path::new(&path)
+        .file_name()
+        .and_then(|n| std::path::Path::new(n).extension())
+        .is_some();
+    if !has_extension {
+        return serve_web_app_index(State(state)).await;
+    }
+    with_web_app_security_headers((StatusCode::NOT_FOUND, "Not found"))
 }
 
 async fn serve_agent_card(State(state): State<CompanionWebState>) -> impl IntoResponse {
@@ -7324,6 +7481,175 @@ mod tests {
             .unwrap();
         assert_eq!(cross.status(), 403);
 
+        handle.abort();
+    }
+
+    async fn spawn_web_app_test_server(
+        with_dist: bool,
+    ) -> (tempfile::TempDir, String, tokio::task::JoinHandle<()>) {
+        let dir = tempfile::tempdir().unwrap();
+        let dist_dir = dir.path().join("dist");
+        if with_dist {
+            std::fs::create_dir_all(dist_dir.join("assets")).unwrap();
+            std::fs::write(
+                dist_dir.join("index.html"),
+                "<!doctype html><html><body>DT_APP_MARKER</body></html>",
+            )
+            .unwrap();
+            std::fs::write(
+                dist_dir.join("assets/a.js"),
+                "console.log('DT_ASSET_MARKER');",
+            )
+            .unwrap();
+        }
+        std::fs::write(dir.path().join("secret.txt"), "TOP_SECRET_OUTSIDE_DIST").unwrap();
+
+        let cfg = GmConfig {
+            storage_dir: dir.path().join("storage"),
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: dir.path().join("bots"),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (tx, _rx) = broadcast::channel(32);
+        let sup = OpenBotSupervisor::open(cfg, Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let bridge = BridgeRouter::new(sup.clone(), Default::default());
+        let srv = CompanionWebServer::new(sup, bridge, Some("op-secret".into()), None)
+            .with_web_dist(if with_dist { Some(dist_dir) } else { None });
+        let app = build_companion_router(srv.state);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (dir, format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn test_web_app_serves_index() {
+        let (_dir, base, handle) = spawn_web_app_test_server(true).await;
+        let resp = reqwest::get(format!("{base}/app/")).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        let csp = resp
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("font-src 'self' data:"));
+        assert_eq!(
+            resp.headers()
+                .get("x-frame-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("DENY")
+        );
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("DT_APP_MARKER"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_web_app_redirects_bare_path() {
+        let (_dir, base, handle) = spawn_web_app_test_server(true).await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resp = client.get(format!("{base}/app")).send().await.unwrap();
+        assert_eq!(resp.status(), 308);
+        assert_eq!(
+            resp.headers()
+                .get(header::LOCATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("/app/")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_web_app_serves_asset_with_mime_and_cache() {
+        let (_dir, base, handle) = spawn_web_app_test_server(true).await;
+        let resp = reqwest::get(format!("{base}/app/assets/a.js"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ct.starts_with("text/javascript"), "content-type={ct}");
+        let cc = resp
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(cc.contains("immutable"), "cache-control={cc}");
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("DT_ASSET_MARKER"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_web_app_spa_fallback() {
+        let (_dir, base, handle) = spawn_web_app_test_server(true).await;
+        let resp = reqwest::get(format!("{base}/app/threads/123"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let body = resp.text().await.unwrap();
+        assert!(body.contains("DT_APP_MARKER"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_web_app_missing_asset_404() {
+        let (_dir, base, handle) = spawn_web_app_test_server(true).await;
+        let resp = reqwest::get(format!("{base}/app/assets/nope.js"))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_web_app_blocks_traversal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (_dir, base, handle) = spawn_web_app_test_server(true).await;
+        let host_port = base.trim_start_matches("http://");
+        for raw_path in [
+            "/app/..%2fsecret.txt",
+            "/app/%2e%2e/secret.txt",
+            "/app/assets/..%2f..%2fsecret.txt",
+        ] {
+            let mut stream = tokio::net::TcpStream::connect(host_port).await.unwrap();
+            let req = format!(
+                "GET {raw_path} HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(req.as_bytes()).await.unwrap();
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).await.unwrap();
+            let text = String::from_utf8_lossy(&buf);
+            assert!(
+                text.starts_with("HTTP/1.1 404") || text.starts_with("HTTP/1.1 400"),
+                "expected 404/400 for {raw_path}, got: {text}"
+            );
+            assert!(
+                !text.contains("TOP_SECRET_OUTSIDE_DIST"),
+                "traversal leaked secret for {raw_path}"
+            );
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn test_web_app_not_installed() {
+        let (_dir, base, handle) = spawn_web_app_test_server(false).await;
+        let resp = reqwest::get(format!("{base}/app/")).await.unwrap();
+        assert_eq!(resp.status(), 404);
+        let body = resp.text().await.unwrap();
+        assert!(body.to_lowercase().contains("not installed"));
         handle.abort();
     }
 }

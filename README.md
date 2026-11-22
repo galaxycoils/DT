@@ -191,6 +191,11 @@ cd DT
 
 # Build all native binaries (dt, gm, dt-doctor, gm-daemon, gm-cu-helper, gm-ui)
 cargo build --release --locked --workspace --bins
+
+# Develop: start dt serve (http://127.0.0.1:7433/ & /app/) + Vite hot-reload (http://localhost:5173/)
+cargo run -p xtask -- dev
+# Or point the Vite dev proxy at another running server:
+DT_API=http://127.0.0.1:7433 npm run dev --prefix clients/web
 ```
 
 ---

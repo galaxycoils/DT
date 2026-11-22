@@ -30,7 +30,9 @@ COPY --from=rust-builder /src/DT/target/release/dt /usr/local/bin/dt
 COPY --from=rust-builder /src/DT/target/release/gm /usr/local/bin/gm
 COPY --from=rust-builder /src/DT/target/release/gm-daemon /usr/local/bin/gm-daemon
 COPY --from=rust-builder /src/DT/target/release/dt-doctor /usr/local/bin/dt-doctor
+COPY --from=web-builder /web/dist /usr/share/dt/web
 ENV XDG_DATA_HOME=/var/lib/dt
+ENV DT_WEB_DIST=/usr/share/dt/web
 USER dt
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
     CMD curl -fsS http://127.0.0.1:7433/api/v1/health/ready >/dev/null || exit 1

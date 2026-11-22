@@ -167,6 +167,8 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Build dt and run dt serve alongside the Vite React web dev server
+    Dev,
 }
 
 fn percentile(sorted: &[f64], pct: f64) -> f64 {
@@ -1311,8 +1313,61 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 dry_run,
             )?;
         }
+
+        Commands::Dev => {
+            run_dev().await?;
+        }
     }
 
+    Ok(())
+}
+
+async fn run_dev() -> Result<(), Box<dyn std::error::Error>> {
+    let status = Command::new("cargo")
+        .args(["build", "-p", "gm-daemon", "--bin", "dt"])
+        .status()?;
+    if !status.success() {
+        return Err("Failed to build dt binary".into());
+    }
+    if !Path::new("clients/web/node_modules").exists() {
+        let npm_ci = Command::new("npm")
+            .args(["ci", "--prefix", "clients/web"])
+            .status()?;
+        if !npm_ci.success() {
+            return Err("Failed to install clients/web dependencies".into());
+        }
+    }
+    let dt_bin = cargo_profile_dir(false, None).join("dt");
+    let mut dt_child = tokio::process::Command::new(&dt_bin)
+        .args(["serve", "--bind", "127.0.0.1:7433"])
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut vite_child = tokio::process::Command::new("npm")
+        .args(["run", "dev", "--prefix", "clients/web"])
+        .kill_on_drop(true)
+        .spawn()?;
+    println!("Companion UI : http://127.0.0.1:7433/");
+    println!("React (live) : http://localhost:5173/        (hot reload, proxied to dt serve)");
+    println!("React (built): http://127.0.0.1:7433/app/");
+
+    let exit_code = tokio::select! {
+        res = dt_child.wait() => {
+            let _ = vite_child.kill().await;
+            res.ok().and_then(|s| s.code()).unwrap_or(1)
+        }
+        res = vite_child.wait() => {
+            let _ = dt_child.kill().await;
+            res.ok().and_then(|s| s.code()).unwrap_or(1)
+        }
+        _ = tokio::signal::ctrl_c() => {
+            let _ = dt_child.kill().await;
+            let _ = vite_child.kill().await;
+            0
+        }
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
     Ok(())
 }
 

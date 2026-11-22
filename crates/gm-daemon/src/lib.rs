@@ -1795,6 +1795,7 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
                     .with_updates(Arc::new(updater::CompanionUpdateService {
                         download_dir: config.storage_dir.join("updates"),
                     }))
+                    .with_web_dist(resolve_web_dist(&config))
                     .with_voice_manager(control_server.voice_manager())
                     .with_runtime_deps(
                         control_server.interactions(),
@@ -3148,6 +3149,7 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
                 report.sessions_migrated
             );
         }
+        println!("==> Hosted control plane backend: PostgreSQL");
         hosted_backend_opt = Some(gm_openbot::HostedPlaneBackend::Postgres(Arc::new(pg)));
     } else if std::env::var("DT_HOSTED_ENABLED")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -3157,13 +3159,17 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
             &workers_root,
             master_key_bytes.as_bytes(),
         )?);
+        println!("==> Hosted control plane backend: SQLite");
         hosted_backend_opt = Some(gm_openbot::HostedPlaneBackend::Sqlite(plane));
     }
+    let resolved_web_dist = resolve_web_dist(&config);
+    let has_web_dist = resolved_web_dist.is_some();
     let mut web = gm_openbot::CompanionWebServer::new(sup.clone(), bridge, token, slack_secret)
         .with_sanitized_doctor(doctor_status_snapshot(&config).await)
         .with_updates(Arc::new(updater::CompanionUpdateService {
             download_dir: config.storage_dir.join("updates"),
         }))
+        .with_web_dist(resolved_web_dist)
         .with_voice_manager(gm_openbot::VoiceSessionManager::new(
             config.storage_dir.clone(),
         ))
@@ -3190,6 +3196,11 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
             return Err(error);
         }
     };
+    if has_web_dist {
+        println!("==> React web app: http://{comp_addr}/app/");
+    } else {
+        println!("==> React web app not found (set DT_WEB_DIST)");
+    }
     let spaces_handle = if config.muse.enable_spaces {
         let target_sp_port = config
             .muse
@@ -3775,13 +3786,70 @@ pub async fn run_spaces(
     Ok(())
 }
 
+pub fn resolve_web_dist(config: &GmConfig) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(env_dir) = std::env::var("DT_WEB_DIST") {
+        let trimmed = env_dir.trim();
+        if !trimmed.is_empty() {
+            candidates.push(PathBuf::from(trimmed));
+        }
+    }
+    candidates.push(config.storage_dir.join("web"));
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(exe_dir) = exe.parent()
+    {
+        candidates.push(exe_dir.join("../share/dt/web"));
+        candidates.push(exe_dir.join("web"));
+        candidates.push(exe_dir.join("../Resources/web"));
+    }
+    #[cfg(debug_assertions)]
+    {
+        candidates.push(PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../clients/web/dist"
+        )));
+    }
+    for candidate in candidates {
+        if candidate.join("index.html").is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     #[cfg(unix)]
     use gm_core::ipc::DaemonEvent;
 
-    static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    pub(crate) static ENV_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn test_resolve_web_dist_prefers_env() {
+        let _guard = ENV_MUTEX.lock().await;
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("DT_WEB_DIST");
+                }
+            }
+        }
+        let _clean = EnvGuard;
+        let dir = tempfile::tempdir().unwrap();
+        let web_dir = dir.path().join("custom-web");
+        std::fs::create_dir_all(&web_dir).unwrap();
+        std::fs::write(web_dir.join("index.html"), "<!doctype html>").unwrap();
+        unsafe {
+            std::env::set_var("DT_WEB_DIST", &web_dir);
+        }
+        let cfg = GmConfig {
+            storage_dir: dir.path().join("storage"),
+            ..Default::default()
+        };
+        assert_eq!(resolve_web_dist(&cfg), Some(web_dir));
+    }
 
     #[tokio::test]
     async fn test_permissions_check_live() {

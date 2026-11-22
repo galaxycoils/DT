@@ -59,7 +59,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Install Node for companion, web, and mobile verification
-        if: matrix.os == 'ubuntu-24.04'
+        if: runner.os == 'Linux'
         uses: actions/setup-node@v4
         with:
           node-version: '22'

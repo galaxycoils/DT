@@ -35,6 +35,14 @@ mkdir -p "$PKG_ROOT/DEBIAN" \
          "$PKG_ROOT/usr/share/applications" \
          "$PKG_ROOT/usr/share/doc/dt" \
          "$PKG_ROOT/usr/lib/systemd/user"
+if [[ "${DT_SKIP_WEB_BUILD:-0}" != "1" ]]; then
+  npm ci --prefix "$REPO_ROOT/clients/web"
+  npm run build --prefix "$REPO_ROOT/clients/web"
+fi
+if [[ -f "$REPO_ROOT/clients/web/dist/index.html" ]]; then
+  install -d "$PKG_ROOT/usr/share/dt/web"
+  cp -r "$REPO_ROOT/clients/web/dist/." "$PKG_ROOT/usr/share/dt/web/"
+fi
 find "$PKG_ROOT" -type d -exec chmod 0755 {} +
 
 for bin in dt gm dt-doctor gm-daemon gm-cu-helper gm-ui; do
