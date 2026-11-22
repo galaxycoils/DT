@@ -7526,10 +7526,7 @@ mod tests {
         (dir, format!("http://{addr}"), handle)
     }
 
-    fn header_str<'a>(
-        resp: &'a reqwest::Response,
-        name: impl reqwest::header::AsHeaderName,
-    ) -> &'a str {
+    fn header_str(resp: &reqwest::Response, name: impl reqwest::header::AsHeaderName) -> &str {
         match resp.headers().get(name) {
             Some(val) => val.to_str().unwrap_or_default(),
             None => "",

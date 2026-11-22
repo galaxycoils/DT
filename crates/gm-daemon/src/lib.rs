@@ -3809,12 +3809,9 @@ pub fn resolve_web_dist(config: &GmConfig) -> Option<PathBuf> {
             "/../../clients/web/dist"
         )));
     }
-    for candidate in candidates {
-        if candidate.join("index.html").is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("index.html").is_file())
 }
 
 #[cfg(test)]
