@@ -1,14 +1,14 @@
-# DT — Native Hybrid Desktop, Web, Mobile & Self-Hostable Agent (`v1.0.3`)
+# DT — Native Hybrid Desktop, Web, Mobile & Self-Hostable Agent (`v1.0.4`)
 
 <p align="center">
   <strong>Fast computer-use · Proactive personal agent · OpenBot multi-agent coworker suite · Unified DT Doctor recovery</strong><br/>
-  Native Rust desktop (macOS, Windows 11, Ubuntu 24.04 X11/Wayland) · React Web · Expo Mobile · Voice/SIP/Meetings · Hosted Multi-Tenant Control Plane
+  Native Rust desktop (macOS, Windows 11, Ubuntu 24.04 X11/Wayland) · Same-origin React Web (`/app/`) · Expo Mobile · Voice/SIP/Meetings · Hosted PostgreSQL Control Plane
 </p>
 
 <p align="center">
   <a href="https://galaxycoils.github.io/DT/"><strong>🌐 Live Interactive Front Page</strong></a> ·
   <a href="https://github.com/galaxycoils/DT/releases/latest"><strong>📦 Latest Release & Binaries</strong></a> ·
-  <a href="docs/release/coverage-inventory.json"><strong>✅ 30/30 Coverage Inventory</strong></a> ·
+  <a href="docs/release/coverage-inventory.json"><strong>✅ 36/36 Coverage Inventory</strong></a> ·
   <a href="docs/OPERATIONS.md"><strong>🛠️ Operations Guide</strong></a> ·
   <a href="docs/SUPPORT_MATRIX.md"><strong>🖥️ Support Matrix</strong></a> ·
   <a href="docs/PRIVACY.md"><strong>🔒 Privacy & Discretion</strong></a>
@@ -22,42 +22,32 @@ Download verified release packages and prebuilt binaries from [**GitHub Releases
 
 | Platform / Architecture | Package / Binary Asset | Binaries & Components Included | Verification |
 | :--- | :--- | :--- | :--- |
-| **Ubuntu 24.04 LTS (x86_64)** | [`dt_1.0.3_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/dt_1.0.3_amd64.deb) | `/usr/bin/{dt,gm,dt-doctor,gm-daemon,gm-cu-helper,gm-ui}`, systemd user units, desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
-| **Ubuntu 24.04 LTS (ARM64)** | [`dt_1.0.3_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/dt_1.0.3_arm64.deb) | ARM64 Debian package with systemd user units and desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
-| **Linux Generic (x86_64)** | [`DT-1.0.3-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-linux-x86_64-binaries.tar.gz) | Standalone release binaries: `dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui` | `.sha256` |
-| **macOS Apple Silicon (ARM64)** | [`DT-1.0.3-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-macos-aarch64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
-| **macOS Intel (x86_64)** | [`DT-1.0.3-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-macos-x86_64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
-| **Windows 11 (x86_64)** | [`DT-1.0.3-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-windows-x86_64-setup.exe) | NSIS per-user installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
-| **Windows 11 (ARM64)** | [`DT-1.0.3-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-windows-aarch64-setup.exe) | NSIS per-user ARM64 installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
-| **React Web Client Bundle** | [`DT-1.0.3-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.3/DT-1.0.3-web-client.tar.gz) | Production Vite build (`index.html`, Rakazo token CSS, JS bundle, Front Page) | `.sha256` |
+| **Ubuntu 24.04 LTS (x86_64)** | [`dt_1.0.4_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/dt_1.0.4_amd64.deb) | `/usr/bin/{dt,gm,dt-doctor,gm-daemon,gm-cu-helper,gm-ui}`, `/usr/share/dt/web`, systemd user units, desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
+| **Ubuntu 24.04 LTS (ARM64)** | [`dt_1.0.4_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/dt_1.0.4_arm64.deb) | ARM64 Debian package with `/usr/share/dt/web`, systemd user units, and desktop entry | `.sha256`, `.build.json`, `.sbom.json` |
+| **Linux Generic (x86_64)** | [`DT-1.0.4-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-linux-x86_64-binaries.tar.gz) | Standalone release binaries (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) + `share/dt/web` | `.sha256` |
+| **macOS Apple Silicon (ARM64)** | [`DT-1.0.4-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-macos-aarch64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
+| **macOS Intel (x86_64)** | [`DT-1.0.4-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-macos-x86_64.dmg) | `DT.app`, `DTCUHelper.app`, `Install DT.pkg` (`dt`, `gm`, `dt-doctor`, `gm-daemon`, `gm-cu-helper`, `gm-ui`) | `.sha256`, `.build.json`, `.sbom.json` |
+| **Windows 11 (x86_64)** | [`DT-1.0.4-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-windows-x86_64-setup.exe) | NSIS per-user installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
+| **Windows 11 (ARM64)** | [`DT-1.0.4-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-windows-aarch64-setup.exe) | NSIS per-user ARM64 installer + SID-isolated pipe & scheduled task definitions | `.sha256`, `.build.json`, `.sbom.json` |
+| **React Web Client Bundle** | [`DT-1.0.4-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.4/DT-1.0.4-web-client.tar.gz) | Production Vite build (`index.html`, Rakazo token CSS, JS bundle for `/app/`) | `.sha256` |
 
 ```bash
 # Verify any downloaded release package with its SHA-256 sidecar:
-shasum -a 256 -c dt_1.0.3_amd64.deb.sha256
+shasum -a 256 -c dt_1.0.4_amd64.deb.sha256
 ```
 
 ---
 
-## ✨ What's New in `v1.0.3` (Pre-Release Hardening, UX Elevation & 100% Contract Coverage)
+## ✨ What's New in `v1.0.4` (Unified Release, Same-Origin `/app` Hosting & PostgreSQL CI)
 
-1. **Interactive Cross-Device React Web & Expo Mobile Experience (`clients/web/`, `clients/mobile/`, `tools/generate-ui-tokens.py`)**:
-   - **Responsive 3-Tier Workspace Hierarchy**: Drag-resizable desktop sidebar (`240px–480px`), 1-click collapse to a `72px` icon rail, and a touch-friendly mobile slide-over drawer (`<= 768px`) with backdrop blur.
-   - **Geometric Coworker Avatars & Live Presence**: Distinct geometric avatar frames (`circle`, `squircle`, `hexagon`, `diamond`) for `@muse`, `@researcher`, `@coder`, and `@guardian` with animated eye-blink keyframes, live status dots, and active status phrases.
-   - **Command Palette (`⌘K` / `Ctrl+K`)**: Instant modal fuzzy switcher across coworkers, `#channels`, views, routines, spaces, DT Doctor diagnostics, and theme switching.
-   - **Per-Target Draft Isolation & Live Transcripts**: Fixed conversation switching so drafts remain strictly isolated per `dm:<bot_id>` / `channel:<id>` in `sessionStorage` while loading live historical transcripts from `/api/v1/direct/:bot_id/messages` and `/api/v1/channels/:id/messages`.
-   - **Smart Typography Composer & Inline Approval Cards**: Automatic `->` to `→` smart arrow replacement outside inline/fenced code blocks with single-Backspace undo, contextual empty-state starter prompt chips, and non-blocking inline Tier-3 **Approval Cards** (`Approve` / `Deny`).
-   - **Interactive Routines, Split-View Space Sandbox, Provider Pipeline & DT Doctor**:
-     - **Routines**: 1-click **`Trigger Now`** execution (`POST /api/v1/routines/:id/test` & `/api/v1/routines/:id/trigger`).
-     - **Spaces**: Split-view static Space creator + live isolated iframe preview (`sandbox="allow-scripts"`, no `allow-same-origin`).
-     - **Providers & Connectors**: Visual 4-stage pipeline (`Unconfigured → Saved → Discovered → Verified`), live Connector capability prober, and scope-confirmed Marketplace lifecycle.
-     - **DT Doctor**: Structured installation readiness scorecard with categorized diagnostic badges and 1-click JSON export.
-2. **Full CLI & `/api/v1` Parity (`crates/gm-daemon`, `crates/gm-openbot`)**:
-   - Exposed `dt patch <file> [--repo <dir>] [--approve-sha256 <hex>]`, `dt routines trigger <id> [--delivery-id <id>]`, `dt diagnostics prune-backups [--keep <N>]`, and `dt diagnostics recover-database <db>` on both `dt` and the `gm` compatibility alias.
-   - Added `POST /api/v1/routines/:id/trigger`, returned active user workspace memberships in `GET /api/v1/workspaces`, and allowed `POST /api/v1/marketplace/:id/update` to resolve built-in catalog items by ID.
-3. **100% Release Coverage Inventory Verification (`docs/release/coverage-inventory.json`, `tools/test_release_tools.py`)**:
-   - All **30/30 required `test_ids`** across all **26 required capability rows** in `docs/release/coverage-inventory.json` are implemented and verified by `test_coverage_inventory_test_ids_exist_in_codebase`, alongside **384/384 passing workspace tests** under `cargo nextest`.
-4. **Cross-Platform Packaging & Docker Hardening (`xtask`, `tools/installers/linux/build-deb.sh`, `deploy/docker/Dockerfile`)**:
-   - Enforced deterministic `umask 022` and `0755` directory modes in `build-deb.sh`, added `dt` and `dt-doctor` symlinks to `xtask install`, added cross-platform JPEG encoding benchmarks in `xtask bench-hotpath`, and updated `deploy/docker/Dockerfile` with PipeWire/XCB build packages and the `gm` binary alias.
+1. **Unified Backend & Cross-Device UX (`v1.0.2` + `v1.0.3` merged cleanly)**:
+   - Brings the pinned 15-entry `component-catalog.json` (valid through `2027-11-19`), active PostgreSQL hosted control plane (`PostgresHostedStore` / `HostedPlaneBackend`), consent-gated `VoiceSessionManager`, redesigned native desktop UI, and `tools/renew-update-metadata.py` together with the interactive React Web & Expo Mobile UX elevation and full CLI/`/api/v1` parity.
+2. **One-Command Same-Origin React Web App Hosting (`dt serve` → `/app/`)**:
+   - `dt serve` automatically discovers and hosts the built React web client at **`http://127.0.0.1:7433/app/`** (bundled inside Ubuntu `.deb` at `/usr/share/dt/web` and Docker via `DT_WEB_DIST=/usr/share/dt/web`) with SPA fallback, immutable asset caching, strict CSP, and traversal blocking — plus `cargo run -p xtask -- dev` for instant Vite hot reload (`http://localhost:5173/`).
+3. **Real PostgreSQL 16 CI Verification & Actionable First-Run `dt doctor` Hints**:
+   - Added 7 real PostgreSQL 16 integration tests (`crates/gm-openbot/tests/postgres_hosted.rs`) proven in CI (`postgres-integration`), non-failing `dt doctor` first-run hints (`web_app_present`, `optional_components`, `hosted_database`, `metadata_expiry`), synchronized `1.0.4` versions with drift & 30-day metadata-expiry guards, and **0 `npm audit` vulnerabilities** across both clients.
+4. **100% Release Coverage Inventory Verification (`docs/release/coverage-inventory.json`, `tools/test_release_tools.py`)**:
+   - All **36/36 required `test_ids`** across all **28 required capability rows** (including `WEB-APP-01` and `HOST-PG-01`) are enforced by `test_coverage_inventory_test_ids_exist_in_codebase`, alongside **422/422 passing workspace tests** under `cargo nextest`.
 
 ---
 
@@ -147,15 +137,18 @@ shasum -a 256 -c dt_1.0.3_amd64.deb.sha256
 
 ## 🚀 Quick Start & Installation
 
+Open the web app anytime: run `dt serve` → open **`http://127.0.0.1:7433/app/`** (or Companion UI at `http://127.0.0.1:7433/`).
+
 ### 1. Ubuntu 24.04 LTS (`.deb` Package)
 ```bash
-sudo apt install ./dt_1.0.3_amd64.deb
+sudo apt install ./dt_1.0.4_amd64.deb
 dt doctor check
 dt service install
+dt serve   # opens Companion UI at http://127.0.0.1:7433/ and React app at http://127.0.0.1:7433/app/
 ```
 
 ### 2. macOS Apple Silicon & Intel (`.dmg` / `Install DT.pkg`)
-1. Download `DT-1.0.2-macos-aarch64.dmg` (or `x86_64`) and verify its `.sha256` sidecar.
+1. Download `DT-1.0.4-macos-aarch64.dmg` (or `x86_64`) and verify its `.sha256` sidecar.
 2. Open the disk image and run `Install DT.pkg` (or drag `DT.app` to `/Applications`).
 3. Run onboarding and grant Accessibility / Screen Recording permissions:
    ```bash
@@ -165,7 +158,7 @@ dt service install
    ```
 
 ### 3. Windows 11 (`x86_64` & `ARM64`)
-1. Run `DT-1.0.2-windows-x86_64-setup.exe` (installs per-user under `%LOCALAPPDATA%\Programs\DT\bin`).
+1. Run `DT-1.0.4-windows-x86_64-setup.exe` (installs under `%PROGRAMFILES%\DT\bin`).
 2. Verify installation readiness and user background tasks:
    ```powershell
    dt doctor check
@@ -240,7 +233,7 @@ Run the full pre-shipping verification battery locally:
 cargo fmt --all -- --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 
-# 2. Full 384-test workspace unit & integration suite
+# 2. Full 422-test workspace unit & integration suite
 cargo nextest run --locked --workspace
 
 # 3. Real headless X11 desktop capture, focus, keyboard & pointer test (Linux)
@@ -257,7 +250,7 @@ npm run smoke --prefix tools/companion
 npm run typecheck --prefix clients/web && npm run build --prefix clients/web && npm test --prefix clients/web
 npm test --prefix clients/mobile
 
-# 6. Release tools, 30/30 coverage inventory contract & workspace guest agent tests
+# 6. Release tools, 36/36 coverage inventory contract & workspace guest agent tests
 python3 tools/test_release_tools.py -v
 python3 tools/workspace-guest/test_agent.py -v
 
