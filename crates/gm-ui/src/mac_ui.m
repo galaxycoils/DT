@@ -98,9 +98,9 @@ static GmUiController *g_ui_controller = nil;
     (void)sender;
     g_is_paused = !g_is_paused;
     if (g_is_paused) {
-        gm_mac_ui_set_overlay_state(2, "⏸ Grok-Muse: Paused", "Agent paused by user coexistence toggle");
+        gm_mac_ui_set_overlay_state(2, "⏸ DT: Paused", "Agent paused by user coexistence toggle");
     } else {
-        gm_mac_ui_set_overlay_state(0, "⚪️ Grok-Muse: Idle", "Ready · Cmd+Shift+Space to summon");
+        gm_mac_ui_set_overlay_state(0, "⚪️ DT: Idle", "Ready · Cmd+Shift+Space to summon");
     }
     
     // Update tray menu item
@@ -135,7 +135,7 @@ static GmUiController *g_ui_controller = nil;
 
 - (void)onEmergencyKill:(id)sender {
     (void)sender;
-    gm_mac_ui_set_overlay_state(3, "🛑 Grok-Muse: Stopped", "Emergency kill switch activated (Cmd+Alt+Escape)");
+    gm_mac_ui_set_overlay_state(3, "🛑 DT: Stopped", "Emergency kill switch activated (Cmd+Alt+Escape)");
     if (g_status_item && g_status_item.menu) {
         NSMenuItem *statusItem = [g_status_item.menu itemWithTag:201];
         if (statusItem) {
@@ -210,7 +210,7 @@ static GmUiController *g_ui_controller = nil;
     [g_chat_input setStringValue:@""];
     
     // Change overlay to acting
-    gm_mac_ui_set_overlay_state(1, "⚡️ Grok-Muse: Acting", [input UTF8String]);
+    gm_mac_ui_set_overlay_state(1, "⚡️ DT: Acting", [input UTF8String]);
     
     if (g_task_callback) {
         g_task_callback([input UTF8String]);
@@ -341,7 +341,7 @@ int gm_mac_ui_init_action_overlay(void) {
         [g_overlay_title setDrawsBackground:NO];
         [g_overlay_title setFont:[NSFont boldSystemFontOfSize:13.0]];
         [g_overlay_title setTextColor:[NSColor whiteColor]];
-        [g_overlay_title setStringValue:@"Grok-Muse: Idle"];
+        [g_overlay_title setStringValue:@"DT: Idle"];
         [cv addSubview:g_overlay_title];
         
         // Detail label
@@ -374,22 +374,22 @@ void gm_ui_set_hud_state(int state, const char *status_text, const char *detail_
             switch (state) {
                 case 0: // Idle
                     g_overlay_indicator.layer.backgroundColor = [[NSColor systemGrayColor] CGColor];
-                    [g_overlay_title setStringValue:statusStr ?: @"Grok-Muse: Idle"];
+                    [g_overlay_title setStringValue:statusStr ?: @"DT: Idle"];
                     [g_overlay_detail setStringValue:detailStr ?: @"Ready · Cmd+Shift+Space to summon"];
                     break;
                 case 1: // Acting
                     g_overlay_indicator.layer.backgroundColor = [[NSColor colorWithCalibratedRed:0.2 green:0.6 blue:1.0 alpha:1.0] CGColor];
-                    [g_overlay_title setStringValue:statusStr ?: @"⚡️ Grok-Muse: Acting"];
+                    [g_overlay_title setStringValue:statusStr ?: @"⚡️ DT: Acting"];
                     [g_overlay_detail setStringValue:detailStr ?: @"Executing computer-use action..."];
                     break;
                 case 2: // Paused
                     g_overlay_indicator.layer.backgroundColor = [[NSColor colorWithCalibratedRed:1.0 green:0.75 blue:0.1 alpha:1.0] CGColor];
-                    [g_overlay_title setStringValue:statusStr ?: @"⏸ Grok-Muse: Paused"];
+                    [g_overlay_title setStringValue:statusStr ?: @"⏸ DT: Paused"];
                     [g_overlay_detail setStringValue:detailStr ?: @"User coexistence active · waiting for idle"];
                     break;
                 case 3: // Stopped
                     g_overlay_indicator.layer.backgroundColor = [[NSColor systemRedColor] CGColor];
-                    [g_overlay_title setStringValue:statusStr ?: @"🛑 Grok-Muse: Stopped"];
+                    [g_overlay_title setStringValue:statusStr ?: @"🛑 DT: Stopped"];
                     [g_overlay_detail setStringValue:detailStr ?: @"Emergency kill switch triggered"];
                     break;
             }
@@ -474,7 +474,7 @@ void gm_ui_present_approval_sheet(const char *request_id_cstr, const char *title
             reqId = @"unknown";
         }
         NSString *title = title_cstr ? [NSString stringWithUTF8String:title_cstr] : @"Action Approval Required";
-        NSString *details = details_cstr ? [NSString stringWithUTF8String:details_cstr] : @"Grok-Muse requests permission to perform this irreversible action.";
+        NSString *details = details_cstr ? [NSString stringWithUTF8String:details_cstr] : @"DT requests permission to perform this irreversible action.";
         
         gm_run_on_main_queue(^{
             [NSApp activateIgnoringOtherApps:YES];
@@ -692,7 +692,7 @@ int gm_mac_ui_init_chat_window(void) {
         if (!g_chat_window) return -1;
         [g_chat_window setDelegate:g_ui_controller];
         
-        [g_chat_window setTitle:@"Grok-Muse Assistant"];
+        [g_chat_window setTitle:@"DT Assistant"];
         [g_chat_window center];
         
         NSView *cv = [g_chat_window contentView];
@@ -705,7 +705,7 @@ int gm_mac_ui_init_chat_window(void) {
         g_chat_transcript = [[NSTextView alloc] initWithFrame:scrollView.bounds];
         [g_chat_transcript setEditable:NO];
         [g_chat_transcript setFont:[NSFont systemFontOfSize:13.0]];
-        [g_chat_transcript setString:@"🤖 Grok-Muse Assistant Ready.\n\nPress Cmd+Shift+Space to summon at any time, or Cmd+Alt+Escape for the emergency kill switch.\n\nType a computer-use task below (e.g. 'Open Safari and search for Rust 2024'):"];
+        [g_chat_transcript setString:@"🤖 DT Assistant Ready.\n\nPress Cmd+Shift+Space to summon at any time, or Cmd+Alt+Escape for the emergency kill switch.\n\nType a computer-use task below (e.g. 'Open Safari and search for Rust 2024'):"];
         [scrollView setDocumentView:g_chat_transcript];
         [cv addSubview:scrollView];
         

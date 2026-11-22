@@ -49,8 +49,35 @@ pub struct AgUiEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectChatDispatchOutcome {
     pub user_message: DirectMessageRecord,
-    pub assistant_message: DirectMessageRecord,
+    pub assistant_message: Option<DirectMessageRecord>,
     pub queued_task: Option<QueuedTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_error: Option<String>,
+    #[serde(default)]
+    pub provider_setup_required: bool,
+}
+
+fn is_provider_setup_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    [
+        "api key",
+        "credential",
+        "missing key",
+        "no configured",
+        "not signed in",
+        "sign in",
+        "unauthorized",
+        "authentication",
+        "oauth",
+        "model",
+        "provider",
+        "revalidation",
+        "401",
+        "403",
+        "404",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /// Coordinates the multi-bot roster, durable SQLite FIFO task queues, shared channels,
@@ -590,10 +617,7 @@ impl OpenBotSupervisor {
         card: Option<&serde_json::Value>,
         request_id: Option<&str>,
     ) -> Result<DirectMessageRecord> {
-        if self.roster.get_bot(bot_id).is_none() {
-            return Err(GmError::Config(format!("Unknown bot '{bot_id}'")));
-        }
-        let rec = self.direct_chat.append_message(
+        self.post_direct_chat_with_id(
             bot_id,
             role,
             author,
@@ -602,6 +626,36 @@ impl OpenBotSupervisor {
             thread_id,
             card,
             request_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn post_direct_chat_with_id(
+        &self,
+        bot_id: &str,
+        role: &str,
+        author: &str,
+        content: &str,
+        reply_to_id: Option<&str>,
+        thread_id: Option<&str>,
+        card: Option<&serde_json::Value>,
+        request_id: Option<&str>,
+        explicit_id: Option<&str>,
+    ) -> Result<DirectMessageRecord> {
+        if self.roster.get_bot(bot_id).is_none() {
+            return Err(GmError::Config(format!("Unknown bot '{bot_id}'")));
+        }
+        let rec = self.direct_chat.append_message_with_id(
+            bot_id,
+            role,
+            author,
+            content,
+            reply_to_id,
+            thread_id,
+            card,
+            request_id,
+            explicit_id,
         )?;
         let val = serde_json::to_value(&rec).unwrap_or_default();
         let _ = self.daemon_events_tx.send(DaemonEvent::DirectMessageAdded {
@@ -861,6 +915,7 @@ impl OpenBotSupervisor {
         content: &str,
         reply_to_id: Option<&str>,
         thread_id: Option<&str>,
+        client_msg_id: Option<&str>,
         llm_client: &HybridLlmClient,
         router: &LlmRouter,
         budget: Option<&gm_llm::BudgetManager>,
@@ -884,16 +939,46 @@ impl OpenBotSupervisor {
             ));
         }
 
-        let user_msg = self.post_direct_chat(
-            &clean_bot,
-            "user",
-            "You",
-            content,
-            reply_to_id,
-            thread_id,
-            None,
-            None,
-        )?;
+        let clean_client_id = client_msg_id.map(str::trim).filter(|s| !s.is_empty());
+        let user_msg = if let Some(cid) = clean_client_id {
+            if let Some((existing_user, existing_reply)) =
+                self.direct_chat.find_turn_by_client_id(&clean_bot, cid)?
+            {
+                if let Some(reply) = existing_reply {
+                    return Ok(DirectChatDispatchOutcome {
+                        user_message: existing_user,
+                        assistant_message: Some(reply),
+                        queued_task: None,
+                        reply_error: None,
+                        provider_setup_required: false,
+                    });
+                }
+                existing_user
+            } else {
+                self.post_direct_chat_with_id(
+                    &clean_bot,
+                    "user",
+                    "You",
+                    content,
+                    reply_to_id,
+                    thread_id,
+                    None,
+                    Some(cid),
+                    Some(cid),
+                )?
+            }
+        } else {
+            self.post_direct_chat(
+                &clean_bot,
+                "user",
+                "You",
+                content,
+                reply_to_id,
+                thread_id,
+                None,
+                None,
+            )?
+        };
         let _ = self.direct_chat.mark_chat_read("dm", &clean_bot);
 
         let explicit_task = trimmed
@@ -934,18 +1019,37 @@ impl OpenBotSupervisor {
             )?;
             return Ok(DirectChatDispatchOutcome {
                 user_message: user_msg,
-                assistant_message: assistant_msg,
+                assistant_message: Some(assistant_msg),
                 queued_task: Some(task),
+                reply_error: None,
+                provider_setup_required: false,
             });
         }
 
         let prompt_text = explicit_chat.unwrap_or(trimmed);
         let cfg = shared_cfg.unwrap_or(&self.config);
         let _ = router;
-        let routed_router = LlmRouter::new(self.providers_config()).with_preference(
+        let routed_router = match LlmRouter::new(self.providers_config()).with_preference(
             profile.preferred_provider.as_deref(),
             profile.preferred_model.as_deref(),
-        )?;
+        ) {
+            Ok(r) => r,
+            Err(err) => {
+                let msg = err.to_string();
+                let _ = self.daemon_events_tx.send(DaemonEvent::ChatTokenV1 {
+                    message_id: user_msg.id.clone(),
+                    delta: String::new(),
+                    done: true,
+                });
+                return Ok(DirectChatDispatchOutcome {
+                    user_message: user_msg,
+                    assistant_message: None,
+                    queued_task: None,
+                    provider_setup_required: is_provider_setup_error(&msg),
+                    reply_error: Some(msg),
+                });
+            }
+        };
         let (primary, fallback) = routed_router.route(TaskType::Planning);
 
         let bot_paths = self.roster.runtime_paths_for_bot(&clean_bot);
@@ -1011,10 +1115,7 @@ impl OpenBotSupervisor {
             serde_json::json!({"bot_id":clean_bot,"phrase":"Thinking...","needs_attention":false}),
         );
 
-        let stream_msg_id = format!(
-            "dmstream-{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..12]
-        );
+        let stream_msg_id = user_msg.id.clone();
         let (delta_tx, mut delta_rx) = tokio::sync::mpsc::channel::<String>(64);
         let sup_stream = self.clone();
         let stream_bot = clean_bot.clone();
@@ -1072,12 +1173,24 @@ impl OpenBotSupervisor {
             serde_json::json!({"bot_id":clean_bot,"phrase":null,"needs_attention":false}),
         );
 
-        let completion = stream_res?;
         let _ = self.daemon_events_tx.send(DaemonEvent::ChatTokenV1 {
             message_id: stream_msg_id,
             delta: String::new(),
             done: true,
         });
+        let completion = match stream_res {
+            Ok(c) => c,
+            Err(err) => {
+                let msg = err.to_string();
+                return Ok(DirectChatDispatchOutcome {
+                    user_message: user_msg,
+                    assistant_message: None,
+                    queued_task: None,
+                    provider_setup_required: is_provider_setup_error(&msg),
+                    reply_error: Some(msg),
+                });
+            }
+        };
 
         let assistant_msg = self.post_direct_chat(
             &clean_bot,
@@ -1087,7 +1200,7 @@ impl OpenBotSupervisor {
             Some(&user_msg.id),
             thread_id,
             None,
-            None,
+            clean_client_id,
         )?;
         if let Some(b) = budget {
             let _ = self.daemon_events_tx.send(DaemonEvent::BudgetUpdated {
@@ -1098,8 +1211,10 @@ impl OpenBotSupervisor {
 
         Ok(DirectChatDispatchOutcome {
             user_message: user_msg,
-            assistant_message: assistant_msg,
+            assistant_message: Some(assistant_msg),
             queued_task: None,
+            reply_error: None,
+            provider_setup_required: false,
         })
     }
 
@@ -2373,5 +2488,130 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn direct_chat_uses_client_uuid_for_persistence_streaming_idempotency_and_reply_failure()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = dir.path().join("storage");
+        let bots = storage.join("bots");
+        let (tx, mut rx) = broadcast::channel(64);
+
+        let cfg = GmConfig {
+            storage_dir: storage,
+            openbot: gm_core::config::OpenBotConfig {
+                bots_dir: bots,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sup = OpenBotSupervisor::open(cfg, Arc::new(AuditLogger::in_memory()), tx).unwrap();
+        let backend = Arc::new(gm_llm::MockLlmBackend::new());
+        backend.queue_response("Streamed fixture reply");
+        let llm = Arc::new(HybridLlmClient::new(
+            backend,
+            Arc::new(gm_llm::BudgetManager::new(
+                gm_core::config::BudgetConfig::default(),
+            )),
+        ));
+        let router = LlmRouter::new(gm_core::config::ProvidersConfig::default());
+
+        let cid = "client-uuid-dm-1";
+        let outcome = sup
+            .dispatch_direct_chat(
+                "muse",
+                "Hello Muse",
+                None,
+                None,
+                Some(cid),
+                &llm,
+                &router,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(outcome.user_message.id, cid);
+        assert_eq!(outcome.user_message.request_id.as_deref(), Some(cid));
+        let reply = outcome.assistant_message.as_ref().expect("assistant reply");
+        assert_eq!(reply.content, "Streamed fixture reply");
+        assert_eq!(reply.reply_to_id.as_deref(), Some(cid));
+        assert!(outcome.reply_error.is_none());
+
+        // Collect ChatTokenV1 events and verify they all carry `cid`.
+        let mut saw_stream_done = false;
+        let mut collected = String::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let DaemonEvent::ChatTokenV1 {
+                message_id,
+                delta,
+                done,
+            } = ev
+            {
+                assert_eq!(message_id, cid);
+                collected.push_str(&delta);
+                if done {
+                    saw_stream_done = true;
+                }
+            }
+        }
+        assert!(saw_stream_done);
+        assert_eq!(collected, "Streamed fixture reply");
+
+        // Re-sending with the same UUID must return the existing turn without duplicating rows.
+        let retry_outcome = sup
+            .dispatch_direct_chat(
+                "muse",
+                "Hello Muse",
+                None,
+                None,
+                Some(cid),
+                &llm,
+                &router,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(retry_outcome.user_message.id, cid);
+        assert_eq!(
+            retry_outcome.assistant_message.as_ref().unwrap().id,
+            reply.id
+        );
+        assert_eq!(
+            sup.direct_chat()
+                .list_messages("muse", None, 20)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Post-persistence provider failure returns saved user message + structured reply_error.
+        let mut muse_prof = sup.roster().get_bot("muse").unwrap();
+        muse_prof.preferred_provider = Some("missing-provider-id".into());
+        sup.roster().upsert_bot(muse_prof).unwrap();
+        let fail_cid = "client-uuid-fail-1";
+        let fail_outcome = sup
+            .dispatch_direct_chat(
+                "muse",
+                "Need provider",
+                None,
+                None,
+                Some(fail_cid),
+                &llm,
+                &router,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(fail_outcome.user_message.id, fail_cid);
+        assert!(fail_outcome.assistant_message.is_none());
+        assert!(fail_outcome.reply_error.is_some());
+        assert!(fail_outcome.provider_setup_required);
     }
 }

@@ -24,11 +24,8 @@ impl RuntimeLease {
             options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         }
         let file = options.open(storage.join("runtime.lock"))?;
-        file.try_lock().map_err(|e| {
-            GmError::Config(format!(
-                "Another Grok Muse runtime owns this workspace: {e}"
-            ))
-        })?;
+        file.try_lock()
+            .map_err(|e| GmError::Config(format!("Another DT runtime owns this workspace: {e}")))?;
         Ok(Self { _file: file })
     }
 }

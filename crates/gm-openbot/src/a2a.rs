@@ -58,7 +58,7 @@ impl A2aCoordinator {
     pub fn agent_card(&self) -> AgentCard {
         let bots = self.roster.list_bots().into_iter().map(|b| b.id).collect();
         AgentCard {
-            name: "Grok-Muse OpenBot Platform".into(),
+            name: "DT OpenBot Platform".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             description:
                 "Local-first macOS Computer-Use & Multi-Agent Coworker Suite (AG-UI + A2A)".into(),

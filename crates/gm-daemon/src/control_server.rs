@@ -400,6 +400,8 @@ pub struct DaemonControlServer {
     audit_log: Arc<AuditLogger>,
     platform: Arc<IpcPlatformClient>,
     openbot: Option<gm_openbot::OpenBotSupervisor>,
+    components: Option<Arc<crate::components::ComponentManager>>,
+    voice_manager: gm_openbot::VoiceSessionManager,
 }
 
 impl DaemonControlServer {
@@ -415,6 +417,10 @@ impl DaemonControlServer {
         platform: Arc<IpcPlatformClient>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(256);
+        let components = crate::components::ComponentManager::open(&config.storage_dir)
+            .ok()
+            .map(Arc::new);
+        let voice_manager = gm_openbot::VoiceSessionManager::new(config.storage_dir.clone());
         let openbot = gm_openbot::OpenBotSupervisor::open(
             config.clone(),
             Arc::clone(&audit_log),
@@ -436,7 +442,17 @@ impl DaemonControlServer {
             audit_log,
             platform,
             openbot,
+            components,
+            voice_manager,
         }
+    }
+
+    pub fn components(&self) -> Option<Arc<crate::components::ComponentManager>> {
+        self.components.clone()
+    }
+
+    pub fn voice_manager(&self) -> gm_openbot::VoiceSessionManager {
+        self.voice_manager.clone()
     }
 
     pub fn with_config_path(mut self, path: Option<PathBuf>) -> Self {
@@ -510,12 +526,12 @@ impl DaemonControlServer {
         let path = self.shared_config.read().daemon_socket_path.clone();
         #[cfg(unix)]
         {
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
-            }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            let _lease = gm_core::ipc::try_lock_unix_socket(&path, "daemon.lock")?
+                .ok_or_else(|| GmError::Config("Another daemon owns this socket".into()))?;
+            gm_core::ipc::remove_stale_unix_socket(&path)?;
 
             let listener = UnixListener::bind(&path)?;
             {
@@ -627,6 +643,8 @@ impl DaemonControlServer {
             audit_log: Arc::clone(&self.audit_log),
             platform: Arc::clone(&self.platform),
             openbot: self.openbot.clone(),
+            components: self.components.clone(),
+            voice_manager: self.voice_manager.clone(),
         }
     }
 }
@@ -646,6 +664,8 @@ struct DaemonControlServerState {
     audit_log: Arc<AuditLogger>,
     platform: Arc<IpcPlatformClient>,
     openbot: Option<gm_openbot::OpenBotSupervisor>,
+    components: Option<Arc<crate::components::ComponentManager>>,
+    voice_manager: gm_openbot::VoiceSessionManager,
 }
 
 pub const LEGACY_CHAT_SYSTEM: &str = "You are Grok Muse, a helpful personal assistant. Use the supplied conversation for continuity. Explain clearly and do not claim you read files, searched sources or executed actions without tool results. The chat interface has no execution tools; the user can choose Run task for workspace or desktop actions.";
@@ -904,10 +924,31 @@ impl DaemonControlServerState {
                 } => {
                     let resolved = self.interactions.resolve_approval(&app_id, approved).await;
                     let resp = if resolved {
+                        if let Some(ref sup) = self.openbot {
+                            update_dm_card_status_for_sup(
+                                sup,
+                                &self.event_tx,
+                                &app_id,
+                                if approved { "approved" } else { "denied" },
+                                None,
+                            );
+                        }
                         DaemonResponse::Ack
                     } else {
+                        if let Some(ref sup) = self.openbot {
+                            update_dm_card_status_for_sup(
+                                sup,
+                                &self.event_tx,
+                                &app_id,
+                                "expired",
+                                None,
+                            );
+                        }
+                        let _ = self.event_tx.send(DaemonEvent::ApprovalExpired {
+                            request_id: app_id.clone(),
+                        });
                         DaemonResponse::Error(format!(
-                            "No pending approval found for request_id: {app_id}"
+                            "Approval request '{app_id}' expired or is no longer active"
                         ))
                     };
                     let res = IpcMessage {
@@ -1100,6 +1141,8 @@ impl DaemonControlServerState {
                             .roster()
                             .workspace_sandbox(&bot_id)?
                             .preview_shared_file(&path)?;
+                        let preview =
+                            gm_openbot::attachments::preview_attachment_bounded(&path, &bytes)?;
                         use base64::Engine as _;
                         let (text, encoded) = match std::str::from_utf8(&bytes).map(str::to_string)
                         {
@@ -1110,7 +1153,7 @@ impl DaemonControlServerState {
                             ),
                         };
                         Ok::<_, GmError>(
-                            serde_json::json!({"bot_id":bot_id,"path":path,"text":text,"bytes_base64":encoded}),
+                            serde_json::json!({"bot_id":bot_id,"path":path,"text":text,"bytes_base64":encoded,"preview":preview}),
                         )
                     })();
                     let payload = match result {
@@ -2194,6 +2237,7 @@ impl DaemonControlServerState {
                     content,
                     reply_to_id,
                     thread_id,
+                    client_msg_id,
                 } => {
                     let cfg_snap = self.shared_config.read().clone();
                     let result = if let Some(ref sup) = self.openbot {
@@ -2202,6 +2246,7 @@ impl DaemonControlServerState {
                             &content,
                             reply_to_id.as_deref(),
                             thread_id.as_deref(),
+                            client_msg_id.as_deref(),
                             &self.llm_client,
                             &current_router,
                             Some(&self.budget),
@@ -3401,8 +3446,13 @@ impl DaemonControlServerState {
                         }
                         "health" => {
                             let cfg_snap = self.shared_config.read().clone();
-                            let rep = crate::diagnostics::run_health_diagnostics(&cfg_snap);
-                            serde_json::to_value(rep).map_err(Into::into)
+                            crate::doctor::run_doctor(
+                                &cfg_snap,
+                                crate::doctor::DoctorMode::Check,
+                                None,
+                            )
+                            .await
+                            .and_then(|report| serde_json::to_value(report).map_err(Into::into))
                         }
                         "support_bundle" => {
                             let cfg_snap = self.shared_config.read().clone();
@@ -3674,6 +3724,143 @@ impl DaemonControlServerState {
                             self.interactions.record_teach_step(&raw_step)?;
                             Ok::<_, GmError>(serde_json::json!({ "ok": true }))
                         })(),
+                        "components_list" => {
+                            if let Some(ref mgr) = self.components {
+                                use gm_openbot::CompanionComponents;
+                                mgr.list().await
+                            } else {
+                                Err(GmError::Config(
+                                    "Component catalog manager is unavailable".into(),
+                                ))
+                            }
+                        }
+                        "components_install" => {
+                            if let Some(ref mgr) = self.components {
+                                let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let res = mgr.install(id).await?;
+                                let _ = self.event_tx.send(DaemonEvent::ActivityUpdated {
+                                    reason: format!("component_installed:{id}"),
+                                });
+                                serde_json::to_value(res).map_err(Into::into)
+                            } else {
+                                Err(GmError::Config(
+                                    "Component catalog manager is unavailable".into(),
+                                ))
+                            }
+                        }
+                        "components_verify" => {
+                            if let Some(ref mgr) = self.components {
+                                let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let res = mgr.verify(id).await?;
+                                serde_json::to_value(res).map_err(Into::into)
+                            } else {
+                                Err(GmError::Config(
+                                    "Component catalog manager is unavailable".into(),
+                                ))
+                            }
+                        }
+                        "voice_status" => Ok(self.voice_manager.status()),
+                        "voice_start" => {
+                            let bot_id = p.get("bot_id").and_then(|v| v.as_str()).unwrap_or("muse");
+                            let mode = p.get("mode").and_then(|v| v.as_str()).unwrap_or("voice");
+                            Ok(self.voice_manager.start(bot_id, mode))
+                        }
+                        "voice_consent" => {
+                            let granted =
+                                p.get("granted").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let bot_id = p.get("bot_id").and_then(|v| v.as_str());
+                            Ok(self.voice_manager.set_consent(granted, bot_id))
+                        }
+                        "voice_transcribe" => {
+                            let b64 = p
+                                .get("wav_base64")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .trim();
+                            use base64::Engine as _;
+                            let wav = base64::engine::general_purpose::STANDARD
+                                .decode(b64)
+                                .map_err(|e| GmError::Config(format!("Invalid wav_base64: {e}")))?;
+                            self.voice_manager.transcribe_wav(&wav).await
+                        }
+                        "voice_speak" => {
+                            let text = p.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                            self.voice_manager.speak(text).await
+                        }
+                        "voice_barge_in" => Ok(self.voice_manager.barge_in()),
+                        "voice_stop" => Ok(self.voice_manager.stop()),
+                        "marketplace_list" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            Ok::<_, GmError>(serde_json::json!({
+                                "catalog": sup.marketplace().builtin_catalog(),
+                                "installed": sup.marketplace().list_installed()?,
+                            }))
+                        })(),
+                        "marketplace_install" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let item = sup
+                                .marketplace()
+                                .builtin_catalog()
+                                .into_iter()
+                                .find(|e| e.id == id)
+                                .ok_or_else(|| {
+                                    GmError::Config(format!("Unknown marketplace item '{id}'"))
+                                })?;
+                            let confirmed_scopes: Vec<String> = if let Some(arr) =
+                                p.get("confirmed_scopes").and_then(|v| v.as_array())
+                            {
+                                arr.iter()
+                                    .filter_map(|s| s.as_str().map(ToString::to_string))
+                                    .collect()
+                            } else if p.get("confirm_scopes").and_then(|v| v.as_bool())
+                                == Some(true)
+                            {
+                                item.requested_scopes.clone()
+                            } else {
+                                Vec::new()
+                            };
+                            let installed =
+                                sup.marketplace().install_plugin(&item, &confirmed_scopes)?;
+                            Ok::<_, GmError>(serde_json::to_value(installed)?)
+                        })(),
+                        "marketplace_remove" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                            let removed = sup.marketplace().remove_plugin(id)?;
+                            Ok::<_, GmError>(serde_json::json!({ "id": id, "removed": removed }))
+                        })(),
+                        "billing_status" => (|| {
+                            let sup = self.openbot.as_ref().ok_or_else(|| {
+                                GmError::Config("Task runtime is unavailable".into())
+                            })?;
+                            let ws = p
+                                .get("workspace_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("default");
+                            Ok::<_, GmError>(serde_json::to_value(
+                                sup.billing().get_entitlements(ws)?,
+                            )?)
+                        })(),
+                        "connector_probe" => {
+                            if let Some(ref sup) = self.openbot {
+                                let id = p.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                let cfg_snap = self.shared_config.read().clone();
+                                let probe = sup
+                                    .connectors()
+                                    .probe_integration_capability(&cfg_snap, id)
+                                    .await;
+                                serde_json::to_value(probe).map_err(Into::into)
+                            } else {
+                                Err(GmError::Config("Task runtime is unavailable".into()))
+                            }
+                        }
                         other => Err(GmError::Config(format!(
                             "Unsupported ManageSystem op '{other}'"
                         ))),

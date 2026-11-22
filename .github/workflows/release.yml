@@ -3,8 +3,12 @@ on:
   workflow_dispatch:
     inputs:
       evidence_run_id:
-        description: Completed run containing publisher-signed native-release-evidence artifact for this exact commit
-        required: true
+        description: Completed run containing evidence-key-signed native-release-evidence artifact for this exact commit
+        required: false
+        type: string
+      package_run_id:
+        description: Completed packaging run for the exact artifacts certified by evidence_run_id
+        required: false
         type: string
 permissions:
   contents: read
@@ -13,7 +17,19 @@ concurrency:
   group: release-${{ github.sha }}
   cancel-in-progress: false
 jobs:
+  mode:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate release phase inputs
+        env:
+          EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
+          PACKAGE_RUN_ID: ${{ inputs.package_run_id }}
+        run: |
+          if [[ -z "$EVIDENCE_RUN_ID" && -z "$PACKAGE_RUN_ID" ]]; then exit 0; fi
+          [[ "$EVIDENCE_RUN_ID" =~ ^[0-9]+$ && "$PACKAGE_RUN_ID" =~ ^[0-9]+$ ]]
   evidence:
+    needs: mode
+    if: inputs.evidence_run_id != ''
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -24,18 +40,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           EVIDENCE_RUN_ID: ${{ inputs.evidence_run_id }}
-          GM_RELEASE_PUBLIC_KEY_HEX: ${{ vars.GM_RELEASE_PUBLIC_KEY_HEX }}
+          GM_EVIDENCE_PUBLIC_KEY_HEX: ${{ vars.GM_EVIDENCE_PUBLIC_KEY_HEX }}
         run: |
           [[ "$EVIDENCE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
-          gh run download "$EVIDENCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name native-release-evidence --dir evidence
-          python3 tools/verify-release-evidence.py --directory evidence --commit "$GITHUB_SHA" --public-key-hex "$GM_RELEASE_PUBLIC_KEY_HEX"
+          gh run download "$EVIDENCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name native-release-evidence --dir "${{ runner.temp }}/evidence"
+          python3 tools/verify-release-evidence.py --directory "${{ runner.temp }}/evidence" --commit "$GITHUB_SHA" --public-key-hex "$GM_EVIDENCE_PUBLIC_KEY_HEX"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: verified-native-evidence
-          path: evidence/
+          path: ${{ runner.temp }}/evidence/
           if-no-files-found: error
   package:
-    needs: evidence
+    needs: mode
+    if: inputs.package_run_id == ''
     environment: release
     strategy:
       fail-fast: false
@@ -50,9 +67,15 @@ jobs:
           - os: linux
             arch: x86_64
             runner: [self-hosted, Linux, X64, dt-release]
+          - os: linux
+            arch: aarch64
+            runner: [self-hosted, Linux, ARM64, dt-release]
           - os: windows
             arch: x86_64
             runner: [self-hosted, Windows, X64, dt-release]
+          - os: windows
+            arch: aarch64
+            runner: [self-hosted, Windows, ARM64, dt-release]
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
@@ -92,14 +115,14 @@ jobs:
           GM_WINDOWS_CERT_THUMBPRINT: ${{ vars.GM_WINDOWS_CERT_THUMBPRINT }}
         run: |
           VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
-          python3 tools/package-release.py --version "$VERSION" --output-dir target/release-candidate
+          python3 tools/package-release.py --version "$VERSION" --output-dir "${{ runner.temp }}/release-candidate"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: package-${{ matrix.os }}-${{ matrix.arch }}
-          path: grok-muse/target/release-candidate/
+          path: ${{ runner.temp }}/release-candidate/
           if-no-files-found: error
   sign:
-    needs: package
+    needs: evidence
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -109,19 +132,21 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: package-*
-          path: release-candidate
+          path: ${{ runner.temp }}/release-candidate
           merge-multiple: true
+          run-id: ${{ inputs.package_run_id }}
+          github-token: ${{ github.token }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: verified-native-evidence
-          path: release-candidate/evidence
-      - name: Sign packages, release manifest, and renewable update metadata
+          path: ${{ runner.temp }}/release-candidate/evidence
+      - name: Sign packages, release manifests (v1 + v2), and renewable update metadata
         env:
           GM_RELEASE_PUBLIC_KEY_HEX: ${{ vars.GM_RELEASE_PUBLIC_KEY_HEX }}
           GM_RELEASE_SIGNING_KEY_PEM: ${{ secrets.GM_RELEASE_SIGNING_KEY_PEM }}
-        run: python3 tools/sign-release.py --directory release-candidate
+        run: python3 tools/sign-release.py --directory "${{ runner.temp }}/release-candidate"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: signed-release-candidate
-          path: release-candidate/
+          path: ${{ runner.temp }}/release-candidate/
           if-no-files-found: error

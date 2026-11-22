@@ -5,5 +5,18 @@
     X-Content-Type-Options "nosniff"
     Referrer-Policy "no-referrer"
   }
-  reverse_proxy dt-server:7433
+  handle /api/v1/* {
+    reverse_proxy 127.0.0.1:7433
+  }
+  handle /app {
+    reverse_proxy 127.0.0.1:7433
+  }
+  handle /app/* {
+    reverse_proxy 127.0.0.1:7433
+  }
+  handle {
+    root * /srv/dt-web
+    try_files {path} /index.html
+    file_server
+  }
 }

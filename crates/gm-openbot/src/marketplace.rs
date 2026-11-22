@@ -75,7 +75,7 @@ impl MarketplaceStore {
                 "github-pr-helper",
                 "GitHub PR Reviewer",
                 "1.0.0",
-                "Grok Muse Catalog",
+                "DT Catalog",
                 "Review pull requests and summarize diffs via verified GitHub connector.",
                 vec![
                     "connectors.github.read".to_string(),
@@ -87,7 +87,7 @@ impl MarketplaceStore {
                 "calendar-brief",
                 "Calendar Morning Brief",
                 "1.0.0",
-                "Grok Muse Catalog",
+                "DT Catalog",
                 "Summarize today's meetings without executing external scripts.",
                 vec!["connectors.calendar.read".to_string()],
                 r#"{"kind":"skill_bundle","entrypoint":"morning-brief"}"#,

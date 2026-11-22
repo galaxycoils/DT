@@ -2,13 +2,16 @@
 //!
 //! Supported chords (`Cmd` on macOS / `Ctrl` on Linux & Windows):
 //! - `Cmd/Ctrl + K`: Command Palette
-//! - `Cmd/Ctrl + ,`: Settings Modal (5 panes)
+//! - `Cmd/Ctrl + ,`: Settings Modal
+//! - `Cmd/Ctrl + B`: Toggle Sidebar Collapse
+//! - `Cmd/Ctrl + Shift + F`: Expand Sidebar & Open Conversation Search
 //! - `Cmd/Ctrl + Shift + M`: Studio Modal (Templates, Skills, Routines, Sections)
 //! - `Cmd/Ctrl + /`: Keyboard Shortcuts Cheat-Sheet
 //! - `Cmd/Ctrl + Alt + B`: Toggle 340px `Bot Details` Drawer
 //! - `Cmd/Ctrl + F`: Toggle in-chat two-stage FTS5 search bar
-//! - `Cmd/Ctrl + D`: Toggle Dictation (`[Dictate]` badge)
-//! - `Cmd/Ctrl + 1..9`: Switch to Bot 1..9 in roster order
+//! - `Cmd/Ctrl + D`: Start/Stop Dictation session
+//! - `Cmd/Ctrl + 1..5`: Switch Workspace Section (Bots, Feed, Goals, Pages, Audit)
+//! - `Cmd/Ctrl + 6..9`: Switch to Bot 6..9 in roster order
 //! - `Escape`: 5-tier Escape dismissal priority stack
 
 use crate::ui::state::{ActiveModal, GrokUiState, WorkspaceSection};
@@ -17,12 +20,16 @@ use eframe::egui::{self, Key, Modifiers};
 pub struct HotkeyOutcome {
     pub switch_to_bot_index: Option<usize>,
     pub escape_dismissed: bool,
+    pub sidebar_collapsed_toggled: Option<bool>,
+    pub toggle_dictation: bool,
 }
 
 pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) -> HotkeyOutcome {
     let mut outcome = HotkeyOutcome {
         switch_to_bot_index: None,
         escape_dismissed: false,
+        sidebar_collapsed_toggled: None,
+        toggle_dictation: false,
     };
 
     // 5-tier Escape dismissal stack
@@ -34,11 +41,17 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::N)) {
         ui_state.active_modal = Some(ActiveModal::CreateBot);
     }
+    // Cmd/Ctrl + B -> Toggle sidebar collapsed state (`Some(false)` == collapsed)
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::B)) {
-        ui_state.sidebar_manual_override = Some(!ui_state.sidebar_manual_override.unwrap_or(false));
+        let was_collapsed = ui_state.sidebar_manual_override == Some(false);
+        let now_collapsed = !was_collapsed;
+        ui_state.sidebar_manual_override = Some(!now_collapsed);
+        outcome.sidebar_collapsed_toggled = Some(now_collapsed);
     }
+    // Cmd/Ctrl + Shift + F -> Expand sidebar and open conversation search
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F)) {
         ui_state.sidebar_manual_override = Some(true);
+        ui_state.sidebar_search_open = true;
     }
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::OpenBracket)) {
         ui_state.nav_request = -1;
@@ -72,12 +85,12 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
         return outcome;
     }
 
-    // Cmd/Ctrl + Shift + M -> Studio Modal
+    // Cmd/Ctrl + Shift + M -> Studio Modal (Templates, Skills, Routines, Sections)
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::M)) {
-        ui_state.active_modal = if ui_state.active_modal == Some(ActiveModal::ConnectApps) {
+        ui_state.active_modal = if ui_state.active_modal == Some(ActiveModal::Studio) {
             None
         } else {
-            Some(ActiveModal::ConnectApps)
+            Some(ActiveModal::Studio)
         };
         return outcome;
     }
@@ -104,13 +117,13 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
         return outcome;
     }
 
-    // Cmd/Ctrl + D -> Toggle Dictation
+    // Cmd/Ctrl + D -> Toggle real Dictation session via daemon voice controller
     if ctx.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::D)) {
-        ui_state.dictation_active = !ui_state.dictation_active;
+        outcome.toggle_dictation = true;
         return outcome;
     }
 
-    // Cmd/Ctrl + 1..9 -> Switch to Bot N
+    // Cmd/Ctrl + 1..5 -> Workspace Sections; Cmd/Ctrl + 6..9 -> Switch to Bot N
     let digit_keys = [
         Key::Num1,
         Key::Num2,
@@ -136,4 +149,63 @@ pub fn handle_global_hotkeys(ctx: &egui::Context, ui_state: &mut GrokUiState) ->
     }
 
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run_hotkey(modifiers: Modifiers, key: Key, state: &mut GrokUiState) -> HotkeyOutcome {
+        let ctx = egui::Context::default();
+        let mut raw = egui::RawInput {
+            modifiers,
+            ..Default::default()
+        };
+        raw.events.push(egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers,
+        });
+        let mut outcome = HotkeyOutcome {
+            switch_to_bot_index: None,
+            escape_dismissed: false,
+            sidebar_collapsed_toggled: None,
+            toggle_dictation: false,
+        };
+        let _ = ctx.run(raw, |ctx| {
+            outcome = handle_global_hotkeys(ctx, state);
+        });
+        outcome
+    }
+
+    #[test]
+    fn hotkeys_open_studio_toggle_sidebar_open_search_and_trigger_dictation() {
+        let mut st = GrokUiState::default();
+
+        // Cmd+Shift+M opens Studio (not ConnectApps).
+        run_hotkey(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::M, &mut st);
+        assert_eq!(st.active_modal, Some(ActiveModal::Studio));
+
+        // Cmd+B collapses expanded sidebar on first press and expands on second press.
+        let out1 = run_hotkey(Modifiers::COMMAND, Key::B, &mut st);
+        assert_eq!(st.sidebar_manual_override, Some(false));
+        assert_eq!(out1.sidebar_collapsed_toggled, Some(true));
+
+        let out2 = run_hotkey(Modifiers::COMMAND, Key::B, &mut st);
+        assert_eq!(st.sidebar_manual_override, Some(true));
+        assert_eq!(out2.sidebar_collapsed_toggled, Some(false));
+
+        // Cmd+Shift+F expands sidebar AND opens sidebar conversation search.
+        st.sidebar_manual_override = Some(false);
+        st.sidebar_search_open = false;
+        run_hotkey(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::F, &mut st);
+        assert_eq!(st.sidebar_manual_override, Some(true));
+        assert!(st.sidebar_search_open);
+
+        // Cmd+D requests real dictation toggle instead of silently flipping a dead bool.
+        let out_d = run_hotkey(Modifiers::COMMAND, Key::D, &mut st);
+        assert!(out_d.toggle_dictation);
+    }
 }

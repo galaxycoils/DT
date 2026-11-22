@@ -14,17 +14,52 @@ on:
         description: Frozen 40-char commit SHA for the release
         required: true
         type: string
+      promote_first:
+        description: Initial signed promotion of a new release version
+        required: false
+        type: boolean
+        default: false
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: dt-update-metadata
+  cancel-in-progress: false
 jobs:
   renew:
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - uses: actions/checkout@v4
-      - name: Validate inputs and emit signed metadata candidate
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Verify frozen release and promote or renew metadata
         env:
+          GH_TOKEN: ${{ github.token }}
           GM_RELEASE_PUBLIC_KEY_HEX: ${{ vars.GM_RELEASE_PUBLIC_KEY_HEX }}
           GM_RELEASE_SIGNING_KEY_PEM: ${{ secrets.GM_RELEASE_SIGNING_KEY_PEM }}
+          VERSION: ${{ inputs.version }}
+          SEQUENCE: ${{ inputs.sequence }}
+          COMMIT: ${{ inputs.commit }}
+          PROMOTE_FIRST: ${{ inputs.promote_first }}
         run: |
-          echo "Download immutable release assets, verify SHA-256, then run tools/make-release-manifest.py --sequence ${{ inputs.sequence }} --commit ${{ inputs.commit }} and push to protected update-metadata branch."
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$SEQUENCE" =~ ^[1-9][0-9]*$ && "$COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags origin "refs/tags/v$VERSION"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$COMMIT"
+          git fetch --no-tags origin refs/heads/update-metadata
+          TEMP_ROOT=$(mktemp -d)
+          git worktree add --detach "$TEMP_ROOT/metadata" FETCH_HEAD
+          gh release download "v$VERSION" --repo "$GITHUB_REPOSITORY" --dir "$TEMP_ROOT/release" \
+            --pattern "dt-release*.json" --pattern "dt-release*.sig" \
+            --pattern "DT-$VERSION-macos-*.dmg" --pattern "DT-$VERSION-windows-*-setup.exe" \
+            --pattern "dt_${VERSION}_*.deb"
+          EXTRA_ARGS=()
+          if [[ "$PROMOTE_FIRST" == "true" ]]; then
+            EXTRA_ARGS+=(--promote-first)
+          fi
+          python3 tools/renew-update-metadata.py --repo "$GITHUB_REPOSITORY" --version "$VERSION" \
+            --sequence "$SEQUENCE" --commit "$COMMIT" --release-dir "$TEMP_ROOT/release" \
+            --metadata-dir "$TEMP_ROOT/metadata" "${EXTRA_ARGS[@]}"
+          git -C "$TEMP_ROOT/metadata" add dt-update-metadata*.json dt-update-metadata*.sig
+          git -C "$TEMP_ROOT/metadata" -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "Update DT v$VERSION update metadata to sequence $SEQUENCE"
+          git -C "$TEMP_ROOT/metadata" push origin HEAD:refs/heads/update-metadata

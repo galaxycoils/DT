@@ -214,6 +214,11 @@ mod tests {
             })
             .collect();
 
+        let conn_banner = crate::ui::chat::ConnectionBanner {
+            label: "Ready",
+            detail: "",
+            connected: true,
+        };
         // Settle startup layout and scrollbar animations before measuring idle.
         for _ in 0..30 {
             let _ = ctx.run(
@@ -241,11 +246,10 @@ mod tests {
                             &mut search_query,
                             &[],
                             &mut draft,
-                            true,
+                            &conn_banner,
                             false,
-                            "Idle",
+                            None,
                             |_| {},
-                            |_, _| {},
                         );
                     });
                 },
@@ -281,11 +285,10 @@ mod tests {
                             &mut search_query,
                             &[],
                             &mut draft,
-                            true,
+                            &conn_banner,
                             false,
-                            "Idle",
+                            None,
                             |_| {},
-                            |_, _| {},
                         );
                     });
                 },
@@ -337,5 +340,126 @@ mod tests {
             format!("```\n{}\n```", tables[0].to_tsv())
         );
         assert_eq!(BotAvatarShape::from_name("spark"), BotAvatarShape::Spark);
+    }
+
+    #[test]
+    fn clean_ui_typography_layouts_long_titles_and_ime_pass() {
+        for (theme, width) in [
+            ("light", 680.0_f32),
+            ("light", 1220.0_f32),
+            ("dark", 680.0_f32),
+            ("dark", 1220.0_f32),
+        ] {
+            let ctx = egui::Context::default();
+            crate::ui::theme::install_system_font(&ctx);
+            let palette = GrokPalette::resolve(theme, theme == "dark", "bot_color", "#3B82F6");
+            palette.apply_to_context(&ctx);
+            let style = ctx.style();
+            assert_eq!(style.text_styles[&egui::TextStyle::Body].size, 15.0);
+            assert_eq!(style.text_styles[&egui::TextStyle::Button].size, 14.0);
+            assert_eq!(style.text_styles[&egui::TextStyle::Small].size, 13.0);
+            assert_eq!(style.text_styles[&egui::TextStyle::Heading].size, 22.0);
+            assert_eq!(crate::ui::tokens::TRANSCRIPT_MAX, 780.0);
+
+            let mut ui_state = GrokUiState {
+                details_drawer_open: true,
+                ..Default::default()
+            };
+            let bots = vec![serde_json::json!({
+                "id": "long-bot",
+                "display_name": "Extremely Long Specialist Bot Conversation Title For Header Wrapping Check",
+                "role_title": "Researcher & Architect",
+                "color": "#3B82F6",
+            })];
+            let mut active_bot = "long-bot".to_string();
+            let mut textures = BoundedTextureCache::new();
+            let mut layout_cache = MarkdownLayoutCache::default();
+            let mut search_query = String::new();
+            let mut draft = "日本語->".to_string();
+            let rows = vec![TranscriptRow {
+                id: "m1".into(),
+                seq: 1,
+                author: "You".into(),
+                role: "user".into(),
+                content: "Check width & typography".into(),
+                created_at: "2026-11-18T12:00:00Z".into(),
+                reply_to_id: None,
+                request_id: None,
+                reactions: Vec::new(),
+                card: None,
+            }];
+            let conn_banner = crate::ui::chat::ConnectionBanner {
+                label: "Disconnected",
+                detail: "Daemon not reachable",
+                connected: false,
+            };
+            let failure = crate::ui::chat::ComposerFailure {
+                headline: "Message saved, reply failed",
+                detail: "Missing credentials",
+                retry_client_id: Some("uuid-1"),
+                provider_setup: true,
+            };
+            let mut center_width = 0.0_f32;
+            let _ = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 800.0),
+                    )),
+                    events: vec![egui::Event::Ime(egui::ImeEvent::Preedit("か".into()))],
+                    ..Default::default()
+                },
+                |ctx| {
+                    crate::ui::details_drawer::draw_bot_details_drawer(
+                        ctx,
+                        &mut ui_state,
+                        &palette,
+                        &mut textures,
+                        &bots,
+                        &active_bot,
+                        &mut "SOUL.md".to_string(),
+                        &mut String::new(),
+                        &None,
+                        "",
+                        &mut String::new(),
+                        &None,
+                        &mut String::new(),
+                        &None,
+                        "",
+                        &serde_json::json!({}),
+                        &None,
+                        |_| {},
+                    );
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        center_width = ui.available_width();
+                        draw_chat_canvas(
+                            ui,
+                            ctx,
+                            &mut ui_state,
+                            &palette,
+                            &mut textures,
+                            &mut layout_cache,
+                            &bots,
+                            &mut active_bot,
+                            "general",
+                            &rows,
+                            "",
+                            &mut search_query,
+                            &[],
+                            &mut draft,
+                            &conn_banner,
+                            false,
+                            Some(&failure),
+                            |_| {},
+                        );
+                    });
+                },
+            );
+            assert!(
+                center_width >= 320.0,
+                "Center chat width {center_width} dropped below 320pt at viewport {width}"
+            );
+            assert!(ui_state.ime_composing);
+        }
     }
 }

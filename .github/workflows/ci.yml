@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest, windows-latest]
+        os: [macos-latest, ubuntu-24.04, ubuntu-24.04-arm, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout DT
@@ -43,21 +43,29 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev clang xvfb gcc-mingw-w64-x86-64 dpkg-dev
+          PKGS="pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libpipewire-0.3-dev libspa-0.2-dev clang xvfb dpkg-dev"
+          if [[ "${{ matrix.os }}" == "ubuntu-24.04" ]]; then
+            PKGS="$PKGS gcc-mingw-w64-x86-64"
+          fi
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y $PKGS
+
+      - name: Enable ARMv8.2 FP16 target feature for gemm-f16 on Linux ARM64
+        if: matrix.os == 'ubuntu-24.04-arm'
+        run: echo "RUSTFLAGS=-C target-feature=+fp16" >> "$GITHUB_ENV"
 
       - name: Check formatting
         working-directory: grok-muse
         run: cargo fmt --all -- --check
 
       - name: Install Node for companion, web, and mobile verification
-        if: runner.os == 'Linux'
+        if: startsWith(matrix.os, 'ubuntu-')
         uses: actions/setup-node@v4
         with:
           node-version: '22'
 
       - name: Verify generated UI tokens, companion bundle, React web, and Expo mobile
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: grok-muse
         run: |
           python3 tools/generate-ui-tokens.py
@@ -71,7 +79,11 @@ jobs:
           npm run build --prefix clients/web
           npm test --prefix clients/web
           npm ci --prefix clients/mobile
+          npm run typecheck --prefix clients/mobile
           npm test --prefix clients/mobile
+          npm run export:ios --prefix clients/mobile
+          npm run export:android --prefix clients/mobile
+          rm -rf clients/mobile/dist
 
       - name: Verify release tools, coverage inventory, and budget ledger (Linux)
         if: runner.os == 'Linux'
@@ -92,7 +104,7 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Check Windows target platform foundations
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: grok-muse
         run: |
           rustup target add x86_64-pc-windows-gnu
@@ -109,17 +121,17 @@ jobs:
         run: cargo nextest run --locked --workspace
 
       - name: Verify workspace guest protocol
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: grok-muse
         run: python3 tools/workspace-guest/test_agent.py
 
       - name: Verify real X11 capture and input
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: grok-muse
         run: tools/test-native-x11.sh
 
       - name: Verify companion in a real browser with isolated daemon storage
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-24.04'
         working-directory: grok-muse
         env:
           CHROME_BIN: /usr/bin/google-chrome
@@ -139,30 +151,35 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: grok-muse
         run: |
-          cargo build --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+          export VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          export ARCH=$(python3 -c 'import runpy; print(runpy.run_path("tools/package-release.py")["native_target"]()[1])')
+          export DEB_NAME=$(python3 -c "import os, runpy; print(runpy.run_path('tools/package-release.py')['archive_name'](os.environ['VERSION'], 'linux', os.environ['ARCH']))")
+          cargo build --release --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
           mkdir -p target/dist
-          bash tools/installers/linux/build-deb.sh 1.0.0 target/debug target/dist/dt_1.0.0_amd64.deb
-          dpkg-deb -I target/dist/dt_1.0.0_amd64.deb
+          bash tools/installers/linux/build-deb.sh "$VERSION" target/release "target/dist/$DEB_NAME" "$ARCH"
+          dpkg-deb -I "target/dist/$DEB_NAME"
           python3 -c '
-          import hashlib, json, pathlib, runpy, subprocess
+          import hashlib, json, os, pathlib, runpy, subprocess
           m = runpy.run_path("tools/package-release.py")
           out = pathlib.Path("target/dist")
-          name = "dt_1.0.0_amd64.deb"
+          version = os.environ["VERSION"]
+          arch = os.environ["ARCH"]
+          name = os.environ["DEB_NAME"]
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
           digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
           (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
-          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version="1.0.0", os="linux", architecture="x86_64", sha256=digest), sort_keys=True) + "\n")
-          m["write_sbom"](out, name, "1.0.0", commit, "linux", "x86_64")
+          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version=version, os="linux", architecture=arch, sha256=digest), sort_keys=True) + "\n")
+          m["write_sbom"](out, name, version, commit, "linux", arch)
           '
 
       - name: Upload Ubuntu .deb installer artifact
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: installer-linux-x86_64
-          path: grok-muse/target/dist/dt_1.0.0_amd64.deb*
+          name: installer-${{ matrix.os }}
+          path: grok-muse/target/dist/dt_*.deb*
 
-      - name: Verify Windows NSIS installer pipeline (Windows only)
+      - name: Verify Windows NSIS installer pipeline (Windows x64 & ARM64)
         if: runner.os == 'Windows'
         working-directory: grok-muse
         shell: bash
@@ -170,16 +187,16 @@ jobs:
           if ! command -v makensis >/dev/null 2>&1 && [[ ! -f "/c/Program Files (x86)/NSIS/makensis.exe" ]] && [[ ! -f "/c/Program Files/NSIS/makensis.exe" ]]; then
             choco install nsis -y --no-progress
           fi
-          cargo build --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+          rustup target add aarch64-pc-windows-msvc
+          cargo build --release --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
+          cargo build --release --locked --target aarch64-pc-windows-msvc -p gm-daemon -p gm-cu-helper -p gm-ui --bins
           python3 -c '
-          import hashlib, json, pathlib, runpy, shutil, subprocess
+          import hashlib, json, pathlib, runpy, shutil, subprocess, tomllib
           m = runpy.run_path("tools/package-release.py")
           root = pathlib.Path(".").resolve()
-          bin_dir = (root / "target" / "debug").resolve()
+          version = tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"]
           out = (root / "target" / "dist").resolve()
           out.mkdir(parents=True, exist_ok=True)
-          name = "DT-1.0.0-windows-x86_64-setup.exe"
-          exe = out / name
           candidates = [
               shutil.which("makensis"),
               shutil.which("makensis.exe"),
@@ -188,62 +205,123 @@ jobs:
               "C:/ProgramData/chocolatey/bin/makensis.exe",
           ]
           makensis = next(c for c in candidates if c and pathlib.Path(c).exists())
-          subprocess.run([
-              makensis,
-              "/DVERSION=1.0.0",
-              f"/DBIN_DIR={bin_dir}",
-              f"/DSRC_ROOT={root}",
-              f"/DOUT_FILE={exe}",
-              str(root / "tools/installers/windows/dt-installer.nsi"),
-          ], check=True)
           commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-          digest = hashlib.sha256(exe.read_bytes()).hexdigest()
-          (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
-          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version="1.0.0", os="windows", architecture="x86_64", sha256=digest), sort_keys=True) + "\n")
-          m["write_sbom"](out, name, "1.0.0", commit, "windows", "x86_64")
+          for arch, bin_dir in [
+              ("x86_64", (root / "target" / "release").resolve()),
+              ("aarch64", (root / "target" / "aarch64-pc-windows-msvc" / "release").resolve()),
+          ]:
+              name = m["archive_name"](version, "windows", arch)
+              exe = out / name
+              for b in m["BINARIES"]:
+                  m["verify_binary_architecture"](bin_dir / f"{b}.exe", "windows", arch)
+              subprocess.run([
+                  makensis,
+                  f"/DVERSION={version}",
+                  f"/DBIN_DIR={bin_dir}",
+                  f"/DSRC_ROOT={root}",
+                  f"/DOUT_FILE={exe}",
+                  str(root / "tools/installers/windows/dt-installer.nsi"),
+              ], check=True)
+              digest = hashlib.sha256(exe.read_bytes()).hexdigest()
+              (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+              (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version=version, os="windows", architecture=arch, sha256=digest), sort_keys=True) + "\n")
+              m["write_sbom"](out, name, version, commit, "windows", arch)
           '
 
-      - name: Upload Windows NSIS installer artifact
+      - name: Upload Windows NSIS installer artifacts
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: installer-windows-x86_64
-          path: grok-muse/target/dist/DT-1.0.0-windows-x86_64-setup.exe*
+          name: installer-windows
+          path: grok-muse/target/dist/DT-*-windows-*-setup.exe*
 
       - name: Verify release DMG pipeline (macOS only)
         if: runner.os == 'macOS'
         working-directory: grok-muse
+        shell: bash
         run: |
-          cargo run --locked -p xtask -- verify-dmg
-          (cd target/dist && shasum -a 256 -c Grok-Muse.dmg.sha256)
-          cp target/dist/Grok-Muse.dmg target/dist/DT-1.0.0-macos-aarch64.dmg
-          python3 -c '
-          import hashlib, json, pathlib, runpy, subprocess
+          export VERSION=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml","rb"))["workspace"]["package"]["version"])')
+          export COMMIT=$(git rev-parse HEAD)
+          for ARCH in aarch64 x86_64; do
+            export ARCH
+            rustup target add "${ARCH}-apple-darwin"
+            DMG="target/dist/DT-${VERSION}-macos-${ARCH}.dmg"
+            cargo run --locked -p xtask -- dmg --release --target "${ARCH}-apple-darwin" --identity - --output "$DMG"
+            cargo run --locked -p xtask -- verify-dmg --dmg-path "$DMG"
+            (cd target/dist && shasum -a 256 -c "$(basename "$DMG").sha256")
+            python3 -c '
+          import hashlib, json, os, pathlib, runpy
           m = runpy.run_path("tools/package-release.py")
           out = pathlib.Path("target/dist")
-          name = "DT-1.0.0-macos-aarch64.dmg"
-          commit = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          version = os.environ["VERSION"]
+          arch = os.environ["ARCH"]
+          commit = os.environ["COMMIT"]
+          name = f"DT-{version}-macos-{arch}.dmg"
           digest = hashlib.sha256((out / name).read_bytes()).hexdigest()
-          (out / f"{name}.sha256").write_text(f"{digest}  {name}\n")
-          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version="1.0.0", os="macos", architecture="aarch64", sha256=digest), sort_keys=True) + "\n")
-          m["write_sbom"](out, name, "1.0.0", commit, "macos", "aarch64")
+          (out / f"{name}.build.json").write_text(json.dumps(dict(product="DT", commit=commit, version=version, os="macos", architecture=arch, sha256=digest), sort_keys=True) + "\n")
+          m["write_sbom"](out, name, version, commit, "macos", arch)
           '
+          done
 
-      - name: Upload macOS DMG installer artifact
+      - name: Upload macOS DMG installer artifacts
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: installer-macos-aarch64
-          path: grok-muse/target/dist/DT-1.0.0-macos-aarch64.dmg*
+          name: installer-macos
+          path: grok-muse/target/dist/DT-*-macos-*.dmg*
+          if-no-files-found: error
 
-      - name: Verify release-profile Apple Silicon preview
-        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/')
-        working-directory: grok-muse
+  postgres-integration:
+    name: postgres-integration
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dt
+          POSTGRES_PASSWORD: dt
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dt -d postgres"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CARGO_TERM_COLOR: always
+      DT_TEST_DATABASE_URL: postgres://dt:dt@localhost:5432/postgres
+      DT_REQUIRE_POSTGRES_TESTS: "1"
+    steps:
+      - name: Checkout DT
+        uses: actions/checkout@v4
+        with:
+          path: grok-muse
+
+      - name: Checkout Darius
+        uses: actions/checkout@v4
+        with:
+          repository: galaxycoils/darius
+          ref: f47a4ce980abecb751c9f5c79e1c424a20100433
+          path: Darius
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.1
+
+      - name: Install Linux system packages
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y \
+            pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libpipewire-0.3-dev libspa-0.2-dev clang
+
+      - name: Run PostgreSQL integration tests
         shell: bash
         run: |
-          test "$(uname -m)" = arm64
-          VERSION="${GITHUB_REF_NAME#v}"
-          DMG="target/dist/DT-${VERSION}-macos-aarch64-adhoc.dmg"
-          cargo run --locked -p xtask -- dmg --release --identity - --output "$DMG"
-          cargo run --locked -p xtask -- verify-dmg --dmg-path "$DMG"
-          (cd target/dist && shasum -a 256 -c "$(basename "$DMG").sha256")
+          set -euo pipefail
+          cargo test --locked --manifest-path grok-muse/Cargo.toml -p gm-openbot --test postgres_hosted -- --nocapture --test-threads=1 2>&1 | tee pg.log
+          ran=$(grep -c '^POSTGRES_TEST_RAN' pg.log || true)
+          echo "postgres tests ran: $ran"
+          test "$ran" -ge 7
+

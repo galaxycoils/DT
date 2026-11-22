@@ -2,9 +2,26 @@
 set -euo pipefail
 umask 022
 
-VERSION="${1:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB}"
-BIN_DIR="${2:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB}"
-OUTPUT_DEB="${3:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB}"
+VERSION="${1:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB [ARCH]}"
+BIN_DIR="${2:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB [ARCH]}"
+OUTPUT_DEB="${3:?usage: build-deb.sh VERSION BIN_DIR OUTPUT_DEB [ARCH]}"
+ARCH="${4:-}"
+
+if [[ -z "$ARCH" ]]; then
+  case "$OUTPUT_DEB" in
+    *_arm64.deb|*aarch64*) ARCH="arm64" ;;
+    *) ARCH="amd64" ;;
+  esac
+fi
+
+case "$ARCH" in
+  amd64|x86_64) DEB_ARCH="amd64"; ELF_PATTERN="x86-64" ;;
+  arm64|aarch64) DEB_ARCH="arm64"; ELF_PATTERN="ARM aarch64" ;;
+  *)
+    echo "Unsupported Debian architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -12,18 +29,32 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-PKG_ROOT="$WORK_DIR/dt_${VERSION}_amd64"
+PKG_ROOT="$WORK_DIR/dt_${VERSION}_${DEB_ARCH}"
 mkdir -p "$PKG_ROOT/DEBIAN" \
          "$PKG_ROOT/usr/bin" \
          "$PKG_ROOT/usr/share/applications" \
          "$PKG_ROOT/usr/share/doc/dt" \
          "$PKG_ROOT/usr/lib/systemd/user"
+if [[ "${DT_SKIP_WEB_BUILD:-0}" != "1" ]]; then
+  npm ci --prefix "$REPO_ROOT/clients/web"
+  npm run build --prefix "$REPO_ROOT/clients/web"
+fi
+if [[ -f "$REPO_ROOT/clients/web/dist/index.html" ]]; then
+  install -d "$PKG_ROOT/usr/share/dt/web"
+  cp -r "$REPO_ROOT/clients/web/dist/." "$PKG_ROOT/usr/share/dt/web/"
+fi
 find "$PKG_ROOT" -type d -exec chmod 0755 {} +
 
 for bin in dt gm dt-doctor gm-daemon gm-cu-helper gm-ui; do
   if [[ ! -f "$BIN_DIR/$bin" ]]; then
     echo "Missing required binary: $BIN_DIR/$bin" >&2
     exit 1
+  fi
+  if command -v file >/dev/null 2>&1; then
+    if ! file "$BIN_DIR/$bin" | grep -q "$ELF_PATTERN"; then
+      echo "Binary architecture mismatch for $bin: expected $ELF_PATTERN, got $(file "$BIN_DIR/$bin")" >&2
+      exit 1
+    fi
   fi
   install -m 0755 "$BIN_DIR/$bin" "$PKG_ROOT/usr/bin/$bin"
 done
@@ -37,7 +68,6 @@ cat > "$PKG_ROOT/usr/lib/systemd/user/gm-cu-helper.service" <<'EOF'
 [Unit]
 Description=DT desktop helper
 PartOf=graphical-session.target
-After=graphical-session.target
 
 [Service]
 Type=simple
@@ -54,7 +84,7 @@ cat > "$PKG_ROOT/usr/lib/systemd/user/gm-daemon.service" <<'EOF'
 [Unit]
 Description=DT daemon
 PartOf=graphical-session.target
-After=graphical-session.target gm-cu-helper.service
+After=gm-cu-helper.service
 
 [Service]
 Type=simple
@@ -72,8 +102,8 @@ Package: dt
 Version: ${VERSION}
 Section: utils
 Priority: optional
-Architecture: amd64
-Maintainer: DT Contributors <support@galaxycoils.invalid>
+Architecture: ${DEB_ARCH}
+Maintainer: DT Contributors <https://github.com/galaxycoils/DT/issues>
 Depends: libc6 (>= 2.38), libssl3, libsqlite3-0, libxkbcommon0, libxcb-render0, libxcb-shape0, libxcb-xfixes0, libpipewire-0.3-0, libatspi2.0-0, libsecret-1-0, xdg-desktop-portal
 Description: DT Hybrid Agent for Ubuntu 24.04 Desktop (X11 and Wayland)
  Fast computer-use, local VLM & voice runtimes, multi-agent coworkers, and
@@ -92,4 +122,4 @@ chmod 0755 "$PKG_ROOT/DEBIAN/postinst"
 
 mkdir -p "$(dirname "$OUTPUT_DEB")"
 dpkg-deb --build --root-owner-group "$PKG_ROOT" "$OUTPUT_DEB"
-echo "Built Ubuntu package: $OUTPUT_DEB"
+echo "Built Ubuntu package (${DEB_ARCH}): $OUTPUT_DEB"

@@ -7,6 +7,59 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[cfg(unix)]
+pub fn try_lock_unix_socket(
+    path: &std::path::Path,
+    lock_extension: &str,
+) -> Result<Option<std::fs::File>> {
+    use std::fs::{OpenOptions, TryLockError};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let lease = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path.with_extension(lock_extension))?;
+    let metadata = lease.metadata()?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(GmError::SafetyViolation("Unsafe IPC lease file".into()));
+    }
+    match lease.try_lock() {
+        Ok(()) => Ok(Some(lease)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+/// Call while holding the socket's lease.
+#[cfg(unix)]
+pub fn remove_stale_unix_socket(path: &std::path::Path) -> Result<bool> {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != unsafe { libc::geteuid() } {
+        return Err(GmError::SafetyViolation(
+            "Unsafe existing IPC socket".into(),
+        ));
+    }
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == ErrorKind::ConnectionRefused => {
+            std::fs::remove_file(path)?;
+            Ok(true)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcMessage<T> {
     pub id: u64,
@@ -278,6 +331,8 @@ pub enum DaemonRequest {
         reply_to_id: Option<String>,
         #[serde(default)]
         thread_id: Option<String>,
+        #[serde(default)]
+        client_msg_id: Option<String>,
     },
     SearchMessages {
         query: String,
@@ -1130,6 +1185,7 @@ mod tests {
                 content: "Hello Grok Bot".into(),
                 reply_to_id: Some("dm-1".into()),
                 thread_id: Some("thr-1".into()),
+                client_msg_id: Some("client-uuid-1".into()),
             },
             DaemonRequest::SearchMessages {
                 query: "invoice".into(),

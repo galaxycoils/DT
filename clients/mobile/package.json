@@ -1,11 +1,15 @@
 {
   "name": "@dt/mobile",
-  "version": "1.0.0",
+  "version": "1.0.4",
   "license": "Apache-2.0",
   "private": true,
+  "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
-    "test": "node --test tests/mobile-contract.test.mjs"
+    "export:ios": "expo export --platform ios --output-dir dist/ios",
+    "export:android": "expo export --platform android --output-dir dist/android",
+    "test": "node --test tests/mobile-contract.test.mjs",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "expo": "~58.0.26",
@@ -15,5 +19,12 @@
     "react-dom": "19.3.0",
     "react-native": "0.88.1",
     "zod": "4.6.6"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "minimatch": "^11.0.1"
   }
 }

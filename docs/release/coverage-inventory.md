@@ -1,4 +1,4 @@
-# DT v1.0.0 Release Coverage Inventory
+# DT v1.0.4 Release Coverage Inventory
 
 This inventory maps every advertised feature, CLI entry point, API route group, settings control, provider, local runtime, workflow, and shipped skill/plugin to its supported surfaces, dependencies, expected outcomes, observable assertions, and verification test IDs. The machine-readable contract lives in [coverage-inventory.json](coverage-inventory.json) and is enforced by [verify-release-evidence.py](../../tools/verify-release-evidence.py).
 
@@ -6,10 +6,12 @@ This inventory maps every advertised feature, CLI entry point, API route group, 
 
 | Platform | Asset Name | Coverage | Certification Status |
 |---|---|---|---|
-| Apple Silicon | `DT-1.0.0-macos-aarch64.dmg` (contains `Install DT.pkg`) | macOS 14+ | Pending Developer ID signing, notarization, and 5-target native evidence |
-| Intel Mac | `DT-1.0.0-macos-x86_64.dmg` (contains `Install DT.pkg`) | macOS 14 through Tahoe | Pending Intel hardware build, signing, and native evidence |
-| Windows x64 | `DT-1.0.0-windows-x86_64-setup.exe` | Windows 11 25H2 and 26H2 | Pending NSIS 3.13 build, Authenticode signing, and native evidence |
-| Ubuntu x64 | `dt_1.0.0_amd64.deb` | Ubuntu Desktop 24.04 (X11 and Wayland) | Pending Ubuntu 24.04 `.deb` App Center smoke and X11/Wayland evidence |
+| Apple Silicon | `DT-1.0.4-macos-aarch64.dmg` (contains `Install DT.pkg`) | macOS 14+ | Pending Developer ID signing, notarization, and 8-target native evidence |
+| Intel Mac | `DT-1.0.4-macos-x86_64.dmg` (contains `Install DT.pkg`) | macOS 14 through Tahoe | Pending Intel hardware build, signing, and native evidence |
+| Windows x64 | `DT-1.0.4-windows-x86_64-setup.exe` | Windows 11 25H2 and 26H2 | Pending NSIS 3.13 build, Authenticode signing, and native evidence |
+| Windows ARM64 | `DT-1.0.4-windows-aarch64-setup.exe` | Windows 11 25H2 and 26H2 (ARM64) | Pending native ARM64 payload, Authenticode signing, and native evidence |
+| Ubuntu x64 | `dt_1.0.4_amd64.deb` | Ubuntu Desktop 24.04 (X11 and Wayland) | Pending Ubuntu 24.04 `.deb` App Center smoke and X11/Wayland evidence |
+| Ubuntu ARM64 | `dt_1.0.4_arm64.deb` | Ubuntu Desktop 24.04 ARM64 (X11 and Wayland) | Pending Ubuntu 24.04 ARM64 `.deb` App Center smoke and X11/Wayland evidence |
 
 ## Capability & Surface Matrix
 
@@ -34,3 +36,5 @@ This inventory maps every advertised feature, CLI entry point, API route group, 
 | `ui-tokens-and-surfaces` | UI / Clients | Single-source tokens -> Native egui, Companion, React Web, Expo SDK 58 Mobile | All 4 UIs | 316 px sidebar, 240–480 resize, 72 collapsed, drafts, 4.5:1/3:1 contrast | Responsive & a11y screenshots + CI checks |
 | `shipped-skills-9` | Skills | Bundled Muse skills (`artifacts`, `device-data`, `forget`, `goals`, `self-awareness`, `skill-creator`, `spaces`, `wide-research`) | Daemon, UIs | SHA-256 manifest verification & progressive disclosure | Skill manifest test log |
 | `updater-immutable-and-renewable` | Release | Immutable release assets + signed `update-metadata` branch | Updater, Doctor, CI | Rejects expired, rolled-back, revoked, wrong-origin, or wrong-target metadata | Expiry, renewal, key transition, offline tests |
+| `WEB-APP-01` | UI / Clients | `dt serve` hosts built React web app at `/app` with SPA fallback, CSP, immutable asset caching, and traversal safety | Serve, React Web, `.deb`, Docker | `GET /app/` returns 200 with CSP; traversal requests return 404 | `test_web_app_serves_index`, `test_web_app_blocks_traversal` |
+| `HOST-PG-01` | Hosted | Real PostgreSQL 16 control-plane migrations (V1–V4), tenant isolation, AES-256-GCM secrets, and SHA-256-verified SQLite migration | Hosted, Postgres, CI | All 7 `postgres_hosted` tests pass against live PostgreSQL 16 | `pg_tenant_isolation`, `pg_sqlite_migration_with_verified_backup` |

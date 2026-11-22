@@ -134,6 +134,32 @@ impl DirectChatStore {
         card: Option<&serde_json::Value>,
         request_id: Option<&str>,
     ) -> Result<DirectMessageRecord> {
+        self.append_message_with_id(
+            bot_id,
+            role,
+            author,
+            content,
+            reply_to_id,
+            thread_id,
+            card,
+            request_id,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_message_with_id(
+        &self,
+        bot_id: &str,
+        role: &str,
+        author: &str,
+        content: &str,
+        reply_to_id: Option<&str>,
+        thread_id: Option<&str>,
+        card: Option<&serde_json::Value>,
+        request_id: Option<&str>,
+        explicit_id: Option<&str>,
+    ) -> Result<DirectMessageRecord> {
         let clean_bot = bot_id.trim().to_ascii_lowercase();
         if clean_bot.is_empty() {
             return Err(GmError::Config("bot_id cannot be empty".into()));
@@ -144,11 +170,19 @@ impl DirectChatStore {
             ));
         }
 
-        let id = format!("dm-{}", uuid::Uuid::new_v4());
+        let explicit_trimmed = explicit_id.map(str::trim).filter(|s| !s.is_empty());
+        let id = explicit_trimmed
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("dm-{}", uuid::Uuid::new_v4()));
         let now = Utc::now().to_rfc3339();
         let card_json = card.map(serde_json::to_string).transpose()?;
 
         let conn = self.conn.lock();
+        if let Some(existing) = Self::get_by_id_with_conn(&conn, &id)?
+            && existing.bot_id == clean_bot
+        {
+            return Ok(existing);
+        }
         conn.execute(
             r#"
             INSERT INTO direct_messages_v1(
@@ -196,6 +230,56 @@ impl DirectChatStore {
             request_id: request_id.map(str::to_string),
             created_at: now,
         })
+    }
+
+    /// Look up an existing persisted user turn by explicit client UUID (`id` or `request_id`)
+    /// along with its paired assistant reply (if already recorded via `reply_to_id`).
+    pub fn find_turn_by_client_id(
+        &self,
+        bot_id: &str,
+        client_id: &str,
+    ) -> Result<Option<(DirectMessageRecord, Option<DirectMessageRecord>)>> {
+        let clean_bot = bot_id.trim().to_ascii_lowercase();
+        let clean_client = client_id.trim();
+        if clean_bot.is_empty() || clean_client.is_empty() {
+            return Ok(None);
+        }
+        let conn = self.conn.lock();
+        let user_id: Option<String> = conn
+            .query_row(
+                r#"
+                SELECT id FROM direct_messages_v1
+                WHERE bot_id = ?1 AND role = 'user' AND (id = ?2 OR request_id = ?2)
+                ORDER BY seq DESC LIMIT 1
+                "#,
+                params![clean_bot, clean_client],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let Some(uid) = user_id else {
+            return Ok(None);
+        };
+        let Some(user_msg) = Self::get_by_id_with_conn(&conn, &uid)? else {
+            return Ok(None);
+        };
+        let reply_id: Option<String> = conn
+            .query_row(
+                r#"
+                SELECT id FROM direct_messages_v1
+                WHERE bot_id = ?1 AND role = 'assistant' AND reply_to_id = ?2
+                ORDER BY seq ASC LIMIT 1
+                "#,
+                params![clean_bot, uid],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(|e| GmError::Platform(e.to_string()))?;
+        let reply = match reply_id {
+            Some(rid) => Self::get_by_id_with_conn(&conn, &rid)?,
+            None => None,
+        };
+        Ok(Some((user_msg, reply)))
     }
 
     /// One query returns bounded, non-secret conversation summaries for the sidebar.

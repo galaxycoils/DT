@@ -46,22 +46,12 @@ impl<P: Platform + 'static> HelperServer<P> {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            use std::os::unix::fs::OpenOptionsExt;
             let lease = Arc::new(
-                std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .mode(0o600)
-                    .custom_flags(libc::O_NOFOLLOW)
-                    .open(path.with_extension("helper.lock"))?,
+                gm_core::ipc::try_lock_unix_socket(path, "helper.lock")?.ok_or_else(|| {
+                    gm_core::error::GmError::Config("Another helper owns this socket".into())
+                })?,
             );
-            lease.try_lock().map_err(|e| {
-                gm_core::error::GmError::Config(format!("Another helper owns this socket: {e}"))
-            })?;
-            if path.exists() {
-                std::fs::remove_file(path)?;
-            }
+            gm_core::ipc::remove_stale_unix_socket(path)?;
 
             let listener = UnixListener::bind(path)?;
             {

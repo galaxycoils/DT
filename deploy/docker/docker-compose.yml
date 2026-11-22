@@ -1,11 +1,19 @@
+x-dt-build: &dt-build
+  context: ../..
+  dockerfile: deploy/docker/Dockerfile
+  additional_contexts:
+    darius: https://github.com/galaxycoils/darius.git#f47a4ce980abecb751c9f5c79e1c424a20100433
+
 services:
   postgres:
-    image: postgres:16.6-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    image: postgres:16.6-alpine@sha256:1d04b9ba1d4996401f2552b51beda8187f175c0645c091e4781134fc9c9a3eef
     restart: unless-stopped
     environment:
       POSTGRES_DB: dt_hosted
       POSTGRES_USER: dt
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
     volumes:
       - dt_pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -16,20 +24,25 @@ services:
 
   dt-server:
     build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    restart: unless-stopped
+      <<: *dt-build
+      target: dt-server
+    # Share only the proxy's network namespace so DT can keep its loopback bind.
+    network_mode: service:tls-proxy
     depends_on:
       postgres:
         condition: service_healthy
+    restart: unless-stopped
     environment:
       RUST_LOG: info
-      DATABASE_URL: postgres://dt@postgres:5432/dt_hosted?sslmode=require
-      DT_HOSTED_MASTER_KEY_FILE: /run/secrets/master_key
-      STRIPE_SECRET_KEY_FILE: /run/secrets/stripe_secret
-      STRIPE_WEBHOOK_SECRET_FILE: /run/secrets/stripe_webhook_secret
+      GROK_MUSE_COMPANION_TOKEN: ${DT_COMPANION_TOKEN:-}
+      DT_HOSTED_ENABLED: "1"
+      DT_HOSTED_REQUIRED: "1"
+      DT_HOSTED_MASTER_KEY_FILE: /run/secrets/dt_hosted_master_key
+      DT_DATABASE_URL: ${DT_DATABASE_URL:-}
+    secrets:
+      - dt_hosted_master_key
     volumes:
-      - dt_workers_data:/var/lib/dt/workers
+      - dt_workers_data:/var/lib/dt
     logging:
       driver: json-file
       options:
@@ -37,15 +50,22 @@ services:
         max-file: "5"
 
   tls-proxy:
-    image: caddy:2.9-alpine@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    build:
+      <<: *dt-build
+      target: tls-proxy
     restart: unless-stopped
-    depends_on:
-      - dt-server
+    environment:
+      DT_DOMAIN: ${DT_DOMAIN:-localhost}
     ports:
       - "443:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - dt_caddy_data:/data
+
+secrets:
+  pg_password:
+    file: ${DT_POSTGRES_PASSWORD_FILE:-./postgres-password}
+  dt_hosted_master_key:
+    file: ${DT_HOSTED_MASTER_KEY_FILE:-./hosted-master-key}
 
 volumes:
   dt_pg_data:

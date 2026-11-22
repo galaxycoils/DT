@@ -53,6 +53,39 @@ pub struct TranscriptRow {
     pub card: Option<Value>,
 }
 
+pub struct ConnectionBanner<'a> {
+    pub label: &'a str,
+    pub detail: &'a str,
+    pub connected: bool,
+}
+
+pub struct ComposerFailure<'a> {
+    pub headline: &'a str,
+    pub detail: &'a str,
+    pub retry_client_id: Option<&'a str>,
+    pub provider_setup: bool,
+}
+
+pub enum ChatCanvasAction {
+    Request(DaemonRequest),
+    Submit {
+        text: String,
+        reply_to_id: Option<String>,
+    },
+    RetryConnection,
+    RetryPending {
+        client_msg_id: String,
+    },
+    OpenProviderSetup,
+    ToggleVoice,
+    ToggleDictation,
+    VoiceConsent(bool),
+    VoiceSpeak(String),
+    VoiceBargeIn,
+    VoiceStop,
+    OpenLocalComponents,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn draw_chat_canvas(
     ui: &mut egui::Ui,
@@ -69,12 +102,25 @@ pub fn draw_chat_canvas(
     search_query: &mut String,
     search_hits: &[Value],
     draft: &mut String,
-    connected: bool,
+    conn_banner: &ConnectionBanner<'_>,
     sending: bool,
-    status_line: &str,
-    mut send: impl FnMut(DaemonRequest),
-    mut submit_message: impl FnMut(String, Option<String>),
+    composer_failure: Option<&ComposerFailure<'_>>,
+    mut emit: impl FnMut(ChatCanvasAction),
 ) {
+    let connected = conn_banner.connected;
+    let status_line = if conn_banner.detail.is_empty() {
+        conn_banner.label.to_string()
+    } else {
+        format!("{} · {}", conn_banner.label, conn_banner.detail)
+    };
+    let queued_actions: std::cell::RefCell<Vec<ChatCanvasAction>> =
+        std::cell::RefCell::new(Vec::new());
+    let push_action = |act: ChatCanvasAction| queued_actions.borrow_mut().push(act);
+    let send = |req: DaemonRequest| {
+        queued_actions
+            .borrow_mut()
+            .push(ChatCanvasAction::Request(req))
+    };
     let active_bot_profile = bots
         .iter()
         .find(|b| b["id"].as_str() == Some(active_bot.as_str()));
@@ -122,10 +168,10 @@ pub fn draw_chat_canvas(
             });
         }
     }
-    // Centered conversation identity, with secondary actions in the overflow menu.
+    // Centered conversation identity, connection status badge + Retry, and options menu.
     egui::Frame::NONE
         .fill(palette.bg_canvas)
-        .inner_margin(egui::Margin::symmetric(16, 12))
+        .inner_margin(egui::Margin::symmetric(16, 10))
         .show(ui, |ui| {
             use crate::ui::icons::{self, Icon};
             ui.horizontal(|ui| {
@@ -134,125 +180,182 @@ pub fn draw_chat_canvas(
                 {
                     ui_state.search_bar_open = !ui_state.search_bar_open;
                 }
-                let title = if ui_state.active_chat_kind == "channel" {
+                let raw_title = if ui_state.active_chat_kind == "channel" {
                     format!("# {active_channel}")
                 } else {
                     bot_display_name.clone()
                 };
-                let width = (ui.available_width() - 40.0).max(100.0);
-                ui.allocate_ui_with_layout(
-                    Vec2::new(width, 36.0),
-                    Layout::left_to_right(Align::Center),
-                    |ui| {
-                        ui.set_min_width(width);
-                        let title_width = (title.chars().count() as f32 * 8.0 + 56.0).min(width);
-                        ui.add_space(((width - title_width) / 2.0).max(0.0));
-                        egui::Frame::NONE
-                            .fill(palette.bg_elevated)
-                            .corner_radius(20)
-                            .inner_margin(egui::Margin::symmetric(8, 2))
-                            .show(ui, |ui| {
-                                let (rect, response) =
-                                    ui.allocate_exact_size(Vec2::splat(26.0), Sense::click());
-                                paint_bot_avatar(
-                                    ui.painter(),
-                                    rect,
-                                    bot_shape,
-                                    bot_color,
-                                    &title,
-                                    textures
-                                        .get(&format!("avatar:{active_bot}"))
-                                        .map(|(t, _)| t),
-                                    None,
-                                    palette.bg_canvas,
-                                );
-                                if response.on_hover_text("Customize avatar").clicked() {
-                                    ui_state.active_modal = Some(ActiveModal::AvatarPicker {
-                                        bot_id: active_bot.clone(),
-                                    });
-                                }
-                                if ui
-                                    .button(RichText::new(title).strong().size(15.0))
-                                    .on_hover_text(format!("{bot_role_title} · {status_line}"))
-                                    .clicked()
-                                {
-                                    ui_state.details_drawer_open = !ui_state.details_drawer_open;
-                                }
-                            });
-                    },
-                );
-                let more = icons::button(
-                    ui,
-                    Icon::More,
-                    "Conversation options",
-                    palette.text_secondary,
-                );
-                egui::Popup::menu(&more).show(|ui| {
-                    if ui.button("Bot details").clicked() {
-                        ui_state.details_drawer_open = !ui_state.details_drawer_open;
-                        ui.close();
-                    }
-                    if ui.button("Live computer").clicked() {
-                        ui_state.live_computer_open = !ui_state.live_computer_open;
-                        if ui_state.live_computer_open {
-                            ui_state.details_drawer_open = true;
-                            ui_state.details_tab = BotDetailsTab::Computer;
-                            send(DaemonRequest::CaptureComputerPreview {
-                                max_long_edge: Some(1280),
-                                quality: Some(75),
-                            });
-                        } else {
-                            textures.evict_prefix("live_computer:");
+                let max_title_chars = if ui.available_width() < 520.0 { 22 } else { 42 };
+                let title = if raw_title.chars().count() > max_title_chars {
+                    raw_title
+                        .chars()
+                        .take(max_title_chars.saturating_sub(1))
+                        .collect::<String>()
+                        + "…"
+                } else {
+                    raw_title.clone()
+                };
+                let state_color = match conn_banner.label {
+                    "Ready" => palette.status_ok,
+                    "Starting" => palette.status_warn,
+                    _ => palette.status_danger,
+                };
+                ui.add_space(4.0);
+                let pill_resp = egui::Frame::NONE
+                    .fill(palette.bg_elevated)
+                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                    .corner_radius(20)
+                    .inner_margin(egui::Margin::symmetric(8, 2))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (rect, response) =
+                                ui.allocate_exact_size(Vec2::splat(24.0), Sense::click());
+                            paint_bot_avatar(
+                                ui.painter(),
+                                rect,
+                                bot_shape,
+                                bot_color,
+                                &raw_title,
+                                textures
+                                    .get(&format!("avatar:{active_bot}"))
+                                    .map(|(t, _)| t),
+                                None,
+                                palette.bg_canvas,
+                            );
+                            if response.on_hover_text("Customize avatar").clicked() {
+                                ui_state.active_modal = Some(ActiveModal::AvatarPicker {
+                                    bot_id: active_bot.clone(),
+                                });
+                            }
+                            if ui
+                                .button(RichText::new(title).strong().size(15.0))
+                                .on_hover_text(format!(
+                                    "{raw_title} · {bot_role_title} · {status_line}"
+                                ))
+                                .clicked()
+                            {
+                                ui_state.details_drawer_open = !ui_state.details_drawer_open;
+                            }
+                        });
+                    });
+                let _ = pill_resp;
+
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let more = icons::button(
+                        ui,
+                        Icon::More,
+                        "Conversation options",
+                        palette.text_secondary,
+                    );
+                    egui::Popup::menu(&more).show(|ui| {
+                        if ui.button("Bot details").clicked() {
+                            ui_state.details_drawer_open = !ui_state.details_drawer_open;
+                            ui.close();
                         }
-                        ui.close();
-                    }
-                    if ui.button("Open SOUL.md").clicked() {
-                        send(DaemonRequest::ReadRuntimeFile {
-                            bot_id: Some(active_bot.clone()),
-                            file: "SOUL.md".into(),
-                        });
-                        ui_state.split_page = Some(SplitPageTarget::MarkdownFile {
-                            bot_id: active_bot.clone(),
-                            file: "SOUL.md".into(),
-                            title: format!("@{active_bot} / SOUL.md"),
-                            editing: false,
-                        });
-                        ui.close();
-                    }
-                    if ui_state.active_chat_kind == "channel" && ui.button("Edit group").clicked() {
-                        ui_state.channel_draft = ui_state.server_snapshot["channels"]
-                            .as_array()
-                            .and_then(|a| {
-                                a.iter().find(|c| c["id"].as_str() == Some(active_channel))
-                            })
-                            .cloned()
-                            .unwrap_or_else(|| serde_json::json!({"id":active_channel}));
-                        ui_state.active_modal = Some(ActiveModal::EditChannel);
-                        ui.close();
-                    }
-                    ui.separator();
+                        if ui.button("Live computer").clicked() {
+                            ui_state.live_computer_open = !ui_state.live_computer_open;
+                            if ui_state.live_computer_open {
+                                ui_state.details_drawer_open = true;
+                                ui_state.details_tab = BotDetailsTab::Computer;
+                                send(DaemonRequest::CaptureComputerPreview {
+                                    max_long_edge: Some(1280),
+                                    quality: Some(75),
+                                });
+                            } else {
+                                textures.evict_prefix("live_computer:");
+                            }
+                            ui.close();
+                        }
+                        if ui.button("Open SOUL.md").clicked() {
+                            send(DaemonRequest::ReadRuntimeFile {
+                                bot_id: Some(active_bot.clone()),
+                                file: "SOUL.md".into(),
+                            });
+                            ui_state.split_page = Some(SplitPageTarget::MarkdownFile {
+                                bot_id: active_bot.clone(),
+                                file: "SOUL.md".into(),
+                                title: format!("@{active_bot} / SOUL.md"),
+                                editing: false,
+                            });
+                            ui.close();
+                        }
+                        if ui_state.active_chat_kind == "channel"
+                            && ui.button("Edit group").clicked()
+                        {
+                            ui_state.channel_draft = ui_state.server_snapshot["channels"]
+                                .as_array()
+                                .and_then(|a| {
+                                    a.iter().find(|c| c["id"].as_str() == Some(active_channel))
+                                })
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({"id":active_channel}));
+                            ui_state.active_modal = Some(ActiveModal::EditChannel);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui
+                            .add_enabled(
+                                ui_state.nav_history.can_back(),
+                                egui::Button::new("Previous conversation"),
+                            )
+                            .clicked()
+                        {
+                            ui_state.nav_request = -1;
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(
+                                ui_state.nav_history.can_forward(),
+                                egui::Button::new("Next conversation"),
+                            )
+                            .clicked()
+                        {
+                            ui_state.nav_request = 1;
+                            ui.close();
+                        }
+                    });
+
                     if ui
-                        .add_enabled(
-                            ui_state.nav_history.can_back(),
-                            egui::Button::new("Previous conversation"),
-                        )
+                        .small_button("Retry")
+                        .on_hover_text("Reconnect to the daemon and refresh workspace state")
                         .clicked()
                     {
-                        ui_state.nav_request = -1;
-                        ui.close();
+                        push_action(ChatCanvasAction::RetryConnection);
                     }
-                    if ui
-                        .add_enabled(
-                            ui_state.nav_history.can_forward(),
-                            egui::Button::new("Next conversation"),
-                        )
-                        .clicked()
-                    {
-                        ui_state.nav_request = 1;
-                        ui.close();
-                    }
+                    egui::Frame::NONE
+                        .fill(palette.bg_elevated)
+                        .stroke(Stroke::new(1.0_f32, state_color.gamma_multiply(0.6)))
+                        .corner_radius(12)
+                        .inner_margin(egui::Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let (dot_rect, _) =
+                                    ui.allocate_exact_size(Vec2::splat(8.0), Sense::hover());
+                                ui.painter()
+                                    .circle_filled(dot_rect.center(), 3.5, state_color);
+                                ui.label(
+                                    RichText::new(conn_banner.label)
+                                        .size(13.0)
+                                        .color(palette.text_primary),
+                                );
+                            });
+                        })
+                        .response
+                        .on_hover_text(status_line);
                 });
             });
+            if conn_banner.label == "Disconnected" && !conn_banner.detail.is_empty() {
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.colored_label(
+                        palette.status_danger,
+                        RichText::new(format!("Disconnected: {}", conn_banner.detail)).size(13.0),
+                    );
+                    if ui.small_button("Retry connection").clicked() {
+                        push_action(ChatCanvasAction::RetryConnection);
+                    }
+                });
+            }
         });
 
     // 2. Two-Stage FTS5 Search Bar (when open)
@@ -263,10 +366,14 @@ pub fn draw_chat_canvas(
             .inner_margin(egui::Margin::symmetric(14, 6))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("🔍");
+                    ui.label(
+                        RichText::new("Search:")
+                            .size(13.0)
+                            .color(palette.text_secondary),
+                    );
                     let resp = ui.add(
                         egui::TextEdit::singleline(search_query)
-                            .desired_width(260.0)
+                            .desired_width(240.0)
                             .hint_text("Search recent 200 messages…"),
                     );
                     if resp.changed() && !search_query.trim().is_empty() {
@@ -285,7 +392,14 @@ pub fn draw_chat_canvas(
                     if !search_hits.is_empty() {
                         ui.small(format!("{} archive hits", search_hits.len()));
                     }
-                    if ui.small_button("✕").clicked() {
+                    if crate::ui::icons::button(
+                        ui,
+                        crate::ui::icons::Icon::Close,
+                        "Close search",
+                        palette.text_secondary,
+                    )
+                    .clicked()
+                    {
                         ui_state.search_bar_open = false;
                         search_query.clear();
                     }
@@ -311,34 +425,69 @@ pub fn draw_chat_canvas(
         .collect();
 
     // 3. Bottom Smart Composer Panel (drawn before central transcript so it claims bottom height cleanly)
+    let shared_max_width = crate::ui::tokens::TRANSCRIPT_MAX;
     egui::TopBottomPanel::bottom("grok_smart_composer")
         .frame(
             egui::Frame::NONE
                 .fill(palette.bg_canvas)
-                .inner_margin(egui::Margin::symmetric(24, 18)),
+                .inner_margin(egui::Margin::symmetric(24, 14)),
         )
         .show_inside(ui, |ui| {
-            let gutter = ((ui.available_width() - 960.0) / 2.0).max(0.0);
+            let composer_avail = ui.available_width().max(260.0);
+            let content_width = composer_avail.clamp(200.0, shared_max_width);
+            let gutter = ((composer_avail - content_width) / 2.0).max(0.0);
             ui.horizontal(|ui| {
                 ui.add_space(gutter);
                 ui.vertical(|ui| {
-                    ui.set_width((ui.available_width() - gutter).min(960.0));
+                    ui.set_width(content_width);
+                    if let Some(err) = composer_failure {
+                        egui::Frame::NONE
+                            .fill(palette.bg_elevated)
+                            .stroke(Stroke::new(1.0_f32, palette.status_warn))
+                            .corner_radius(10)
+                            .inner_margin(egui::Margin::symmetric(12, 8))
+                            .show(ui, |ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.colored_label(
+                                        palette.status_warn,
+                                        RichText::new(err.headline).strong().size(13.0),
+                                    );
+                                    if !err.detail.is_empty() {
+                                        ui.small(err.detail);
+                                    }
+                                    if let Some(cid) = err.retry_client_id
+                                        && ui.small_button("Retry reply").clicked()
+                                    {
+                                        push_action(ChatCanvasAction::RetryPending {
+                                            client_msg_id: cid.to_string(),
+                                        });
+                                    }
+                                    if err.provider_setup
+                                        && ui.small_button("Open Provider Setup").clicked()
+                                    {
+                                        push_action(ChatCanvasAction::OpenProviderSetup);
+                                    }
+                                });
+                            });
+                        ui.add_space(6.0);
+                    }
                     egui::Frame::NONE
                         .fill(palette.bg_elevated)
-                        .corner_radius(26)
+                        .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                        .corner_radius(CornerRadius::same(crate::ui::tokens::COMPOSER_RADIUS as u8))
                         .inner_margin(egui::Margin::symmetric(16, 12))
                         .show(ui, |ui| {
                             // Reply-to banner (Tier 5 Escape target)
                             if let Some(reply) = ui_state.reply_to.clone() {
                                 egui::Frame::NONE
-                                    .fill(palette.bg_elevated)
+                                    .fill(palette.bg_sidebar)
                                     .corner_radius(CornerRadius::same(6))
                                     .inner_margin(egui::Margin::symmetric(8, 4))
                                     .show(ui, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.small(
                                                 RichText::new(format!(
-                                                    "↩ Replying to {}: {}",
+                                                    "Replying to {}: {}",
                                                     reply.author, reply.snippet
                                                 ))
                                                 .color(palette.text_secondary),
@@ -346,7 +495,7 @@ pub fn draw_chat_canvas(
                                             ui.with_layout(
                                                 Layout::right_to_left(Align::Center),
                                                 |ui| {
-                                                    if ui.small_button("✕").clicked() {
+                                                    if ui.small_button("Cancel reply").clicked() {
                                                         ui_state.reply_to = None;
                                                     }
                                                 },
@@ -356,7 +505,105 @@ pub fn draw_chat_canvas(
                                 ui.add_space(4.0);
                             }
 
-                            // Attachment pills (`< 25 MB` limit enforced)
+                            // Voice & Dictation live session strip (consent-gated, honest readiness)
+                            let voice_state = &ui_state.responses["voice"];
+                            let voice_running = ui_state.voice_active
+                                || ui_state.dictation_active
+                                || voice_state["active"].as_bool().unwrap_or(false);
+                            if voice_running {
+                                let mode_str = voice_state["mode"]
+                                    .as_str()
+                                    .unwrap_or(if ui_state.dictation_active {
+                                        "dictate"
+                                    } else {
+                                        "voice"
+                                    });
+                                let consent_ok = voice_state["consent_acknowledged"]
+                                    .as_bool()
+                                    .unwrap_or(false);
+                                let stt_installed =
+                                    voice_state["stt_installed"].as_bool().unwrap_or(false);
+                                let voice_err = voice_state["last_error"]
+                                    .as_str()
+                                    .unwrap_or_default();
+                                let last_assistant = rows
+                                    .iter()
+                                    .rev()
+                                    .find(|r| r.role != "user" && !r.content.trim().is_empty())
+                                    .map(|r| r.content.clone());
+                                egui::Frame::NONE
+                                    .fill(palette.bg_elevated)
+                                    .stroke(Stroke::new(1.0_f32, palette.border_subtle))
+                                    .corner_radius(CornerRadius::same(10))
+                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.strong(if mode_str == "dictate" {
+                                                "Dictation"
+                                            } else {
+                                                "Voice Session"
+                                            });
+                                            ui.small(
+                                                RichText::new(if consent_ok {
+                                                    if stt_installed {
+                                                        "Mic consent granted · Local STT ready"
+                                                    } else {
+                                                        "Mic consent granted · Local STT not installed"
+                                                    }
+                                                } else {
+                                                    "Waiting for microphone consent"
+                                                })
+                                                .color(if consent_ok && stt_installed {
+                                                    palette.status_ok
+                                                } else {
+                                                    palette.text_secondary
+                                                }),
+                                            );
+                                            if !consent_ok {
+                                                if ui
+                                                    .small_button("Allow Microphone")
+                                                    .clicked()
+                                                {
+                                                    push_action(ChatCanvasAction::VoiceConsent(true));
+                                                }
+                                            } else if ui
+                                                .small_button("Revoke Consent")
+                                                .clicked()
+                                            {
+                                                push_action(ChatCanvasAction::VoiceConsent(false));
+                                            }
+                                            if let Some(reply_text) = last_assistant
+                                                && ui.small_button("Speak Last Reply").clicked()
+                                            {
+                                                push_action(ChatCanvasAction::VoiceSpeak(reply_text));
+                                            }
+                                            if voice_state["state"].as_str() == Some("speaking")
+                                                && ui.small_button("Interrupt").clicked()
+                                            {
+                                                push_action(ChatCanvasAction::VoiceBargeIn);
+                                            }
+                                            if !stt_installed
+                                                && ui
+                                                    .small_button("Install Speech Runtime")
+                                                    .clicked()
+                                            {
+                                                push_action(ChatCanvasAction::OpenLocalComponents);
+                                            }
+                                            if ui.small_button("End").clicked() {
+                                                push_action(ChatCanvasAction::VoiceStop);
+                                            }
+                                        });
+                                        if !voice_err.is_empty() {
+                                            ui.small(
+                                                RichText::new(voice_err)
+                                                    .color(palette.status_danger),
+                                            );
+                                        }
+                                    });
+                                ui.add_space(4.0);
+                            }
+
+                            // Attachment pills (`< 25 MB` limit enforced; cleared only on confirmed persistence)
                             if !ui_state.pending_attachments.is_empty() {
                                 ui.horizontal_wrapped(|ui| {
                                     let mut remove_idx = None;
@@ -364,8 +611,8 @@ pub fn draw_chat_canvas(
                                         ui_state.pending_attachments.iter().enumerate()
                                     {
                                         ui.group(|ui| {
-                                            ui.small(format!("📎 {att}"));
-                                            if ui.small_button("✕").clicked() {
+                                            ui.small(format!("Attachment: {att}"));
+                                            if ui.small_button("Remove").clicked() {
                                                 remove_idx = Some(idx);
                                             }
                                         });
@@ -540,10 +787,10 @@ pub fn draw_chat_canvas(
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 use crate::ui::icons::{self, Icon};
-                                let plus = icons::button(
+                                let plus = icons::labeled_button(
                                     ui,
                                     Icon::Plus,
-                                    "Add to message",
+                                    "Attach",
                                     palette.text_secondary,
                                 );
                                 egui::Popup::menu(&plus).show(|ui| {
@@ -571,7 +818,7 @@ pub fn draw_chat_canvas(
                                         })
                                         .clicked()
                                     {
-                                        ui_state.dictation_active = !ui_state.dictation_active;
+                                        push_action(ChatCanvasAction::ToggleDictation);
                                         ui.close();
                                     }
                                 });
@@ -599,61 +846,69 @@ pub fn draw_chat_canvas(
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                     let has_text = !draft.trim().is_empty()
                                         || !ui_state.pending_attachments.is_empty();
-                                    if has_text {
-                                        // Morphs into ↑ Send circle button when text is present
-                                        let send_btn = egui::Button::new(
-                                            RichText::new(if sending { "…" } else { "↑" })
-                                                .strong()
-                                                .color(palette.accent_text),
-                                        )
-                                        .fill(palette.accent)
-                                        .corner_radius(CornerRadius::same(18))
-                                        .min_size(Vec2::splat(34.0));
-                                        if (ui
-                                            .add_enabled(connected && !sending, send_btn)
-                                            .clicked()
-                                            || (send_enter && connected && !sending))
-                                            && has_text
-                                        {
-                                            let mut payload = draft.trim().to_string();
-                                            for att in ui_state.pending_attachments.drain(..) {
-                                                if !payload.is_empty() {
-                                                    payload.push('\n');
-                                                }
-                                                payload.push_str(&format!("Attached file: {att}"));
-                                            }
-                                            let reply_id =
-                                                ui_state.reply_to.take().map(|r| r.message_id);
-                                            submit_message(payload, reply_id);
-                                        }
-                                    } else {
-                                        // Morphs into 🎙 Voice pill when composer is empty
-                                        let voice_label = if ui_state.voice_active {
-                                            "⏹ End Voice"
-                                        } else {
-                                            "Voice"
-                                        };
-                                        let voice_btn =
-                                            egui::Button::new(RichText::new(voice_label).color(
-                                                if ui_state.voice_active {
-                                                    Color32::WHITE
-                                                } else {
-                                                    palette.text_primary
-                                                },
-                                            ))
-                                            .fill(if ui_state.voice_active {
-                                                palette.status_danger
+                                    let can_send = connected && !sending && has_text;
+                                    let send_btn = egui::Button::new(
+                                        RichText::new(if sending { "Sending…" } else { "Send" })
+                                            .strong()
+                                            .size(14.0)
+                                            .color(if can_send {
+                                                palette.accent_text
                                             } else {
-                                                palette.bg_elevated
-                                            })
-                                            .corner_radius(CornerRadius::same(14));
-                                        if ui
-                                            .add(voice_btn)
-                                            .on_hover_text("Start/Stop Realtime Voice Session")
-                                            .clicked()
-                                        {
-                                            ui_state.active_modal = Some(ActiveModal::ConnectApps);
+                                                palette.text_muted
+                                            }),
+                                    )
+                                    .fill(if can_send {
+                                        palette.accent
+                                    } else {
+                                        palette.bg_sidebar
+                                    })
+                                    .corner_radius(CornerRadius::same(16))
+                                    .min_size(Vec2::new(68.0, 32.0));
+                                    if (ui.add_enabled(can_send, send_btn).clicked()
+                                        || (send_enter && can_send))
+                                        && has_text
+                                    {
+                                        let mut payload = draft.trim().to_string();
+                                        for att in &ui_state.pending_attachments {
+                                            if !payload.is_empty() {
+                                                payload.push('\n');
+                                            }
+                                            payload.push_str(&format!("Attached file: {att}"));
                                         }
+                                        let reply_id =
+                                            ui_state.reply_to.take().map(|r| r.message_id);
+                                        push_action(ChatCanvasAction::Submit {
+                                            text: payload,
+                                            reply_to_id: reply_id,
+                                        });
+                                    }
+
+                                    let voice_label = if ui_state.voice_active {
+                                        "End Voice"
+                                    } else {
+                                        "Voice"
+                                    };
+                                    let voice_btn = egui::Button::new(
+                                        RichText::new(voice_label).size(14.0).color(
+                                            if ui_state.voice_active {
+                                                Color32::WHITE
+                                            } else {
+                                                palette.text_secondary
+                                            },
+                                        ),
+                                    )
+                                    .fill(if ui_state.voice_active {
+                                        palette.status_danger
+                                    } else {
+                                        palette.bg_sidebar
+                                    })
+                                    .corner_radius(CornerRadius::same(14));
+                                    if ui
+                                        .add(voice_btn)
+                                        .on_hover_text("Start/Stop Realtime Voice Session")
+                                        .clicked()
+                                    {
+                                        push_action(ChatCanvasAction::ToggleVoice);
                                     }
                                 });
                             });
@@ -664,7 +919,7 @@ pub fn draw_chat_canvas(
 
     // Variable-height virtualization: measured rows replace estimates as they enter the viewport.
     let avail_width = ui.available_width().max(260.0);
-    let content_width = (avail_width - 48.0).clamp(200.0, 960.0);
+    let content_width = (avail_width - 48.0).clamp(200.0, shared_max_width);
     if (ui_state.transcript_width - content_width).abs() > 1.0 {
         ui_state.transcript_heights.clear();
         ui_state.transcript_width = content_width;
@@ -702,7 +957,7 @@ pub fn draw_chat_canvas(
                         ui.add_space((viewport.height() * 0.25).max(28.0));
                         ui.vertical_centered(|ui| {
                             ui.heading(
-                                RichText::new(format!("Chat with {bot_display_name}")).size(24.0),
+                                RichText::new(format!("Chat with {bot_display_name}")).size(22.0),
                             );
                             ui.add_space(10.0);
                             ui.label(
@@ -747,7 +1002,7 @@ pub fn draw_chat_canvas(
                                                 (ui.painter()
                                                     .layout(
                                                         row.content.clone(),
-                                                        egui::FontId::proportional(14.0),
+                                                        egui::FontId::proportional(15.0),
                                                         palette.text_primary,
                                                         (content_width * 0.84 - 32.0).max(120.0),
                                                     )
@@ -762,6 +1017,16 @@ pub fn draw_chat_canvas(
                                         ),
                                         Layout::top_down(Align::Min),
                                         |ui| {
+                                            let submit_fn =
+                                                &mut |text: String, reply: Option<String>| {
+                                                    push_action(ChatCanvasAction::Submit {
+                                                        text,
+                                                        reply_to_id: reply,
+                                                    });
+                                                };
+                                            let send_fn = &mut |req: DaemonRequest| {
+                                                push_action(ChatCanvasAction::Request(req));
+                                            };
                                             draw_transcript_row(
                                                 ui,
                                                 ctx,
@@ -773,8 +1038,8 @@ pub fn draw_chat_canvas(
                                                 &layout.tables,
                                                 &layout.markdown,
                                                 connected && !sending,
-                                                &mut send,
-                                                &mut submit_message,
+                                                send_fn,
+                                                submit_fn,
                                             );
                                         },
                                     );
@@ -803,6 +1068,9 @@ pub fn draw_chat_canvas(
                 });
             });
         });
+    for action in queued_actions.into_inner() {
+        emit(action);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -927,7 +1195,7 @@ fn draw_transcript_row(
                                     } else {
                                         att.alt.as_str()
                                     };
-                                    ui.small(format!("📎 {label}"));
+                                    ui.small(format!("Attachment: {label}"));
                                     if let Some(rel) = sandbox_uri_to_bot_relpath(&att.uri)
                                         && ui.small_button("Open in Split Page").clicked()
                                     {
@@ -973,7 +1241,7 @@ fn draw_transcript_row(
                 ui.push_id(("tbl", t_idx), |ui| {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
-                            ui.small(RichText::new("📊 Table").color(palette.text_secondary));
+                            ui.small(RichText::new("Table").color(palette.text_secondary));
                             if ui.small_button("Copy Table").clicked() {
                                 ctx.copy_text(table.to_tsv());
                             }
@@ -1153,7 +1421,7 @@ pub fn render_inline_card(
                 let title = card["title"].as_str().unwrap_or("Action Approval Required");
                 let details = card["details"].as_str().unwrap_or("");
                 ui.horizontal(|ui| {
-                    ui.strong(RichText::new(format!("🛡 {title}")).color(palette.status_warn));
+                    ui.strong(RichText::new(title).color(palette.status_warn));
                     ui.small(format!("[{status}]"));
                 });
                 if !details.is_empty() {
@@ -1178,7 +1446,7 @@ pub fn render_inline_card(
                     let (remember, pattern) = entry.clone();
                     ui.horizontal(|ui| {
                         if ui
-                            .button(RichText::new("✓ Approve").color(palette.status_ok))
+                            .button(RichText::new("Approve").color(palette.status_ok))
                             .clicked()
                         {
                             if remember && kind == "approval" && !pattern.trim().is_empty() {
@@ -1199,7 +1467,7 @@ pub fn render_inline_card(
                             });
                         }
                         if ui
-                            .button(RichText::new("✕ Deny").color(palette.status_danger))
+                            .button(RichText::new("Deny").color(palette.status_danger))
                             .clicked()
                         {
                             send(DaemonRequest::RespondApproval {
@@ -1253,7 +1521,7 @@ pub fn render_inline_card(
             "secret_prompt" => {
                 let label = card["label"].as_str().unwrap_or("Credential Required");
                 let domain = card["domain"].as_str().unwrap_or("");
-                ui.strong(RichText::new(format!("🔑 {label}")).color(palette.accent));
+                ui.strong(RichText::new(label).color(palette.accent));
                 if !domain.is_empty() {
                     ui.small(format!(
                         "Domain: {domain} · End-to-end zeroized (never stored in chat SQLite)"
@@ -1354,7 +1622,7 @@ pub fn render_inline_card(
                     .or_else(|| card["title"].as_str())
                     .unwrap_or("Clarifying Question");
                 let multi = card["multi_select"].as_bool().unwrap_or(false);
-                ui.strong(format!("❓ {prompt}"));
+                ui.strong(prompt);
                 if status == "pending" {
                     let options: Vec<String> = card["options"]
                         .as_array()
@@ -1423,7 +1691,7 @@ pub fn render_inline_card(
             // 4. Plan Checklist Card
             "plan_checklist" | "plan" => {
                 let title = card["title"].as_str().unwrap_or("Execution Plan");
-                ui.strong(format!("📋 {title}"));
+                ui.strong(title);
                 if let Some(steps) = card["steps"].as_array() {
                     let done_count = steps
                         .iter()
@@ -1457,7 +1725,7 @@ pub fn render_inline_card(
                     .or_else(|| card["summary"].as_str())
                     .unwrap_or("Delegated specialist task");
                 ui.horizontal(|ui| {
-                    ui.strong(format!("🤝 Sub-agent @{target_bot}"));
+                    ui.strong(format!("Sub-agent @{target_bot}"));
                     ui.small(format!("[{status}]"));
                     if ui
                         .small_button(format!("Switch to @{target_bot}"))
@@ -1481,7 +1749,7 @@ pub fn render_inline_card(
                 let added = card["added"].as_u64().unwrap_or(0);
                 let removed = card["removed"].as_u64().unwrap_or(0);
                 ui.horizontal(|ui| {
-                    ui.strong(format!("📝 {path}"));
+                    ui.strong(path);
                     ui.colored_label(palette.status_ok, format!("+{added}"));
                     ui.colored_label(palette.status_danger, format!("-{removed}"));
                     if ui.small_button("Open in Split Page").clicked() {
@@ -1505,7 +1773,7 @@ pub fn render_inline_card(
                 let path = card["path"].as_str().unwrap_or("output.md");
                 let size = card["size"].as_u64().unwrap_or(0);
                 ui.horizontal(|ui| {
-                    ui.strong(format!("📄 {path}"));
+                    ui.strong(path);
                     if size > 0 {
                         ui.small(format!("{size} B"));
                     }
@@ -1536,8 +1804,8 @@ pub fn render_inline_card(
                     .unwrap_or("");
                 let mime = card["mime"].as_str().unwrap_or("image/png");
                 ui.horizontal(|ui| {
-                    ui.strong(format!("🖼 {title}"));
-                    if ui.small_button("🔍 Open Lightbox").clicked() {
+                    ui.strong(title);
+                    if ui.small_button("Open Lightbox").clicked() {
                         ui_state.active_modal = Some(ActiveModal::Lightbox {
                             title: title.to_string(),
                             uri: uri.to_string(),
@@ -1553,7 +1821,7 @@ pub fn render_inline_card(
                 let title = card["title"].as_str().unwrap_or(slug);
                 let url = card["url"].as_str().map(ToString::to_string);
                 ui.horizontal(|ui| {
-                    ui.strong(format!("🧩 Space: {title} ({slug})"));
+                    ui.strong(format!("Page: {title} ({slug})"));
                     if ui.small_button("Open Split Page").clicked() {
                         ui_state.split_page = Some(SplitPageTarget::StaticSpace {
                             slug: slug.to_string(),
@@ -1574,7 +1842,7 @@ pub fn render_inline_card(
                 let title = card["title"].as_str().unwrap_or(slug);
                 let progress = card["progress"].as_f64().unwrap_or(0.5) as f32;
                 ui.horizontal(|ui| {
-                    ui.strong(format!("🎯 {title}"));
+                    ui.strong(title);
                     if ui.small_button("Open Goals").clicked() {
                         ui_state.section = WorkspaceSection::Goals;
                         send(DaemonRequest::ListGoals);
@@ -1588,19 +1856,19 @@ pub fn render_inline_card(
                 let id = card["id"].as_str().unwrap_or("");
                 let title = card["title"].as_str().unwrap_or("Proactive Brief");
                 let body = card["body"].as_str().unwrap_or("");
-                ui.strong(format!("⚡ {title}"));
+                ui.strong(title);
                 if !body.is_empty() {
                     ui.small(body);
                 }
                 if !id.is_empty() {
                     ui.horizontal(|ui| {
-                        if ui.small_button("Useful 👍").clicked() {
+                        if ui.small_button("Helpful").clicked() {
                             send(DaemonRequest::RateActivity {
                                 id: id.to_string(),
                                 rating: 5,
                             });
                         }
-                        if ui.small_button("Not helpful 👎").clicked() {
+                        if ui.small_button("Not helpful").clicked() {
                             send(DaemonRequest::RateActivity {
                                 id: id.to_string(),
                                 rating: -1,
@@ -1614,7 +1882,7 @@ pub fn render_inline_card(
             "memory_forget_confirm" => {
                 let plan_id = card["plan_id"].as_str().unwrap_or("");
                 let fp = card["request_fingerprint"].as_str().unwrap_or("");
-                ui.strong(format!("🧹 Two-Phase Forget Plan ({plan_id})"));
+                ui.strong(format!("Two-Phase Forget Plan ({plan_id})"));
                 ui.small(format!(
                     "Blinded fingerprint: {fp} · Counts: {}",
                     card["summary_counts"]
@@ -1665,8 +1933,7 @@ pub fn render_inline_card(
                     .unwrap_or("Human assistance required");
                 let instructions = card["instructions"].as_str().unwrap_or("");
                 ui.strong(
-                    RichText::new(format!("🛞 Take the Wheel ({task_id})"))
-                        .color(palette.status_warn),
+                    RichText::new(format!("Take the Wheel ({task_id})")).color(palette.status_warn),
                 );
                 ui.small(blocker);
                 if !instructions.is_empty() {
@@ -1718,8 +1985,8 @@ fn draw_markdown_blocks(
             MarkdownBlock::Heading(level, text) => {
                 ui.label(
                     RichText::new(text)
-                        .strong()
-                        .size(26.0 - *level as f32 * 2.0),
+                        .family(egui::FontFamily::Name("semibold".into()))
+                        .size((24.0 - *level as f32 * 2.0).max(16.0)),
                 );
             }
             MarkdownBlock::Quote(text) => {
@@ -1749,6 +2016,7 @@ fn draw_markdown_blocks(
                             rest,
                             0.0,
                             egui::TextFormat {
+                                font_id: egui::FontId::proportional(15.0),
                                 color: palette.text_primary,
                                 ..Default::default()
                             },
@@ -1760,6 +2028,7 @@ fn draw_markdown_blocks(
                             &rest[..at],
                             0.0,
                             egui::TextFormat {
+                                font_id: egui::FontId::proportional(15.0),
                                 color: palette.text_primary,
                                 ..Default::default()
                             },
@@ -1781,9 +2050,11 @@ fn draw_markdown_blocks(
                             ..Default::default()
                         };
                         format.font_id = if ch == '`' {
-                            egui::FontId::monospace(13.0)
+                            egui::FontId::monospace(13.5)
+                        } else if strong {
+                            egui::FontId::new(15.0, egui::FontFamily::Name("semibold".into()))
                         } else {
-                            egui::FontId::proportional(if strong { 15.0 } else { 14.0 })
+                            egui::FontId::proportional(15.0)
                         };
                         format.italics = ch == '*' && !strong;
                         job.append(&tail[..end], 0.0, format);
@@ -1793,6 +2064,7 @@ fn draw_markdown_blocks(
                             &rest[at..],
                             0.0,
                             egui::TextFormat {
+                                font_id: egui::FontId::proportional(15.0),
                                 color: palette.text_primary,
                                 ..Default::default()
                             },
