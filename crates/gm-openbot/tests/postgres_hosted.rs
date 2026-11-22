@@ -1,3 +1,4 @@
+use base64::Engine;
 use gm_openbot::{HostedControlPlane, HostedPlaneBackend, PostgresHostedStore, SecretBackend};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -99,7 +100,7 @@ async fn pg_migrations_apply_and_are_idempotent() {
     pool.close().await;
     drop(store);
     db.cleanup().await;
-    println!("POSTGRES_TEST_RAN pg_migrations_apply_and_are_idempotent");
+    println!("\nPOSTGRES_TEST_RAN pg_migrations_apply_and_are_idempotent");
 }
 
 #[tokio::test]
@@ -130,7 +131,7 @@ async fn pg_concurrent_migrations_are_serialized() {
     drop(store_a);
     drop(store_b);
     db.cleanup().await;
-    println!("POSTGRES_TEST_RAN pg_concurrent_migrations_are_serialized");
+    println!("\nPOSTGRES_TEST_RAN pg_concurrent_migrations_are_serialized");
 }
 
 #[tokio::test]
@@ -213,7 +214,7 @@ async fn pg_tenant_isolation() {
     drop(backend);
     drop(store);
     db.cleanup().await;
-    println!("POSTGRES_TEST_RAN pg_tenant_isolation");
+    println!("\nPOSTGRES_TEST_RAN pg_tenant_isolation");
 }
 
 #[tokio::test]
@@ -246,20 +247,26 @@ async fn pg_encrypted_secret_roundtrip_and_tamper() {
 
     let pool = PgPool::connect(&db.db_url).await.unwrap();
     let row = sqlx::query(
-        "SELECT ciphertext FROM encrypted_secrets WHERE ws_id = 'ws_sec' AND account = 'openai_api_key'",
+        "SELECT ciphertext_b64 FROM encrypted_secrets WHERE ws_id = 'ws_sec' AND account = 'openai_api_key'",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    let mut cipher: Vec<u8> = row.get(0);
+    let ct_b64: String = row.get(0);
+    assert_ne!(ct_b64, plaintext);
+    assert!(!ct_b64.contains(plaintext));
+    let mut cipher = base64::engine::general_purpose::STANDARD
+        .decode(&ct_b64)
+        .unwrap();
     assert_ne!(cipher, plaintext.as_bytes());
     assert!(!String::from_utf8_lossy(&cipher).contains(plaintext));
 
     cipher[0] ^= 0xFF;
+    let tampered_b64 = base64::engine::general_purpose::STANDARD.encode(&cipher);
     sqlx::query(
-        "UPDATE encrypted_secrets SET ciphertext = $1 WHERE ws_id = 'ws_sec' AND account = 'openai_api_key'",
+        "UPDATE encrypted_secrets SET ciphertext_b64 = $1 WHERE ws_id = 'ws_sec' AND account = 'openai_api_key'",
     )
-    .bind(&cipher)
+    .bind(&tampered_b64)
     .execute(&pool)
     .await
     .unwrap();
@@ -273,7 +280,7 @@ async fn pg_encrypted_secret_roundtrip_and_tamper() {
     pool.close().await;
     drop(store);
     db.cleanup().await;
-    println!("POSTGRES_TEST_RAN pg_encrypted_secret_roundtrip_and_tamper");
+    println!("\nPOSTGRES_TEST_RAN pg_encrypted_secret_roundtrip_and_tamper");
 }
 
 #[tokio::test]
@@ -343,7 +350,7 @@ async fn pg_sqlite_migration_with_verified_backup() {
 
     drop(pg);
     db.cleanup().await;
-    println!("POSTGRES_TEST_RAN pg_sqlite_migration_with_verified_backup");
+    println!("\nPOSTGRES_TEST_RAN pg_sqlite_migration_with_verified_backup");
 }
 
 #[tokio::test]
@@ -406,7 +413,7 @@ async fn pg_sessions_and_enrollment() {
     drop(backend);
     drop(store);
     db.cleanup().await;
-    println!("POSTGRES_TEST_RAN pg_sessions_and_enrollment");
+    println!("\nPOSTGRES_TEST_RAN pg_sessions_and_enrollment");
 }
 
 #[tokio::test]
@@ -424,5 +431,5 @@ async fn pg_backend_kind_reports_postgres() {
     assert_eq!(backend.backend_kind(), "postgres");
     drop(backend);
     db.cleanup().await;
-    println!("POSTGRES_TEST_RAN pg_backend_kind_reports_postgres");
+    println!("\nPOSTGRES_TEST_RAN pg_backend_kind_reports_postgres");
 }
