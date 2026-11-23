@@ -751,6 +751,11 @@ async fn run_doctor_inner(
             "memory.sqlite",
         ] {
             let path = storage_dir.join(name);
+            let path = if name == "memory.sqlite" && path.is_dir() {
+                path.join("memory.db")
+            } else {
+                path
+            };
             if path.try_exists()? {
                 gm_openbot::check_sqlite_integrity(&path)?;
             }
@@ -1182,6 +1187,67 @@ async fn run_doctor_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn doctor_checks_the_database_inside_the_memory_store() {
+        let root = tempfile::tempdir().unwrap();
+        let config = GmConfig {
+            storage_dir: root.path().join("storage"),
+            socket_path: root.path().join("helper.sock"),
+            daemon_socket_path: root.path().join("daemon.sock"),
+            ..GmConfig::default()
+        };
+        migrate_user_data(None, &config.storage_dir, env!("CARGO_PKG_VERSION"), None).unwrap();
+        let memory =
+            gm_memory::PersonalMemoryStore::open(config.storage_dir.join("memory.sqlite")).unwrap();
+        memory
+            .record_fact(None, "A fact indexed by FTS5", &[])
+            .unwrap();
+        let db_path = memory.db_path();
+
+        let check_migration = async || {
+            run_doctor(&config, DoctorMode::Check, None)
+                .await
+                .unwrap()
+                .checks
+                .into_iter()
+                .find(|c| c.id == "migration_state")
+                .unwrap()
+        };
+        let original = fs::read(&db_path).unwrap();
+        let check = check_migration().await;
+        assert_eq!(check.outcome, DoctorCheckOutcome::Pass, "{}", check.summary);
+        assert_eq!(fs::read(&db_path).unwrap(), original);
+        drop(memory);
+
+        rusqlite::Connection::open(&db_path)
+            .unwrap()
+            .execute("DELETE FROM records_fts_docsize", [])
+            .unwrap();
+        let check = check_migration().await;
+        assert_eq!(
+            check.outcome,
+            DoctorCheckOutcome::Failed,
+            "{}",
+            check.summary
+        );
+        assert!(
+            check.summary.contains("malformed inverted index"),
+            "{}",
+            check.summary
+        );
+
+        let corrupt = b"not a SQLite database";
+        fs::write(&db_path, corrupt).unwrap();
+        let check = check_migration().await;
+        assert_eq!(
+            check.outcome,
+            DoctorCheckOutcome::Failed,
+            "{}",
+            check.summary
+        );
+        assert_eq!(fs::read(&db_path).unwrap(), corrupt);
+    }
 
     #[tokio::test]
     async fn test_doctor_check_repair_resume_and_max_attempts() {

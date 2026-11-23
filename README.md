@@ -1,28 +1,27 @@
-# DT v1.0.5
+# DT v1.0.6
 
 DT is a native desktop agent with web and mobile clients. It combines computer use, a persistent coworker workspace, and configurable model routing. Run it on your own machine or host workspaces behind HTTPS with PostgreSQL.
 
-[Downloads](https://github.com/galaxycoils/DT/releases/tag/v1.0.5) · [Release notes](docs/releases/v1.0.5.md) · [Interactive demo](https://galaxycoils.github.io/DT/) · [Operations guide](docs/OPERATIONS.md)
+[Downloads](https://github.com/galaxycoils/DT/releases/tag/v1.0.6) · [Release notes](docs/releases/v1.0.6.md) · [Interactive demo](https://galaxycoils.github.io/DT/) · [Operations guide](docs/OPERATIONS.md)
 
 ## What's new
 
-- The React client at `/app/` accepts the local Companion token on loopback. It keeps the token in memory and resumes the live stream after transient disconnects, including mid-reply.
-- Page previews run on a separate loopback port in a scripts-only sandbox. The client explains when you need the daemon's canonical URL or a newer daemon.
-- Hosted workspaces use enrollment, secure cookies, and CSRF protection. Caddy redirects the HTTPS root to `/app/` and forwards the app and v1 API to DT.
-- Doctor and the setup guide explain how to supply the web bundle and choose between background and foreground operation.
+DT Doctor now checks the SQLite database at `memory.sqlite/memory.db` on existing profiles. This fixes the false `migration_state` failure and profile-preservation warning for healthy databases. Doctor still reports genuine database corruption.
+
+Install v1.0.6 and rerun `dt doctor check` to verify your profile.
 
 ## Downloads
 
 | Platform | Asset |
 | --- | --- |
-| Ubuntu 24.04 x86-64 | [`dt_1.0.5_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/dt_1.0.5_amd64.deb) |
-| Ubuntu 24.04 ARM64 | [`dt_1.0.5_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/dt_1.0.5_arm64.deb) |
-| Linux x86-64 standalone | [`DT-1.0.5-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-linux-x86_64-binaries.tar.gz) |
-| macOS Apple Silicon | [`DT-1.0.5-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-macos-aarch64.dmg) |
-| macOS Intel | [`DT-1.0.5-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-macos-x86_64.dmg) |
-| Windows 11 x64 | [`DT-1.0.5-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-windows-x86_64-setup.exe) |
-| Windows 11 ARM64 | [`DT-1.0.5-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-windows-aarch64-setup.exe) |
-| React web client | [`DT-1.0.5-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.5/DT-1.0.5-web-client.tar.gz) |
+| Ubuntu 24.04 x86-64 | [`dt_1.0.6_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/dt_1.0.6_amd64.deb) |
+| Ubuntu 24.04 ARM64 | [`dt_1.0.6_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/dt_1.0.6_arm64.deb) |
+| Linux x86-64 standalone | [`DT-1.0.6-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/DT-1.0.6-linux-x86_64-binaries.tar.gz) |
+| macOS Apple Silicon | [`DT-1.0.6-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/DT-1.0.6-macos-aarch64.dmg) |
+| macOS Intel | [`DT-1.0.6-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/DT-1.0.6-macos-x86_64.dmg) |
+| Windows 11 x64 | [`DT-1.0.6-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/DT-1.0.6-windows-x86_64-setup.exe) |
+| Windows 11 ARM64 | [`DT-1.0.6-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/DT-1.0.6-windows-aarch64-setup.exe) |
+| React web client | [`DT-1.0.6-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.6/DT-1.0.6-web-client.tar.gz) |
 
 Download the package and its matching `.sha256` file into the same directory. Run `sha256sum -c <asset>.sha256` on Linux or `shasum -a 256 -c <asset>.sha256` on macOS. On Windows, compare `Get-FileHash -Algorithm SHA256 <asset>` with the sidecar. The installers also have build metadata and SBOMs.
 
@@ -42,7 +41,7 @@ Open the React app at [http://127.0.0.1:7433/app/](http://127.0.0.1:7433/app/) a
 
 The Ubuntu packages, standalone Linux archive, and Docker image include the React build. For macOS and Windows, verify and extract the matching web client archive. Copy the contents of `dist` into the `web` subdirectory of your DT storage directory, then restart the background daemon. For foreground use, set `DT_WEB_DIST` to the extracted `dist` directory before starting `dt serve`.
 
-Use the v1.0.5 daemon and web bundle together. For split-view Pages, open the canonical `127.0.0.1` app URL on the machine running DT.
+Use the v1.0.6 daemon and web bundle together. The React client resumes its live stream after transient disconnects. For split-view Pages, open the canonical `127.0.0.1` app URL on the machine running DT.
 
 ## Self-host with PostgreSQL
 
@@ -62,7 +61,7 @@ Use the Rust toolchain pinned in `rust-toolchain.toml` and Node.js 22. DT's Rust
 ```sh
 git clone https://github.com/galaxycoils/darius.git Darius
 git -C Darius checkout f47a4ce980abecb751c9f5c79e1c424a20100433
-git clone --branch v1.0.5 https://github.com/galaxycoils/DT.git DT
+git clone --branch v1.0.6 https://github.com/galaxycoils/DT.git DT
 cd DT
 ./tools/bootstrap.sh
 cargo build --release --locked --workspace --bins

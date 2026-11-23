@@ -2,6 +2,10 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
+## [v1.0.6] — DT Doctor Memory Check (2026-11-23)
+
+- Fixed a false `migration_state` failure on profiles that store their memory database at `memory.sqlite/memory.db`. Doctor now checks the nested database and still flags corruption.
+
 ## [v1.0.5] — Local Web Pairing and Live Reconnect (2026-11-22)
 
 - Added memory-only Companion token pairing to the React client on loopback.

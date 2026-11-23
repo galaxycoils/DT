@@ -4,6 +4,7 @@
 use chrono::Utc;
 use gm_core::error::{GmError, Result};
 use rusqlite::Connection;
+use rusqlite::backup::{Backup, StepResult};
 use std::path::Path;
 use tracing::warn;
 
@@ -17,10 +18,24 @@ pub fn check_sqlite_integrity(path: &Path) -> Result<()> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| GmError::Platform(format!("Failed to open SQLite database for check: {e}")))?;
-    let check: String = conn
-        .prepare("PRAGMA quick_check(1)")
-        .and_then(|mut stmt| stmt.query_row([], |r| r.get(0)))
-        .map_err(|e| GmError::Platform(format!("Integrity check query failed: {e}")))?;
+    let mut check = sqlite_quick_check(&conn)?;
+    if check.starts_with("unable to validate the inverted index")
+        && check.ends_with("attempt to write a readonly database")
+    {
+        // SQLite 3.45.0 needs a writable connection to check FTS indexes.
+        let snapshot_error =
+            |e| GmError::Platform(format!("Cannot snapshot SQLite for check: {e}"));
+        let mut snapshot = Connection::open("").map_err(snapshot_error)?;
+        let copied = Backup::new(&conn, &mut snapshot)
+            .and_then(|backup| backup.step(-1))
+            .map_err(snapshot_error)?;
+        if !matches!(copied, StepResult::Done) {
+            return Err(GmError::Platform(format!(
+                "SQLite snapshot for integrity check did not complete: {copied:?}"
+            )));
+        }
+        check = sqlite_quick_check(&snapshot)?;
+    }
     if check.eq_ignore_ascii_case("ok") {
         Ok(())
     } else {
@@ -28,6 +43,11 @@ pub fn check_sqlite_integrity(path: &Path) -> Result<()> {
             "Integrity check failed: {check}"
         )))
     }
+}
+
+fn sqlite_quick_check(conn: &Connection) -> Result<String> {
+    conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
+        .map_err(|e| GmError::Platform(format!("Integrity check query failed: {e}")))
 }
 
 pub fn open_sqlite_with_recovery(path: &Path) -> Result<Connection> {
