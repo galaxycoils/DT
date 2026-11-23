@@ -20,6 +20,7 @@ use crate::ui::{
 use base64::Engine;
 use eframe::egui;
 mod session;
+mod voice_capture;
 use gm_core::{
     config::GmConfig,
     error::{GmError, Result},
@@ -889,15 +890,52 @@ struct NativeApp {
     config_path: std::path::PathBuf,
     config_original: Option<Vec<u8>>,
     settings_notice: String,
+    voice_recording: Option<voice_capture::Recording>,
+    transcription_target: Option<String>,
 }
 
 impl NativeApp {
+    fn cancel_voice_capture(&mut self) {
+        self.voice_recording = None;
+        self.transcription_target = None;
+        self.ui_state.voice_recording = false;
+    }
+
+    fn finish_recording(&mut self) {
+        self.ui_state.voice_recording = false;
+        let Some(recording) = self.voice_recording.take() else {
+            return;
+        };
+        match recording.finish() {
+            Ok(wav) => {
+                use base64::Engine as _;
+                self.transcription_target = Some(self.draft_target.clone());
+                self.send(DaemonRequest::ManageSystem {
+                    op: "voice_transcribe".into(),
+                    payload: serde_json::json!({
+                        "wav_base64": base64::engine::general_purpose::STANDARD.encode(wav)
+                    }),
+                });
+            }
+            Err(error) => self.shared.update(|s| s.composer_error = Some(error)),
+        }
+    }
+
     fn sync_draft_target(&mut self) {
         let target = if self.ui_state.active_chat_kind == "channel" {
             format!("channel:{}", self.channel)
         } else {
             format!("dm:{}", self.bot)
         };
+        if target != self.draft_target
+            && (self.voice_recording.is_some() || self.transcription_target.is_some())
+        {
+            self.cancel_voice_capture();
+            self.send(DaemonRequest::ManageSystem {
+                op: "voice_stop".into(),
+                payload: Value::Null,
+            });
+        }
         switch_draft(
             &mut self.draft_target,
             &mut self.draft,
@@ -1182,6 +1220,7 @@ impl NativeApp {
 
 impl eframe::App for NativeApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.cancel_voice_capture();
         if let Some(store) = &self.shared.session {
             store.edit(|data| self.save_draft(data));
             if let Err(error) = store.flush() {
@@ -1191,6 +1230,16 @@ impl eframe::App for NativeApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self
+            .voice_recording
+            .as_ref()
+            .is_some_and(voice_capture::Recording::expired)
+        {
+            self.finish_recording();
+        }
+        if self.voice_recording.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
         let previous_section = self.ui_state.section;
         let previous_modal = self.ui_state.active_modal.clone();
         // 1. Handle global GrokBot hotkeys & 5-tier Escape stack
@@ -1202,6 +1251,7 @@ impl eframe::App for NativeApp {
         }
         if hotkey_outcome.toggle_dictation {
             if self.ui_state.dictation_active {
+                self.cancel_voice_capture();
                 self.ui_state.dictation_active = false;
                 self.ui_state.voice_active = false;
                 self.send(DaemonRequest::ManageSystem {
@@ -1219,6 +1269,9 @@ impl eframe::App for NativeApp {
         }
 
         if previous_section != self.ui_state.section {
+            if self.ui_state.section != WorkspaceSection::Bots {
+                self.cancel_voice_capture();
+            }
             match self.ui_state.section {
                 WorkspaceSection::Feed => self.send(DaemonRequest::ListActivity),
                 WorkspaceSection::Goals => self.send(DaemonRequest::ListGoals),
@@ -1258,7 +1311,8 @@ impl eframe::App for NativeApp {
             self.settings_config.ui = ui;
         }
 
-        if let Ok(mut state) = self.shared.state.lock() {
+        let shared_state = Arc::clone(&self.shared.state);
+        if let Ok(mut state) = shared_state.lock() {
             if let Some(snapshot) = state.pending_ui_snapshot.take() {
                 self.ui_state.server_snapshot = snapshot;
             }
@@ -1305,7 +1359,16 @@ impl eframe::App for NativeApp {
                         let mode = status_val["mode"].as_str().unwrap_or("idle");
                         self.ui_state.voice_active = active && mode != "dictate";
                         self.ui_state.dictation_active = active && mode == "dictate";
+                        if !active
+                            || !status_val["consent_acknowledged"]
+                                .as_bool()
+                                .unwrap_or(false)
+                        {
+                            self.cancel_voice_capture();
+                        }
                         if key == "voice_transcribe"
+                            && self.transcription_target.take().as_deref()
+                                == Some(self.draft_target.as_str())
                             && let Some(text) = value["text"].as_str()
                             && !text.trim().is_empty()
                         {
@@ -1770,6 +1833,7 @@ impl eframe::App for NativeApp {
                             }
                             ChatCanvasAction::ToggleDictation => {
                                 if self.ui_state.dictation_active {
+                                    self.cancel_voice_capture();
                                     self.ui_state.dictation_active = false;
                                     self.send(DaemonRequest::ManageSystem {
                                         op: "voice_stop".into(),
@@ -1789,6 +1853,7 @@ impl eframe::App for NativeApp {
                             }
                             ChatCanvasAction::VoiceConsent(granted) => {
                                 if !granted {
+                                    self.cancel_voice_capture();
                                     self.ui_state.voice_active = false;
                                     self.ui_state.dictation_active = false;
                                 }
@@ -1799,6 +1864,24 @@ impl eframe::App for NativeApp {
                                         "bot_id": self.bot,
                                     }),
                                 });
+                            }
+                            ChatCanvasAction::VoiceRecord => {
+                                if self.voice_recording.is_some() {
+                                    self.finish_recording();
+                                } else if self.transcription_target.is_none() {
+                                    match voice_capture::Recording::start() {
+                                        Ok(recording) => {
+                                            self.ui_state.voice_recording = true;
+                                            self.voice_recording = Some(recording);
+                                            ctx.request_repaint_after(
+                                                std::time::Duration::from_millis(100),
+                                            );
+                                        }
+                                        Err(error) => {
+                                            self.shared.update(|s| s.composer_error = Some(error))
+                                        }
+                                    }
+                                }
                             }
                             ChatCanvasAction::VoiceSpeak(text) => {
                                 self.send(DaemonRequest::ManageSystem {
@@ -1813,6 +1896,7 @@ impl eframe::App for NativeApp {
                                 });
                             }
                             ChatCanvasAction::VoiceStop => {
+                                self.cancel_voice_capture();
                                 self.ui_state.voice_active = false;
                                 self.ui_state.dictation_active = false;
                                 self.send(DaemonRequest::ManageSystem {
@@ -2898,6 +2982,8 @@ pub fn run(
                 config_path,
                 config_original,
                 settings_notice: String::new(),
+                voice_recording: None,
+                transcription_target: None,
             }))
         }),
     )

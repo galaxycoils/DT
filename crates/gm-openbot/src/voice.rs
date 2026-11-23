@@ -193,7 +193,14 @@ impl LocalVoiceEngine {
         check_loopback(&cfg.tts_endpoint)?;
         Ok(Self {
             cfg,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|e| {
+                    GmError::Platform(format!("Cannot initialize local voice transport: {e}"))
+                })?,
             ipc_token: None,
         })
     }
@@ -291,11 +298,20 @@ impl LocalVoiceEngine {
                         resp.status()
                     )));
                 }
-                let bytes = resp
-                    .bytes()
+                let mut resp = resp;
+                let mut bytes = Vec::new();
+                while let Some(chunk) = resp
+                    .chunk()
                     .await
                     .map_err(|e| GmError::Platform(format!("TTS body read error: {e}")))?
-                    .to_vec();
+                {
+                    if bytes.len() + chunk.len() > MAX_AUDIO_BUFFER_BYTES {
+                        return Err(GmError::Platform(
+                            "Synthesized audio exceeded its size limit".into(),
+                        ));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
                 session.append_turn(session.bot_id.clone(), clean, true);
                 session.state = VoiceSessionState::Listening;
                 Ok(bytes)
@@ -374,6 +390,18 @@ impl Drop for ManagedVoiceRuntime {
 }
 
 /// Shared daemon/companion controller for interactive Voice & Dictation sessions.
+struct Playback {
+    child: std::process::Child,
+    _audio: Option<tempfile::NamedTempFile>,
+}
+
+impl Drop for Playback {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// Enforces explicit microphone consent, bounded audio buffers, local-only endpoints,
 /// and immediate child-process teardown on stop, barge-in, or consent revocation.
 #[derive(Clone)]
@@ -383,7 +411,8 @@ pub struct VoiceSessionManager {
     session: std::sync::Arc<parking_lot::Mutex<Option<VoiceSession>>>,
     mode: std::sync::Arc<parking_lot::Mutex<String>>,
     last_error: std::sync::Arc<parking_lot::Mutex<Option<String>>>,
-    playback_child: std::sync::Arc<parking_lot::Mutex<Option<std::process::Child>>>,
+    playback: std::sync::Arc<parking_lot::Mutex<Option<Playback>>>,
+    revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl VoiceSessionManager {
@@ -398,7 +427,8 @@ impl VoiceSessionManager {
             session: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             mode: std::sync::Arc::new(parking_lot::Mutex::new("idle".into())),
             last_error: std::sync::Arc::new(parking_lot::Mutex::new(None)),
-            playback_child: std::sync::Arc::new(parking_lot::Mutex::new(None)),
+            playback: Default::default(),
+            revision: Default::default(),
         }
     }
 
@@ -407,21 +437,43 @@ impl VoiceSessionManager {
         let entries = std::fs::read_dir(&dir).ok()?;
         for entry in entries.flatten() {
             let candidate = entry.path().join("payload.bin");
-            if candidate.is_file() {
+            if candidate.is_file() && entry.path().join("verified.json").is_file() {
                 return Some(candidate);
             }
         }
         None
     }
 
-    fn kill_playback(&self) {
-        if let Some(mut child) = self.playback_child.lock().take() {
-            let _ = child.kill();
-            let _ = child.wait();
+    fn cancel_audio(&self) -> u64 {
+        let revision = self
+            .revision
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.playback.lock().take();
+        revision
+    }
+
+    fn check_revision(&self, revision: u64) -> Result<()> {
+        if self.revision.load(std::sync::atomic::Ordering::SeqCst) != revision {
+            return Err(GmError::Platform("Voice operation cancelled".into()));
         }
+        Ok(())
     }
 
     pub fn status(&self) -> serde_json::Value {
+        let mut playback = self.playback.lock();
+        if playback
+            .as_mut()
+            .is_some_and(|player| !matches!(player.child.try_wait(), Ok(None)))
+        {
+            playback.take();
+            if let Some(session) = self.session.lock().as_mut()
+                && session.state == VoiceSessionState::Speaking
+            {
+                session.state = VoiceSessionState::Listening;
+            }
+        }
+        drop(playback);
         let sess = self.session.lock().clone();
         let mode = self.mode.lock().clone();
         let last_error = self.last_error.lock().clone();
@@ -452,7 +504,7 @@ impl VoiceSessionManager {
     }
 
     pub fn start(&self, bot_id: &str, mode: &str) -> serde_json::Value {
-        self.kill_playback();
+        self.cancel_audio();
         let clean_mode = if mode.eq_ignore_ascii_case("dictate") {
             "dictate"
         } else {
@@ -474,7 +526,7 @@ impl VoiceSessionManager {
 
     pub fn set_consent(&self, granted: bool, bot_id: Option<&str>) -> serde_json::Value {
         if !granted {
-            self.kill_playback();
+            self.cancel_audio();
             if let Some(ref mut sess) = *self.session.lock() {
                 sess.revoke_consent();
             }
@@ -509,7 +561,7 @@ impl VoiceSessionManager {
     }
 
     pub fn barge_in(&self) -> serde_json::Value {
-        self.kill_playback();
+        self.cancel_audio();
         if let Some(ref mut sess) = *self.session.lock() {
             sess.request_barge_in();
         }
@@ -517,7 +569,7 @@ impl VoiceSessionManager {
     }
 
     pub fn stop(&self) -> serde_json::Value {
-        self.kill_playback();
+        self.cancel_audio();
         if let Some(ref mut sess) = *self.session.lock() {
             sess.end();
         }
@@ -526,6 +578,7 @@ impl VoiceSessionManager {
     }
 
     pub async fn transcribe_wav(&self, wav_bytes: &[u8]) -> Result<serde_json::Value> {
+        let revision = self.revision.load(std::sync::atomic::Ordering::SeqCst);
         let mut sess = self.session.lock().clone().ok_or_else(|| {
             GmError::SafetyViolation("Start a voice or dictation session first".into())
         })?;
@@ -551,7 +604,10 @@ impl VoiceSessionManager {
         let engine = LocalVoiceEngine::new(self.cfg.clone())?;
         match engine.transcribe_wav(&mut sess, wav_bytes).await {
             Ok(text) => {
-                *self.session.lock() = Some(sess);
+                let mut current = self.session.lock();
+                self.check_revision(revision)?;
+                *current = Some(sess);
+                drop(current);
                 *self.last_error.lock() = None;
                 Ok(serde_json::json!({
                     "text": text,
@@ -560,19 +616,21 @@ impl VoiceSessionManager {
                 }))
             }
             Err(http_err) => {
+                self.check_revision(revision)?;
                 // Fallback to installed `whisper-cli` + verified `whisper-stt-base-en` payload if available.
                 if let Some(model_path) = self.find_installed_component("whisper-stt-base-en") {
-                    let tmp_wav = std::env::temp_dir()
-                        .join(format!("dt-voice-{}.wav", uuid::Uuid::new_v4().simple()));
-                    std::fs::write(&tmp_wav, wav_bytes)?;
-                    let output = std::process::Command::new("whisper-cli")
+                    let tmp_wav = write_playback_wave(wav_bytes)?;
+                    let output = tokio::process::Command::new("whisper-cli")
                         .arg("-m")
                         .arg(&model_path)
                         .arg("-f")
-                        .arg(&tmp_wav)
+                        .arg(tmp_wav.path())
                         .arg("-nt")
+                        .kill_on_drop(true)
                         .output();
-                    let _ = std::fs::remove_file(&tmp_wav);
+                    let output = tokio::time::timeout(std::time::Duration::from_secs(30), output)
+                        .await
+                        .map_err(|_| GmError::Platform("Local Whisper request timed out".into()))?;
                     if let Ok(out) = output
                         && out.status.success()
                     {
@@ -581,7 +639,10 @@ impl VoiceSessionManager {
                             sess.append_turn("caller", &text, true);
                         }
                         sess.state = VoiceSessionState::Listening;
-                        *self.session.lock() = Some(sess);
+                        let mut current = self.session.lock();
+                        self.check_revision(revision)?;
+                        *current = Some(sess);
+                        drop(current);
                         *self.last_error.lock() = None;
                         return Ok(serde_json::json!({
                             "text": text,
@@ -604,7 +665,10 @@ impl VoiceSessionManager {
                     )
                 };
                 sess.state = VoiceSessionState::Listening;
-                *self.session.lock() = Some(sess);
+                let mut current = self.session.lock();
+                self.check_revision(revision)?;
+                *current = Some(sess);
+                drop(current);
                 *self.last_error.lock() = Some(hint.clone());
                 Err(GmError::Platform(hint))
             }
@@ -616,47 +680,108 @@ impl VoiceSessionManager {
         if clean.is_empty() {
             return Err(GmError::Config("Nothing to speak".into()));
         }
-        let mut sess = self
+        if self.cfg.tts_mode == TtsMode::Disabled {
+            return Err(GmError::Config("Local TTS is disabled".into()));
+        }
+        let revision = self.cancel_audio();
+        let mut session = self
             .session
             .lock()
             .clone()
-            .unwrap_or_else(|| VoiceSession::start("muse"));
-        self.kill_playback();
-        let engine = LocalVoiceEngine::new(self.cfg.clone())?;
-        if let Ok(audio_bytes) = engine.synthesize_speech(&mut sess, clean).await {
-            *self.session.lock() = Some(sess);
-            *self.last_error.lock() = None;
-            return Ok(serde_json::json!({
-                "spoken": true,
-                "engine": "local_http_tts",
-                "bytes": audio_bytes.len(),
-                "status": self.status(),
-            }));
+            .ok_or_else(|| GmError::Config("Start a voice session first".into()))?;
+        if session.state == VoiceSessionState::Ended {
+            return Err(GmError::Config("Start a voice session first".into()));
         }
-
-        #[cfg(target_os = "macos")]
-        {
-            if std::path::Path::new("/usr/bin/say").is_file() {
-                let child = std::process::Command::new("/usr/bin/say")
-                    .arg(clean)
-                    .spawn()?;
-                *self.playback_child.lock() = Some(child);
-                sess.append_turn(sess.bot_id.clone(), clean, true);
-                sess.state = VoiceSessionState::Speaking;
-                *self.session.lock() = Some(sess);
-                *self.last_error.lock() = None;
-                return Ok(serde_json::json!({
-                    "spoken": true,
-                    "engine": "macos_say",
-                    "status": self.status(),
+        session.barge_in_requested = false;
+        let audio = if self.cfg.tts_mode == TtsMode::LocalHttp {
+            Some(
+                LocalVoiceEngine::new(self.cfg.clone())?
+                    .synthesize_speech(&mut session, clean)
+                    .await,
+            )
+        } else {
+            None
+        };
+        let mut playback = self.playback.lock();
+        self.check_revision(revision)?;
+        let (child, file, engine) = match audio {
+            Some(Ok(bytes)) => {
+                let file = write_playback_wave(&bytes)?;
+                let child = wav_player(file.path()).spawn().map_err(|e| {
+                    GmError::Platform(format!("Cannot start the local audio player: {e}"))
+                })?;
+                (child, Some(file), "local_http_tts")
+            }
+            other => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = other;
+                    let child = std::process::Command::new("/usr/bin/say")
+                        .arg("--")
+                        .arg(clean)
+                        .spawn()?;
+                    session.append_turn(session.bot_id.clone(), clean, true);
+                    (child, None, "macos_say")
+                }
+                #[cfg(not(target_os = "macos"))]
+                return Err(other.and_then(|result| result.err()).unwrap_or_else(|| {
+                    GmError::Config(
+                        "Configure a loopback TTS server to play audio on this system".into(),
+                    )
                 }));
             }
-        }
-
-        let hint = "Local TTS runtime is not running. Install 'speech_tts' in Settings -> Local Components or start the local TTS server.";
-        *self.last_error.lock() = Some(hint.into());
-        Err(GmError::Platform(hint.into()))
+        };
+        *playback = Some(Playback {
+            child,
+            _audio: file,
+        });
+        session.state = VoiceSessionState::Speaking;
+        *self.session.lock() = Some(session);
+        *self.last_error.lock() = None;
+        drop(playback);
+        Ok(
+            serde_json::json!({ "playback_started": true, "engine": engine, "status": self.status() }),
+        )
     }
+}
+
+fn write_playback_wave(bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
+    use std::io::Write;
+    if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return Err(GmError::Platform(
+            "Local TTS server must return WAV audio".into(),
+        ));
+    }
+    let mut file = tempfile::Builder::new().suffix(".wav").tempfile()?;
+    file.write_all(bytes)?;
+    file.flush()?;
+    Ok(file)
+}
+
+fn wav_player(path: &std::path::Path) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut player = std::process::Command::new("/usr/bin/afplay");
+    #[cfg(target_os = "linux")]
+    let mut player = std::process::Command::new("/usr/bin/pw-play");
+    #[cfg(target_os = "windows")]
+    let mut player = {
+        let mut cmd = std::process::Command::new("powershell.exe");
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(New-Object System.Media.SoundPlayer $env:DT_WAVE_FILE).PlaySync()",
+        ])
+        .env("DT_WAVE_FILE", path);
+        cmd
+    };
+    #[cfg(not(target_os = "windows"))]
+    player.arg(path);
+    player
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    player
 }
 
 #[cfg(test)]

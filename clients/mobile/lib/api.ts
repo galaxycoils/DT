@@ -2,7 +2,12 @@ import * as SecureStore from "expo-secure-store";
 
 const CREDENTIAL_KEY = "dt_hosted_connection_v1";
 
-export type Connection = { baseUrl: string; token: string; workspaceId: string };
+export type Connection = {
+  baseUrl: string;
+  token: string;
+  workspaceId: string;
+  deviceSession?: true;
+};
 export type Bot = { id: string; display_name?: string; role_title?: string };
 export type Channel = { id: string; name?: string; topic?: string };
 export type MessageCard = {
@@ -171,6 +176,18 @@ export function mobileV1Endpoint(baseUrl: string, path: string): string {
   return `${root.origin}/api/v1/${path.replace(/^\//, "")}`;
 }
 
+export async function enrollDevice(baseUrl: string, enrollmentToken: string): Promise<Connection> {
+  const session = await request<{ device_session?: string; ws_id?: string }>(
+    { baseUrl, token: "", workspaceId: "" },
+    "/auth/session",
+    { method: "POST", body: JSON.stringify({ mode: "device", enrollment_token: enrollmentToken, ttl_seconds: 86400 }) },
+  );
+  if (!session.device_session || !session.ws_id) {
+    throw new Error("This DT server does not support mobile enrollment. Update the server and request a new token.");
+  }
+  return { baseUrl, token: session.device_session, workspaceId: session.ws_id, deviceSession: true };
+}
+
 export async function saveConnection(connection: Connection): Promise<void> {
   await SecureStore.setItemAsync(CREDENTIAL_KEY, JSON.stringify(connection), {
     keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
@@ -208,9 +225,10 @@ export async function request<T>(
       ...init,
       signal: controller.signal,
       redirect: "error",
+      credentials: "omit",
       headers: {
-        Authorization: `Bearer ${connection.token}`,
-        "X-DT-Workspace-Id": connection.workspaceId,
+        ...(connection.token ? { Authorization: `Bearer ${connection.token}` } : {}),
+        ...(connection.workspaceId ? { "X-DT-Workspace-Id": connection.workspaceId } : {}),
         "Content-Type": "application/json",
         ...(init?.headers as Record<string, string> | undefined),
       },

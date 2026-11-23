@@ -267,10 +267,14 @@ pub fn parse_github_release_json(
 }
 
 fn trusted_release_key() -> Result<String> {
-    let compiled = option_env!("GM_RELEASE_PUBLIC_KEY_HEX").map(str::to_owned);
+    let compiled = option_env!("GM_RELEASE_PUBLIC_KEY_HEX")
+        .filter(|key| !key.trim().is_empty())
+        .map(str::to_owned);
     #[cfg(debug_assertions)]
     let compiled = compiled.or_else(|| std::env::var("GM_UPDATE_TRUSTED_PUBLIC_KEY_HEX").ok());
-    compiled.ok_or_else(|| GmError::Config("No pinned DT update publisher key".into()))
+    compiled.ok_or_else(|| GmError::Config(
+        "This build uses manual updates. Visit https://github.com/galaxycoils/DT/releases for your platform and its SHA-256 checksum.".into()
+    ))
 }
 
 async fn trusted_update_metadata(
@@ -877,6 +881,25 @@ pub async fn run_update(
         .or_else(|| std::env::var("GM_UPDATE_REPO").ok())
         .unwrap_or_else(|| DEFAULT_REPO.to_string());
 
+    if check_only && repo == DEFAULT_REPO && trusted_release_key().is_err() {
+        let release_page = format!("https://github.com/{DEFAULT_REPO}/releases");
+        if json_output {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "status": "manual_update",
+                    "current_version": env!("CARGO_PKG_VERSION"),
+                    "release_url": release_page,
+                })
+            );
+        } else {
+            println!(
+                "This build uses manual updates. Choose your platform package and SHA-256 checksum at {release_page}"
+            );
+        }
+        return Ok(());
+    }
+
     let result = match check_latest_release(&repo, None).await {
         Ok(res) => res,
         Err(e) => {
@@ -890,7 +913,7 @@ pub async fn run_update(
                 println!("{}", serde_json::to_string_pretty(&err_json).unwrap());
             } else {
                 eprintln!("Error checking for updates from {}: {}", repo, e);
-                eprintln!("Ensure internet connectivity or check the GitHub repository URL.");
+                eprintln!("For manual updates, use https://github.com/galaxycoils/DT/releases.");
             }
             return Err(e);
         }

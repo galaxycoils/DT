@@ -3,10 +3,10 @@ import { Button, ScrollView, Text, TextInput, useColorScheme, View } from "react
 import { useFocusEffect } from "expo-router";
 import {
   clearConnection,
+  enrollDevice,
   loadConnection,
   request,
   saveConnection,
-  type Connection,
   type DoctorStatus,
   type ProviderProfileSummary,
 } from "../lib/api";
@@ -73,22 +73,17 @@ export default function SettingsScreen() {
     setBusy(true);
     setStatus("");
     try {
-      const connection: Connection = {
-        baseUrl: baseUrl.trim(),
-        token: token.trim(),
-        workspaceId: workspace.trim() || "default",
-      };
-      const [session, report, provRes] = await Promise.all([
-        request<{ active_workspace: string }>(connection, "/workspaces"),
+      const connection = await enrollDevice(baseUrl.trim(), token.trim());
+      await saveConnection(connection);
+      setSaved(true);
+      setToken("");
+      setWorkspace(connection.workspaceId);
+      const [report, provRes] = await Promise.all([
         request<DoctorStatus>(connection, "/doctor"),
         request<{ profiles?: ProviderProfileSummary[] }>(connection, "/system/providers").catch(
           () => ({ profiles: [] }),
         ),
       ]);
-      await saveConnection({ ...connection, workspaceId: session.active_workspace });
-      setToken("");
-      setSaved(true);
-      setWorkspace(session.active_workspace);
       setDoctor(report);
       setProviders(Array.isArray(provRes?.profiles) ? provRes.profiles : []);
     } catch (error) {
@@ -101,12 +96,23 @@ export default function SettingsScreen() {
   async function disconnect() {
     setBusy(true);
     try {
+      const connection = await loadConnection();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const revoked = !connection?.deviceSession || await request(connection, "/auth/logout", {
+        method: "POST",
+        signal: controller.signal,
+      }).then(() => true, () => false);
+      clearTimeout(timeout);
       await clearConnection();
+      setWorkspace("");
       setSaved(false);
       setToken("");
       setDoctor(null);
       setProviders([]);
-      setStatus("Disconnected from DT server.");
+      setStatus(revoked
+        ? "Disconnected from DT server."
+        : "Disconnected on this device. The server session could not be revoked and will expire.");
     } catch {
       setStatus("Could not remove the saved connection.");
     } finally {
@@ -132,22 +138,14 @@ export default function SettingsScreen() {
         placeholderTextColor={tokens.mutedForeground}
         style={inputStyle}
       />
+      {saved ? <Text style={{ color: tokens.foreground }}>Workspace {workspace}</Text> : null}
       <TextInput
-        accessibilityLabel="Workspace ID"
-        value={workspace}
-        onChangeText={setWorkspace}
-        autoCapitalize="none"
-        placeholder="Workspace ID"
-        placeholderTextColor={tokens.mutedForeground}
-        style={inputStyle}
-      />
-      <TextInput
-        accessibilityLabel="Operator-issued access token"
+        accessibilityLabel="Workspace enrollment token"
         value={token}
         onChangeText={setToken}
         autoCapitalize="none"
         secureTextEntry
-        placeholder="Operator-issued access token"
+        placeholder="Workspace enrollment token"
         placeholderTextColor={tokens.mutedForeground}
         style={inputStyle}
       />

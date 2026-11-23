@@ -60,7 +60,7 @@ jobs:
             if [[ -n "$CI_RUN_ID" ]]; then
               echo "Downloading installer artifacts from ci.yml run $CI_RUN_ID..."
               for art in installer-ubuntu-24.04 installer-ubuntu-24.04-arm installer-windows installer-macos; do
-                gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$art" --dir "downloaded/$art" || true
+                gh run download "$CI_RUN_ID" --repo "$GITHUB_REPOSITORY" -n "$art" --dir "downloaded/$art"
               done
             fi
           fi
@@ -83,7 +83,7 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
               pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev \
               libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-              libpipewire-0.3-dev libspa-0.2-dev clang
+              libasound2-dev libpipewire-0.3-dev libspa-0.2-dev clang
             rustup toolchain install 1.99.1
             rustup default 1.99.1
             cargo build --manifest-path grok-muse/Cargo.toml --release --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
@@ -101,6 +101,18 @@ jobs:
           BIN_TAR="DT-${VERSION}-linux-x86_64-binaries.tar.gz"
           tar -czf "upload-dir/${BIN_TAR}" -C bin-stage "DT-${VERSION}-linux-x86_64"
           (cd upload-dir && sha256sum "${BIN_TAR}" > "${BIN_TAR}.sha256")
+
+          installers=(
+            "DT-${VERSION}-macos-aarch64.dmg" "DT-${VERSION}-macos-x86_64.dmg"
+            "DT-${VERSION}-windows-aarch64-setup.exe" "DT-${VERSION}-windows-x86_64-setup.exe"
+            "dt_${VERSION}_amd64.deb" "dt_${VERSION}_arm64.deb"
+          )
+          for installer in "${installers[@]}"; do
+            if [[ ! -s "upload-dir/$installer" || ! -s "upload-dir/$installer.sha256" ]]; then
+              echo "Missing installer or SHA-256 sidecar for $installer" >&2
+              exit 1
+            fi
+          done
 
           # 4. Verify every SHA-256 sidecar before uploading
           (cd upload-dir && for s in *.sha256; do sha256sum -c "$s"; done)

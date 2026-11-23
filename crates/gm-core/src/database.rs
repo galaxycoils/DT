@@ -20,6 +20,12 @@ pub fn acquire_database_lease(path: &Path, exclusive: bool) -> Result<File> {
     lease(path, exclusive, false)
 }
 
+pub fn recovery_directory(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".recovering");
+    name.into()
+}
+
 fn lease(path: &Path, exclusive: bool, wait: bool) -> Result<File> {
     let mut name = path.as_os_str().to_os_string();
     name.push(".lease");
@@ -129,6 +135,11 @@ impl Database {
             ensure_private_dir(parent)?;
         }
         let lease = acquire_database_lease(path, false)?;
+        if recovery_directory(path).try_exists()? {
+            return Err(error(
+                "Interrupted recovery. Resume diagnostics recover-database before reopening.",
+            ));
+        }
         if corrupt_header(path)? {
             return Err(error(
                 "Invalid database header. Stop all clients and use explicit recovery.",

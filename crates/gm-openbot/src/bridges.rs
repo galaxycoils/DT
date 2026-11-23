@@ -1,12 +1,13 @@
 use crate::supervisor::OpenBotSupervisor;
 use chrono::Utc;
 use gm_core::config::ChatBridgesConfig;
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use gm_core::ipc::QueueControlAction;
 use gm_muse::directives::{RenderSurface, parse_directives, render_plain};
 use gm_safety::{AuditCategory, format_external_content_fence};
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -28,22 +29,22 @@ pub struct BridgeChannelMapping {
 
 #[derive(Clone)]
 pub struct BridgeMappingStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Database>>,
 }
 
 impl BridgeMappingStore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init(conn)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
+        let conn = Database::in_memory()
             .map_err(|e| GmError::Platform(format!("Bridge mapping DB error: {e}")))?;
         Self::init(conn)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(conn: Database) -> Result<Self> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS bridge_channel_mappings_v1 (
                 platform TEXT NOT NULL,

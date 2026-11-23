@@ -1,18 +1,14 @@
-# Cross-platform DT v1.0.1 release readiness
+# DT release readiness
 
-Status: **v1.0.1 code, installers, recovery (`REC-01`), budget (`BUD-01`), and hosted replay (`HOST-01`) fixes implemented on `codex/dt-stable-release`; full 8-target native certification remains blocked** until production signing identities, multi-OS native hardware (Intel Mac, Windows 11 25H2/26H2 x64/ARM64, Ubuntu 24.04 X11/Wayland x64/ARM64, iOS/Android devices), live provider/connector accounts, and the ≥7-day proactive soak are executed.
+## v1.0.7 reliability prerelease
 
-Release targets and canonical assets (`docs/release/release-inventory.json`):
-- `DT-1.0.1-macos-aarch64.dmg` (contains `Install DT.pkg`)
-- `DT-1.0.1-macos-x86_64.dmg` (contains `Install DT.pkg`)
-- `DT-1.0.1-windows-x86_64-setup.exe` (NSIS 3.13)
-- `DT-1.0.1-windows-aarch64-setup.exe` (NSIS 3.13)
-- `dt_1.0.1_amd64.deb` (Ubuntu 24.04 X11 & Wayland)
-- `dt_1.0.1_arm64.deb` (Ubuntu 24.04 ARM64 X11 & Wayland)
+The GitHub prerelease provides six CI-built installers, a standalone Linux archive, and the React web bundle. Its files carry SHA-256 checksums. macOS uses ad hoc signatures and Windows installers are unsigned. Use the manual upgrade procedure. [Release notes](releases/v1.0.7.md) · [Installation and checksums](../README.md#downloads)
 
-See [coverage inventory](release/coverage-inventory.md), [inference budget ledger](release/inference-budget-ledger.json), [v1.0.1 release notes](releases/v1.0.1.md), and [operations guide](OPERATIONS.md).
+Native installer lifecycle across the target matrix, iOS/Android device flows, external provider and connector accounts, guest boot, and the seven-day soak still require recorded results. The repository lacks a configured publisher signing environment and native certification runners. See the audit and the machine-readable inventory for required evidence. [Audit and acceptance tests](plans/v1.0.6-reliability-audit.md) · [Coverage inventory](release/coverage-inventory.md)
 
-## Implemented in this change
+## Historical v1.0.1 notes
+
+### Implemented in v1.0.1
 
 - Ordinary OpenBot/usage SQLite opens fail without resetting corrupt data. Shared connection leases prevent explicit recovery while clients remain open. `gm diagnostics recover-database` also requires exclusive runtime ownership, distinguishes corruption from ordinary failures, verifies every copied database/WAL/SHM component and retains originals in a unique private quarantine directory. A later startup creates a new store.
 - Queue/channel/routine, usage and pinned memory schemas have transactional version records. Existing stores are backed up with a consistent SQLite snapshot before upgrade. Newer component versions are rejected. Interrupted migrations leave the original schema/version intact. The wrapper establishes the pinned Darius schema transactionally before its idempotent initializer. Persistent-memory failures propagate rather than silently selecting an empty in-memory store. Configuration and roster also carry explicit schema versions, reject newer versions, and preserve verified legacy backups before format upgrades.

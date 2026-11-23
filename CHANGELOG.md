@@ -2,6 +2,14 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
+## [v1.0.7] — Reliability and recovery preview (2026-11-23)
+
+- Preserve SQLite data on failed ordinary opens. Verify consistent nested memory snapshots and stream file checksums during recovery.
+- Stop hosted requests on workspace initialization errors, scope provider settings and usage, and add revocable mobile device enrollment.
+- Install a runnable local model configuration and verify offline inference before Doctor reports it ready.
+- Record native dictation with explicit microphone consent and submit synthesized speech to the platform audio player.
+- Explain manual upgrades in builds without the publisher key.
+
 ## [v1.0.6] — DT Doctor Memory Check (2026-11-23)
 
 - Fixed a false `migration_state` failure on profiles that store their memory database at `memory.sqlite/memory.db`. Doctor now checks the nested database and still flags corruption.

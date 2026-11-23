@@ -103,6 +103,13 @@ impl LlmBackend for ProviderLlmBackend {
 }
 
 pub fn build_llm_backend(secrets: &KeychainSecrets) -> Arc<dyn LlmBackend> {
+    build_llm_backend_for_storage(secrets, &GmConfig::load_or_default(None).storage_dir)
+}
+
+fn build_llm_backend_for_storage(
+    secrets: &KeychainSecrets,
+    storage: &std::path::Path,
+) -> Arc<dyn LlmBackend> {
     #[cfg(any(test, debug_assertions))]
     if std::env::var("GM_FORCE_MOCK_LLM")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
@@ -129,20 +136,28 @@ pub fn build_llm_backend(secrets: &KeychainSecrets) -> Arc<dyn LlmBackend> {
         .filter(|k| !k.trim().is_empty());
 
     // Resolve credentials for the selected profile at request time, including OAuth-only setups.
-    let local = gm_vlm_candle::ModelRegistry::default_registry()
+    let local = models_for_storage(storage)
         .find_installed_engine()
         .map(|engine| gm_llm::LocalVlmLlmAdapter::new(Arc::new(engine)))
         .or_else(|| {
             let spec_path = std::env::var("DT_LOCAL_VLM_SPEC")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| {
-                    gm_core::config::default_storage_dir()
+                    storage
                         .join("components")
                         .join("vlm_worker")
                         .join("worker.json")
                 });
-            let raw = std::fs::read_to_string(spec_path).ok()?;
-            let spec: gm_llm::ManagedVlmWorkerSpec = serde_json::from_str(&raw).ok()?;
+            let spec: gm_llm::ManagedVlmWorkerSpec = match std::fs::read_to_string(spec_path) {
+                Ok(raw) => serde_json::from_str(&raw).ok()?,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    components::ComponentManager::open(storage)
+                        .and_then(|manager| manager.managed_vlm_spec(None))
+                        .inspect_err(|e| warn!(%e, "Local model assets are unavailable"))
+                        .ok()??
+                }
+                Err(_) => return None,
+            };
             let managed = gm_llm::ManagedLocalVlmBackend::new(spec).ok()?;
             Some(gm_llm::LocalVlmLlmAdapter::new(Arc::new(managed)))
         });
@@ -329,7 +344,7 @@ pub enum Commands {
         /// Force download even if current version is up to date
         #[arg(long)]
         force: bool,
-        /// Target GitHub repository (default: galaxycoils/grok-muse)
+        /// Target GitHub repository (default: galaxycoils/DT)
         #[arg(long)]
         repo: Option<String>,
         /// Output update status as JSON
@@ -731,7 +746,7 @@ pub enum DoctorSubcommand {
         #[arg(long)]
         json: bool,
     },
-    /// List verified rollback snapshots
+    /// List rollback snapshot manifests (use inspect-snapshot to verify files)
     Snapshots {
         /// Output as JSON
         #[arg(long)]
@@ -784,6 +799,10 @@ pub enum DiagnosticsSubcommand {
 pub enum ModelsSubcommand {
     /// List available and installed local VLM models
     List,
+    /// Install a catalog model with its verified projector and local worker
+    Install { model: String },
+    /// Run offline image inference using an installed catalog model
+    Probe { model: String, image: PathBuf },
     /// Pull open-weight VLM safetensors & tokenizer from HuggingFace Hub (default: Qwen/Qwen2-VL-2B-Instruct)
     Pull {
         /// Model ID or alias (qwen2-vl-2b, smolvlm2-2.2b, smolvlm, or <org>/<repo>)
@@ -1112,7 +1131,7 @@ pub async fn run_do(instruction: &str, config_path: Option<PathBuf>) -> Result<(
 
     let platform = Arc::new(IpcPlatformClient::new(&config.socket_path));
     let secrets = KeychainSecrets::default();
-    let llm_backend = build_llm_backend(&secrets);
+    let llm_backend = build_llm_backend_for_storage(&secrets, &config.storage_dir);
     let llm_client = Arc::new(HybridLlmClient::new(llm_backend, Arc::clone(&budget)));
 
     let mut agent = AgentLoop::new(
@@ -1336,7 +1355,7 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
     let meta_key = keychain.get_meta_key().ok();
     let xai_key = keychain.get_xai_key().ok();
 
-    let backend = build_llm_backend(&keychain);
+    let backend = build_llm_backend_for_storage(&keychain, &config.storage_dir);
     let backend_name = if meta_key.is_some() || xai_key.is_some() {
         "Live API (Keychain / Environment)"
     } else {
@@ -1720,7 +1739,7 @@ pub async fn run_daemon(config_path: Option<PathBuf>, task: Option<String>) -> R
 
     let platform = Arc::new(IpcPlatformClient::new(&config.socket_path));
     let secrets = KeychainSecrets::default();
-    let llm_backend = build_llm_backend(&secrets);
+    let llm_backend = build_llm_backend_for_storage(&secrets, &config.storage_dir);
     let llm_client = Arc::new(HybridLlmClient::new(llm_backend, Arc::clone(&budget)));
 
     let memory = Arc::new(
@@ -2139,7 +2158,7 @@ pub async fn run_review(date_str: Option<String>) -> Result<()> {
     let metrics = tracker.compute_metrics();
 
     let secrets = KeychainSecrets::default();
-    let llm_backend = build_llm_backend(&secrets);
+    let llm_backend = build_llm_backend_for_storage(&secrets, &config.storage_dir);
     let budget = Arc::new(BudgetManager::open(
         config.budget.clone(),
         &config.storage_dir,
@@ -2249,7 +2268,7 @@ pub async fn run_ideas(json: bool) -> Result<()> {
         .unwrap_or_else(|_| PersonalMemoryStore::in_memory().unwrap());
     let config = GmConfig::load(None)?;
     let secrets = KeychainSecrets::default();
-    let llm_backend = build_llm_backend(&secrets);
+    let llm_backend = build_llm_backend_for_storage(&secrets, &config.storage_dir);
     let budget = Arc::new(BudgetManager::open(
         config.budget.clone(),
         &config.storage_dir,
@@ -2291,9 +2310,60 @@ pub async fn run_ideas(json: bool) -> Result<()> {
     Ok(())
 }
 
+fn models_for_storage(storage: &std::path::Path) -> gm_vlm_candle::ModelRegistry {
+    let dir = std::env::var_os("GM_MODELS_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| storage.join("models"));
+    gm_vlm_candle::ModelRegistry::new(dir)
+}
+
 pub async fn run_models(action: Option<ModelsSubcommand>, json: bool) -> Result<()> {
-    let registry = gm_vlm_candle::ModelRegistry::default_registry();
-    run_models_with_registry(&registry, action, json).await
+    run_models_for_storage(&GmConfig::load_or_default(None).storage_dir, action, json).await
+}
+
+async fn run_models_for_storage(
+    storage: &std::path::Path,
+    action: Option<ModelsSubcommand>,
+    json: bool,
+) -> Result<()> {
+    match action {
+        Some(ModelsSubcommand::Install { model }) => {
+            let status = components::ComponentManager::open(storage)?
+                .install(&model)
+                .await?;
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            Ok(())
+        }
+        Some(ModelsSubcommand::Probe { model, image }) => {
+            use gm_llm::LocalVlmBackend as _;
+            let manager = components::ComponentManager::open(storage)?;
+            let spec = manager.managed_vlm_spec(Some(&model))?.ok_or_else(|| {
+                GmError::Config(format!(
+                    "Install the model first with dt models install {model}"
+                ))
+            })?;
+            let worker = gm_llm::ManagedLocalVlmBackend::new(spec)?;
+            let raw = std::fs::read(image)?;
+            if raw.len() > 8 * 1024 * 1024 || !raw.starts_with(&[0xff, 0xd8, 0xff]) {
+                return Err(GmError::Config(
+                    "Provide a JPEG image of up to 8 MiB".into(),
+                ));
+            }
+            let result = worker
+                .generate(&raw, "Describe the image in one sentence.")
+                .await?;
+            if result.trim().is_empty() {
+                return Err(GmError::Platform(
+                    "Local inference returned an empty response".into(),
+                ));
+            }
+            manager.record_vlm_probe(&model)?;
+            println!("{result}");
+            Ok(())
+        }
+        action => run_models_with_registry(&models_for_storage(storage), action, json).await,
+    }
 }
 
 pub async fn run_models_with_registry(
@@ -2302,6 +2372,11 @@ pub async fn run_models_with_registry(
     json: bool,
 ) -> Result<()> {
     match action.unwrap_or(ModelsSubcommand::List) {
+        ModelsSubcommand::Install { .. } | ModelsSubcommand::Probe { .. } => {
+            return Err(GmError::Config(
+                "Catalog models require a DT profile directory".into(),
+            ));
+        }
         ModelsSubcommand::List => {
             let models = registry.list_models();
             if json {
@@ -2910,7 +2985,10 @@ pub async fn run_cli_entrypoint() -> Result<()> {
             json,
             dir,
         }) => run_update(check, force, repo, json, dir).await?,
-        Some(Commands::Models { action, json }) => run_models(action, json).await?,
+        Some(Commands::Models { action, json }) => {
+            let config = GmConfig::load(cli.config.as_deref())?;
+            run_models_for_storage(&config.storage_dir, action, json).await?;
+        }
         Some(Commands::Bots { action, json }) => run_bots(action, json, cli.config).await?,
         Some(Commands::Queue { action, json }) => run_queue(action, json, cli.config).await?,
         Some(Commands::Channels { action, json }) => run_channels(action, json, cli.config).await?,
@@ -3008,15 +3086,23 @@ pub async fn run_diagnostics(
             };
             let mut recovered = Vec::new();
             for name in candidates {
-                let db_path = config.storage_dir.join(&name);
-                if !db_path.exists() {
+                let relative = migration::validate_safe_relative_path(&name)?;
+                let db_path = config.storage_dir.join(relative);
+                let Some(parent) = db_path.parent() else {
+                    continue;
+                };
+                if !parent.try_exists()? {
                     continue;
                 }
-                let _db_lease = gm_core::database::acquire_database_lease(&db_path, true)?;
-                if gm_core::database::corrupt_header(&db_path)?
-                    || gm_openbot::check_sqlite_integrity(&db_path).is_err()
+                if !parent
+                    .canonicalize()?
+                    .starts_with(config.storage_dir.canonicalize()?)
                 {
-                    let _ = gm_openbot::open_sqlite_with_recovery(&db_path)?;
+                    return Err(GmError::Config(
+                        "Database must be inside the profile directory".into(),
+                    ));
+                }
+                if gm_openbot::quarantine_corrupt_database(&db_path)? {
                     recovered.push(name);
                 }
             }
@@ -3028,7 +3114,9 @@ pub async fn run_diagnostics(
                     }))?
                 );
             } else {
-                println!("Recovered databases (originals preserved to .bak): {recovered:?}");
+                println!(
+                    "Quarantined databases (original files preserved in .bak directories): {recovered:?}"
+                );
             }
         }
     }
@@ -3080,7 +3168,7 @@ pub async fn run_serve(bind: &str, config_path: Option<PathBuf>) -> Result<()> {
         &config.storage_dir,
     )?);
     let llm = Arc::new(HybridLlmClient::new(
-        build_llm_backend(&secrets),
+        build_llm_backend_for_storage(&secrets, &config.storage_dir),
         Arc::clone(&budget),
     ));
     let router = LlmRouter::new(config.providers.clone());

@@ -25,7 +25,7 @@ impl OpenBotSupervisor {
         *self.connections.persistence.lock() = Some((config.clone(), path.map(Path::to_path_buf)));
     }
 
-    fn persist_connection(&self) -> Result<()> {
+    pub(crate) fn persist_connection(&self) -> Result<()> {
         let target = self.connections.persistence.lock().clone();
         if let Some((config, path)) = target {
             crate::persist_providers_config(&config, path.as_deref(), self)?;

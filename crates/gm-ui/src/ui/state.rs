@@ -289,6 +289,7 @@ pub struct GrokUiState {
     pub last_auto_arrow_pos: Option<usize>,
     pub ime_composing: bool,
     pub voice_active: bool,
+    pub voice_recording: bool,
     pub dictation_active: bool,
     pub pending_attachments: Vec<String>,
 
@@ -422,6 +423,7 @@ impl Default for GrokUiState {
             last_auto_arrow_pos: None,
             ime_composing: false,
             voice_active: false,
+            voice_recording: false,
             dictation_active: false,
             pending_attachments: Vec::new(),
             command_palette_query: String::new(),

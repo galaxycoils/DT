@@ -47,7 +47,7 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
   export LIBRARY_PATH="$sysroot/usr/lib/x86_64-linux-gnu${LIBRARY_PATH:+:$LIBRARY_PATH}"
   export LD_LIBRARY_PATH="$sysroot/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-  if ! (pkg-config --atleast-version=1.0 libpipewire-0.3 && pkg-config --exists libspa-0.2 xcb-shape xcb-xfixes); then
+  if ! (pkg-config --atleast-version=1.0 libpipewire-0.3 && pkg-config --exists libspa-0.2 alsa xcb-shape xcb-xfixes); then
     tmp_dir="$(mktemp -d)"
     trap 'rm -rf "$tmp_dir"' EXIT
     mkdir -p "$sysroot"
@@ -66,7 +66,7 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
     }
 
     extract_debs_from_suite "bookworm-backports" "libpipewire-0\.3-dev|libpipewire-0\.3-0|libspa-0\.2-dev"
-    extract_debs_from_suite "bookworm" "libxcb-shape0-dev|libxcb-xfixes0-dev"
+    extract_debs_from_suite "bookworm" "libxcb-shape0-dev|libxcb-xfixes0-dev|libasound2-dev|libasound2"
 
     for pc in "$sysroot"/usr/lib/x86_64-linux-gnu/pkgconfig/*.pc; do
       [[ -f "$pc" ]] && sed -i "s|^prefix=/usr|prefix=$sysroot/usr|" "$pc"

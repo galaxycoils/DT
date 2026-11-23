@@ -29,6 +29,7 @@ pub struct ComponentPart {
 #[serde(rename_all = "snake_case")]
 pub enum ComponentKind {
     VlmModel,
+    VlmProjector,
     VlmWorker,
     SpeechStt,
     SpeechTts,
@@ -76,10 +77,28 @@ impl ComponentCatalog {
                         "Failed to read component catalog override '{trimmed}': {e}"
                     ))
                 })?;
-                return Self::parse_unverified(&raw);
+                if cfg!(debug_assertions) {
+                    return Self::parse_unverified(&raw);
+                }
+                let public_key = option_env!("GM_RELEASE_PUBLIC_KEY_HEX")
+                    .filter(|key| !key.is_empty())
+                    .ok_or_else(|| {
+                        GmError::Config("No component catalog publisher key is configured".into())
+                    })?;
+                let signature = fs::read_to_string(Path::new(trimmed).with_extension("sig"))?;
+                return Self::verify_signed(raw.as_bytes(), &signature, public_key);
             }
         }
-        Self::parse_unverified(BUNDLED_COMPONENT_CATALOG_JSON)
+        // The built-in catalog is part of the release binary's trusted bytes.
+        let catalog = Self::parse_unverified(BUNDLED_COMPONENT_CATALOG_JSON)?;
+        let expires = DateTime::parse_from_rfc3339(&catalog.expires_at)
+            .map_err(|e| GmError::Config(format!("Invalid component catalog expiry: {e}")))?;
+        if expires <= Utc::now() {
+            return Err(GmError::SafetyViolation(
+                "Bundled component catalog has expired".into(),
+            ));
+        }
+        Ok(catalog)
     }
 
     pub fn parse_unverified(raw_json: &str) -> Result<Self> {
@@ -219,6 +238,8 @@ struct VerificationReceipt {
     sha256: String,
     total_size_bytes: u64,
     verified_at: String,
+    #[serde(default)]
+    modified: Option<std::time::SystemTime>,
     check_summary: String,
 }
 
@@ -273,7 +294,7 @@ fn inspect_payload_header(component: &CatalogComponent, path: &Path) -> Result<S
     let n = file.read(&mut magic)?;
     let header = &magic[..n];
     match component.kind {
-        ComponentKind::VlmModel => {
+        ComponentKind::VlmModel | ComponentKind::VlmProjector => {
             if header.starts_with(b"GGUF") {
                 Ok("Verified SHA-256 and GGUF model header".into())
             } else {
@@ -426,6 +447,68 @@ where
     })
 }
 
+fn find_llama_server(directory: &Path) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        if kind.is_file()
+            && entry.file_name()
+                == if cfg!(windows) {
+                    "llama-server.exe"
+                } else {
+                    "llama-server"
+                }
+        {
+            return Ok(Some(entry.path()));
+        }
+        if kind.is_dir()
+            && let Some(server) = find_llama_server(&entry.path())?
+        {
+            return Ok(Some(server));
+        }
+    }
+    Ok(None)
+}
+
+fn extract_worker(archive: &Path, expected_digest: &str) -> Result<PathBuf> {
+    let parent = archive
+        .parent()
+        .ok_or_else(|| GmError::Config("Missing local worker directory".into()))?;
+    let active = parent.join(format!("runtime-{expected_digest}"));
+    if active.is_dir()
+        && let Some(server) = find_llama_server(&active)?
+    {
+        return Ok(server);
+    }
+    if sha256_file_hex(archive)?.0 != expected_digest {
+        return Err(GmError::SafetyViolation(
+            "Local worker archive no longer matches the catalog".into(),
+        ));
+    }
+    let stage = tempfile::tempdir_in(parent)?;
+    let file = File::open(archive)?;
+    if cfg!(windows) {
+        zip::ZipArchive::new(file)
+            .and_then(|mut zip| zip.extract(stage.path()))
+            .map_err(|e| GmError::Platform(format!("Cannot unpack local worker ZIP: {e}")))?;
+    } else {
+        tar::Archive::new(flate2::read::GzDecoder::new(file)).unpack(stage.path())?;
+    }
+    let server = find_llama_server(stage.path())?.ok_or_else(|| {
+        GmError::Config("Verified worker archive did not contain llama-server".into())
+    })?;
+    let relative = server
+        .strip_prefix(stage.path())
+        .map_err(|e| GmError::Config(e.to_string()))?;
+    match fs::rename(stage.path(), &active) {
+        Ok(()) => Ok(active.join(relative)),
+        Err(e) if active.is_dir() => {
+            find_llama_server(&active)?.ok_or_else(|| GmError::Platform(e.to_string()))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Manages local optional component discovery, resumable streaming download, SHA-256 verification,
 /// and readiness reporting for Doctor, Desktop Settings, and Companion Web.
 #[derive(Clone)]
@@ -482,6 +565,11 @@ impl ComponentManager {
         let receipt: VerificationReceipt = serde_json::from_str(&raw).ok()?;
         if receipt.sha256 == component.sha256
             && receipt.total_size_bytes == component.total_size_bytes
+            && receipt.modified.is_some()
+            && fs::metadata(self.component_dir(component).join("payload.bin"))
+                .and_then(|metadata| metadata.modified())
+                .ok()
+                == receipt.modified
         {
             Some(receipt)
         } else {
@@ -593,13 +681,7 @@ impl ComponentManager {
     ) -> Vec<ComponentStatusSnapshot> {
         self.list_statuses()
             .into_iter()
-            .filter(|c| {
-                c.kind == kind
-                    && matches!(
-                        c.status,
-                        ComponentInstallState::Installed | ComponentInstallState::Verified
-                    )
-            })
+            .filter(|c| c.kind == kind && c.status == ComponentInstallState::Verified)
             .collect()
     }
 
@@ -607,6 +689,117 @@ impl ComponentManager {
     /// verifies part and whole-payload SHA-256 digests, atomically activates `payload.bin`,
     /// and runs post-install verification.
     pub async fn install(&self, id: &str) -> Result<ComponentStatusSnapshot> {
+        if self
+            .catalog
+            .find_for_target(id, &self.os, &self.arch)
+            .is_some_and(|entry| entry.kind == ComponentKind::VlmModel)
+        {
+            let projector = format!("{id}-projector");
+            if self
+                .catalog
+                .find_for_target(&projector, &self.os, &self.arch)
+                .is_some()
+            {
+                self.install_payload(&projector).await?;
+                self.install_payload("vlm_worker").await?;
+            }
+        }
+        self.install_payload(id).await
+    }
+
+    fn model_assets(&self, model: &str) -> Option<[CatalogComponent; 3]> {
+        let status = self.list_statuses();
+        let component = |id: &str| {
+            status
+                .iter()
+                .any(|entry| entry.id == id && entry.status == ComponentInstallState::Verified)
+                .then(|| self.catalog.find_for_target(id, &self.os, &self.arch))
+                .flatten()
+                .cloned()
+        };
+        Some([
+            component(model)?,
+            component(&format!("{model}-projector"))?,
+            component("vlm_worker")?,
+        ])
+    }
+
+    fn probe_record(&self, model: &str) -> Option<(PathBuf, String)> {
+        let assets = self.model_assets(model)?;
+        let digest = assets
+            .iter()
+            .map(|item| item.sha256.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let directory = self.component_dir(&assets[0]);
+        Some((directory.join("offline-probe"), digest))
+    }
+
+    pub(crate) fn record_vlm_probe(&self, model: &str) -> Result<()> {
+        let (path, digest) = self.probe_record(model).ok_or_else(|| {
+            GmError::Config("The model assets changed during the local probe".into())
+        })?;
+        gm_core::storage::atomic_write_private(&path, digest.as_bytes())
+    }
+
+    pub(crate) fn has_passing_vlm_probe(&self, model: &str) -> bool {
+        self.probe_record(model).is_some_and(|(path, digest)| {
+            fs::read_to_string(path).is_ok_and(|record| record == digest)
+        })
+    }
+
+    pub(crate) fn managed_vlm_spec(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Option<gm_llm::ManagedVlmWorkerSpec>> {
+        let status = self.list_statuses();
+        let verified = |id: &str| {
+            status
+                .iter()
+                .find(|entry| entry.id == id && entry.status == ComponentInstallState::Verified)
+                .and_then(|entry| entry.active_path.as_deref())
+                .map(PathBuf::from)
+        };
+        let Some(worker_archive) = verified("vlm_worker") else {
+            return Ok(None);
+        };
+        for model in status
+            .iter()
+            .filter(|entry| entry.kind == ComponentKind::VlmModel)
+        {
+            if model_id.is_some_and(|id| id != model.id) {
+                continue;
+            }
+            let Some(model_path) = verified(&model.id) else {
+                continue;
+            };
+            let Some(projector) = verified(&format!("{}-projector", model.id)) else {
+                continue;
+            };
+            let worker = extract_worker(
+                &worker_archive,
+                &self
+                    .catalog
+                    .find_for_target("vlm_worker", &self.os, &self.arch)
+                    .ok_or_else(|| GmError::Config("Missing local worker catalog entry".into()))?
+                    .sha256,
+            )?;
+            return Ok(Some(gm_llm::ManagedVlmWorkerSpec {
+                model_id: model.id.clone(),
+                runtime: gm_llm::VlmWorkerRuntime::LlamaCppMtmd,
+                worker_bin: worker,
+                model_path,
+                mmproj_path: Some(projector),
+                requested_device: gm_llm::VlmDevice::Cpu,
+                required_memory_mb: 0,
+                available_device_memory_mb: 0,
+                endpoint: "http://127.0.0.1:0".into(),
+            }));
+        }
+        Ok(None)
+    }
+
+    async fn install_payload(&self, id: &str) -> Result<ComponentStatusSnapshot> {
         let component = self
             .catalog
             .find_for_target(id.trim(), &self.os, &self.arch)
@@ -846,6 +1039,7 @@ impl ComponentManager {
             sha256: digest,
             total_size_bytes: size,
             verified_at: now.clone(),
+            modified: fs::metadata(&final_path)?.modified().ok(),
             check_summary: check_summary.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&receipt)?;

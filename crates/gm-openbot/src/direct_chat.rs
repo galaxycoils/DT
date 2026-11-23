@@ -3,6 +3,7 @@
 
 use crate::channels::MessageReactionRecord;
 use chrono::Utc;
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -54,23 +55,23 @@ pub struct MessageSearchHit {
 
 #[derive(Clone)]
 pub struct DirectChatStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Database>>,
 }
 
 impl DirectChatStore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init_conn(conn)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory().map_err(|e| {
+        let conn = Database::in_memory().map_err(|e| {
             GmError::Platform(format!("Failed to open in-memory direct chat DB: {e}"))
         })?;
         Self::init_conn(conn)
     }
 
-    fn init_conn(conn: Connection) -> Result<Self> {
+    fn init_conn(conn: Database) -> Result<Self> {
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;
@@ -392,6 +393,13 @@ impl DirectChatStore {
             return Ok(None);
         }
         Self::get_by_id_with_conn(&conn, message_id.trim())
+    }
+
+    pub(crate) fn has_card_request(&self, id: &str) -> Result<bool> {
+        self.conn.lock().query_row(
+            "SELECT EXISTS(SELECT 1 FROM direct_messages_v1 WHERE request_id = ?1 AND card_json IS NOT NULL)",
+            [id], |row| row.get(0),
+        ).map_err(|e| GmError::Platform(format!("Cannot check pending workspace card: {e}")))
     }
 
     pub fn update_card_by_request_id(

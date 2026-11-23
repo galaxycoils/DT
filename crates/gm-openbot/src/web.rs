@@ -166,16 +166,17 @@ impl CompanionWebState {
             return Ok(existing);
         }
         let Some(record) = plane.get_workspace(&clean).await? else {
-            let expected_local =
-                std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
-            if clean == expected_local || clean == "local" {
-                return Ok(self.supervisor.clone());
-            }
             return Err(GmError::Config(format!("Unknown workspace '{clean}'")));
         };
         let mut ws_cfg = self.shared_config.read().clone();
         ws_cfg.storage_dir = PathBuf::from(&record.worker_dir);
         ws_cfg.openbot.bots_dir = ws_cfg.storage_dir.join("bots");
+        let ws_config_path = ws_cfg.storage_dir.join("config.json");
+        ws_cfg.providers = if ws_config_path.try_exists()? {
+            gm_core::config::GmConfig::load(Some(&ws_config_path))?.providers
+        } else {
+            Default::default()
+        };
         let audit = Arc::new(gm_safety::AuditLogger::with_file(
             ws_cfg.storage_dir.join("audit.jsonl"),
         )?);
@@ -183,16 +184,23 @@ impl CompanionWebState {
             crate::hosted::HostedPlaneBackend::Sqlite(sqlite) => {
                 Arc::new(sqlite.tenant_secret_backend(&clean)?)
             }
-            crate::hosted::HostedPlaneBackend::Postgres(_) => {
-                Arc::new(crate::vault::InMemorySecretBackend::default())
+            crate::hosted::HostedPlaneBackend::Postgres(postgres) => {
+                Arc::new(crate::hosted::PostgresTenantSecretVault {
+                    plane: postgres.clone(),
+                    ws_id: clean.clone(),
+                })
             }
         };
         let ws_sup = OpenBotSupervisor::open_with_secret_backend(
-            ws_cfg,
+            ws_cfg.clone(),
             audit,
             self.supervisor.daemon_event_sender(),
             secret_backend,
         )?;
+        ws_sup.bind_provider_persistence(
+            &Arc::new(parking_lot::RwLock::new(ws_cfg)),
+            Some(&ws_config_path),
+        );
         let mut map = self.workspace_supervisors.write();
         Ok(map.entry(clean).or_insert(ws_sup).clone())
     }
@@ -488,21 +496,29 @@ async fn api_v1_auth_and_csrf_middleware(
                 .map(ToString::to_string)
         });
 
-    if let Some(session_id) = extract_cookie_value(request.headers(), HOSTED_SESSION_COOKIE) {
+    let cookie = extract_cookie_value(request.headers(), HOSTED_SESSION_COOKIE);
+    let operator = check_auth(request.headers(), state.bearer_token.as_deref()).is_ok();
+    let bearer = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let session_id = cookie
+        .as_deref()
+        .or_else(|| (!operator).then_some(bearer).flatten());
+    let account_route = matches!(rel_path, "/auth/session" | "/auth/logout" | "/workspaces");
+    if let Some(session_id) = session_id {
         let Some(ref plane) = state.hosted_plane else {
-            return ApiErr::msg(
-                StatusCode::UNAUTHORIZED,
-                "Hosted session store is not configured",
-            )
-            .into_response();
+            return ApiErr::msg(StatusCode::UNAUTHORIZED, "Authentication required")
+                .into_response();
         };
-        let workspace = if rel_path == "/auth/session" || rel_path == "/workspaces" {
+        let workspace = if account_route {
             None
         } else {
             requested_ws.as_deref()
         };
-        let session = match plane.authorize_session(&session_id, workspace).await {
-            Ok(s) => s,
+        let session = match plane.authorize_session(session_id, workspace).await {
+            Ok(session) => session,
             Err(err) => {
                 let code = if err.to_string().contains("Cross-tenant") {
                     StatusCode::FORBIDDEN
@@ -512,62 +528,55 @@ async fn api_v1_auth_and_csrf_middleware(
                 return ApiErr::msg(code, err.to_string()).into_response();
             }
         };
-        let is_mutation = !matches!(
-            *request.method(),
-            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
-        );
-        if is_mutation {
+        if cookie.is_some()
+            && !matches!(
+                *request.method(),
+                axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+            )
+        {
             let csrf = request
                 .headers()
                 .get("x-dt-csrf-token")
-                .and_then(|v| v.to_str().ok())
+                .and_then(|value| value.to_str().ok())
                 .unwrap_or("");
             if !crate::bridges::constant_time_eq(csrf.as_bytes(), session.csrf_token.as_bytes()) {
                 return ApiErr::msg(StatusCode::FORBIDDEN, "Missing or invalid CSRF token")
                     .into_response();
             }
         }
-        let active_ws = session.ws_id.clone();
-        if let Ok(ws_sup) = state.supervisor_for_workspace(&active_ws).await {
-            request.extensions_mut().insert(WorkspaceSupervisor(ws_sup));
+        if !account_route {
+            let Ok(supervisor) = state.supervisor_for_workspace(&session.ws_id).await else {
+                return ApiErr::msg(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Workspace storage unavailable",
+                )
+                .into_response();
+            };
+            request
+                .extensions_mut()
+                .insert(WorkspaceSupervisor(supervisor));
         }
         request.extensions_mut().insert(session);
         request
             .headers_mut()
             .insert(INTERNAL_SESSION_HEADER, HeaderValue::from_static("1"));
-        return next.run(request).await;
-    }
-
-    // Fallback to Bearer token authentication (local loopback companion / mobile / operator).
-    if check_auth(request.headers(), state.bearer_token.as_deref()).is_err() {
+    } else if !operator {
         return ApiErr::msg(StatusCode::UNAUTHORIZED, "Authentication required").into_response();
-    }
-    if let (Some(ws), Some(plane)) = (requested_ws.as_deref(), state.hosted_plane.as_ref()) {
-        let token = request
-            .headers()
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.strip_prefix("Bearer "))
-            .unwrap_or("");
-        let is_operator = state.bearer_token.as_deref().is_some_and(|expected| {
-            crate::bridges::constant_time_eq(token.as_bytes(), expected.as_bytes())
-        });
-        let expected_local = std::env::var("GM_WORKSPACE_ID").unwrap_or_else(|_| "default".into());
-        let workspace_exists = plane.get_workspace(ws).await.ok().flatten().is_some();
-        if !is_operator
-            && ws != expected_local
-            && ws != "local"
-            && plane.authorize_workspace(ws, token).await.is_err()
-        {
+    } else if let Some(ws) = requested_ws.as_deref()
+        && !account_route
+        && !rel_path.starts_with("/auth/")
+        && state.hosted_plane.is_some()
+    {
+        let Ok(supervisor) = state.supervisor_for_workspace(ws).await else {
             return ApiErr::msg(
-                StatusCode::FORBIDDEN,
-                format!("Workspace access denied for '{ws}'"),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Workspace storage unavailable",
             )
             .into_response();
-        }
-        if workspace_exists && let Ok(ws_sup) = state.supervisor_for_workspace(ws).await {
-            request.extensions_mut().insert(WorkspaceSupervisor(ws_sup));
-        }
+        };
+        request
+            .extensions_mut()
+            .insert(WorkspaceSupervisor(supervisor));
     }
     next.run(request).await
 }
@@ -3266,7 +3275,30 @@ async fn post_dm_message_route(
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     if let (Some(llm), Some(router)) = (state.llm_client.as_ref(), state.router.as_ref()) {
-        let cfg = state.shared_config.read().clone();
+        let scoped = sup.config().storage_dir != state.supervisor.config().storage_dir;
+        let cfg = if scoped {
+            sup.config().clone()
+        } else {
+            state.shared_config.read().clone()
+        };
+        let workspace_budget = if scoped {
+            Some(Arc::new(
+                gm_llm::BudgetManager::open(cfg.budget.clone(), &cfg.storage_dir)
+                    .map_err(map_gm_error)?,
+            ))
+        } else {
+            None
+        };
+        let workspace_llm = workspace_budget.as_ref().map(|budget| {
+            let secrets = sup.vault().backend().clone();
+            gm_llm::HybridLlmClient::new(
+                Arc::new(gm_llm::ReqwestLlmBackend::with_workspace_secrets(
+                    move |account| secrets.get_secret(account),
+                )),
+                budget.clone(),
+            )
+        });
+        let llm = workspace_llm.as_ref().unwrap_or(llm.as_ref());
         let outcome = sup
             .dispatch_direct_chat(
                 &bot_id,
@@ -3276,7 +3308,7 @@ async fn post_dm_message_route(
                 body.client_msg_id.as_deref(),
                 llm,
                 router,
-                state.budget.as_deref(),
+                workspace_budget.as_deref().or(state.budget.as_deref()),
                 state.kill_switch.as_ref(),
                 Some(&cfg),
             )
@@ -3466,6 +3498,17 @@ async fn respond_approval_route(
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
+    if sup.config().storage_dir != state.supervisor.config().storage_dir
+        && !sup
+            .direct_chat()
+            .has_card_request(&id)
+            .map_err(map_gm_error)?
+    {
+        return Err(ApiErr::msg(
+            StatusCode::NOT_FOUND,
+            "No pending card in this workspace",
+        ));
+    }
     let approved = body
         .get("approved")
         .and_then(|v| v.as_bool())
@@ -3646,10 +3689,22 @@ async fn submit_secret_prompt_route(
 async fn respond_question_route(
     headers: HeaderMap,
     Path(id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
+    if sup.config().storage_dir != state.supervisor.config().storage_dir
+        && !sup
+            .direct_chat()
+            .has_card_request(&id)
+            .map_err(map_gm_error)?
+    {
+        return Err(ApiErr::msg(
+            StatusCode::NOT_FOUND,
+            "No pending card in this workspace",
+        ));
+    }
     let mut parts: Vec<String> = Vec::new();
     if let Some(arr) = body.get("answers").and_then(|v| v.as_array()) {
         for item in arr {
@@ -3684,7 +3739,7 @@ async fn respond_question_route(
         .resolve_question(&id, combined.clone())
         .await;
     update_web_dm_card_status(
-        &state.supervisor,
+        &sup,
         &id,
         if combined.is_some() {
             "answered"
@@ -3946,15 +4001,24 @@ struct UsageQuery {
 async fn get_usage_route(
     headers: HeaderMap,
     Query(q): Query<UsageQuery>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
     let days = q.days.unwrap_or(7).clamp(1, 90);
-    if let Some(ref budget) = state.budget {
+    let workspace_budget = if sup.config().storage_dir != state.supervisor.config().storage_dir {
+        Some(
+            gm_llm::BudgetManager::open(sup.config().budget.clone(), &sup.config().storage_dir)
+                .map_err(map_gm_error)?,
+        )
+    } else {
+        None
+    };
+    if let Some(budget) = workspace_budget.as_ref().or(state.budget.as_deref()) {
         let breakdown = budget.usage_breakdown(days).map_err(map_gm_error)?;
         return Ok(Json(serde_json::to_value(breakdown).unwrap_or_default()));
     }
-    let budget_cfg = &state.supervisor.config().budget;
+    let budget_cfg = &sup.config().budget;
     let fallback = gm_llm::UsageBreakdown {
         daily_spent_usd: 0.0,
         weekly_spent_usd: 0.0,
@@ -4820,6 +4884,7 @@ async fn voice_stop_route(
 
 async fn system_provider_key_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -4841,12 +4906,10 @@ async fn system_provider_key_route(
         _ => format!("gm_provider_key_{provider}"),
     };
     if api_key.is_empty() {
-        let _ = state.supervisor.vault().backend().delete_secret(&key_name);
+        let _ = sup.vault().backend().delete_secret(&key_name);
     } else {
-        state.supervisor.scrubber().register(&key_name, api_key);
-        state
-            .supervisor
-            .vault()
+        sup.scrubber().register(&key_name, api_key);
+        sup.vault()
             .backend()
             .set_secret(&key_name, api_key)
             .map_err(map_gm_error)?;
@@ -4859,14 +4922,16 @@ async fn system_provider_key_route(
 
 async fn system_providers_get_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    Ok(Json(state.supervisor.providers_config()))
+    Ok(Json(sup.providers_config()))
 }
 
 async fn system_provider_profile_route(
     headers: HeaderMap,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     Json(body): Json<serde_json::Value>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
@@ -4883,16 +4948,9 @@ async fn system_provider_profile_route(
             .get("account_default_profile_id")
             .and_then(|v| v.as_str())
             .map(ToString::to_string);
-        state
-            .supervisor
-            .set_default_provider_profiles(ws_def, acc_def)
+        sup.set_default_provider_profiles(ws_def, acc_def)
             .map_err(map_gm_error)?;
-        let cfg = crate::persist_providers_config(
-            &state.shared_config,
-            state.config_path.as_deref(),
-            &state.supervisor,
-        )
-        .map_err(map_gm_error)?;
+        let cfg = persist_web_providers(&state, &sup).map_err(map_gm_error)?;
         return Ok(Json(serde_json::json!({ "providers": cfg })));
     }
 
@@ -4906,17 +4964,14 @@ async fn system_provider_profile_route(
         .filter(|s| !s.is_empty())
         .map(ToString::to_string);
     if let Some(ref k) = api_key {
-        state
-            .supervisor
-            .scrubber()
+        sup.scrubber()
             .register(format!("profile_{}", profile.id), k);
     }
     let revalidate = body
         .get("revalidate_credentials")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let saved = state
-        .supervisor
+    let saved = sup
         .upsert_provider_profile(profile, api_key.as_deref(), revalidate)
         .map_err(map_gm_error)?;
     let ws_def = body
@@ -4928,17 +4983,10 @@ async fn system_provider_profile_route(
         .and_then(|v| v.as_str())
         .map(ToString::to_string);
     if ws_def.is_some() || acc_def.is_some() {
-        state
-            .supervisor
-            .set_default_provider_profiles(ws_def, acc_def)
+        sup.set_default_provider_profiles(ws_def, acc_def)
             .map_err(map_gm_error)?;
     }
-    let cfg = crate::persist_providers_config(
-        &state.shared_config,
-        state.config_path.as_deref(),
-        &state.supervisor,
-    )
-    .map_err(map_gm_error)?;
+    let cfg = persist_web_providers(&state, &sup).map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({
         "profile": saved,
         "providers": cfg,
@@ -4948,20 +4996,15 @@ async fn system_provider_profile_route(
 async fn system_provider_discover_models_route(
     headers: HeaderMap,
     Path(profile_id): Path<String>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
-    let models = state
-        .supervisor
+    let models = sup
         .discover_provider_models(&profile_id)
         .await
         .map_err(map_gm_error)?;
-    let cfg = crate::persist_providers_config(
-        &state.shared_config,
-        state.config_path.as_deref(),
-        &state.supervisor,
-    )
-    .map_err(map_gm_error)?;
+    let cfg = persist_web_providers(&state, &sup).map_err(map_gm_error)?;
     Ok(Json(serde_json::json!({
         "profile_id": profile_id,
         "models": models,
@@ -4972,26 +5015,41 @@ async fn system_provider_discover_models_route(
 async fn system_provider_oauth_route(
     headers: HeaderMap,
     Path((profile_id, op)): Path<(String, String)>,
+    ActiveSupervisor(sup): ActiveSupervisor,
     State(state): State<CompanionWebState>,
     body: Option<Json<serde_json::Value>>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
     check_auth(&headers, state.bearer_token.as_deref())?;
+    if sup.config().storage_dir != state.supervisor.config().storage_dir
+        && matches!(op.as_str(), "start" | "poll" | "retry" | "refresh")
+    {
+        return Err(ApiErr::msg(
+            StatusCode::BAD_REQUEST,
+            "Use an API-key provider for hosted workspaces",
+        ));
+    }
     let payload = body.map(|b| b.0).unwrap_or_else(|| serde_json::json!({}));
-    state
-        .supervisor
-        .bind_provider_persistence(&state.shared_config, state.config_path.as_deref());
-    let out = state
-        .supervisor
+    if sup.config().storage_dir == state.supervisor.config().storage_dir {
+        sup.bind_provider_persistence(&state.shared_config, state.config_path.as_deref());
+    }
+    let out = sup
         .oauth_action_for_profile(&profile_id, &op, &payload)
         .await
         .map_err(map_gm_error)?;
-    crate::persist_providers_config(
-        &state.shared_config,
-        state.config_path.as_deref(),
-        &state.supervisor,
-    )
-    .map_err(map_gm_error)?;
+    persist_web_providers(&state, &sup).map_err(map_gm_error)?;
     Ok(Json(out))
+}
+
+fn persist_web_providers(
+    state: &CompanionWebState,
+    sup: &OpenBotSupervisor,
+) -> gm_core::Result<gm_core::config::ProvidersConfig> {
+    if sup.config().storage_dir == state.supervisor.config().storage_dir {
+        crate::persist_providers_config(&state.shared_config, state.config_path.as_deref(), sup)
+    } else {
+        sup.persist_connection()?;
+        Ok(sup.providers_config())
+    }
 }
 
 fn api_v1_router(state: CompanionWebState) -> Router<CompanionWebState> {
@@ -5226,6 +5284,17 @@ async fn auth_session_v1_route(
         .await
         .map_err(|e| ApiErr::msg(StatusCode::UNAUTHORIZED, e.to_string()))?;
 
+    if body["mode"] == "device" {
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "device_session": session.session_id,
+                "ws_id": session.ws_id,
+                "expires_at": session.expires_at,
+            })),
+        )
+            .into_response());
+    }
     let cookie = format!(
         "{HOSTED_SESSION_COOKIE}={}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={ttl}",
         session.session_id
@@ -5247,14 +5316,14 @@ async fn auth_session_v1_route(
 }
 
 async fn auth_logout_v1_route(
-    headers: HeaderMap,
     State(state): State<CompanionWebState>,
+    session: Option<axum::Extension<crate::hosted::HostedSessionIssued>>,
 ) -> std::result::Result<impl IntoResponse, ApiErr> {
-    if let (Some(session_id), Some(plane)) = (
-        extract_cookie_value(&headers, HOSTED_SESSION_COOKIE),
-        state.hosted_plane.as_ref(),
-    ) {
-        let _ = plane.revoke_session(&session_id).await;
+    if let (Some(axum::Extension(session)), Some(plane)) = (session, state.hosted_plane.as_ref()) {
+        plane
+            .revoke_session(&session.session_id)
+            .await
+            .map_err(map_gm_error)?;
     }
     let mut resp = Json(serde_json::json!({ "signed_out": true })).into_response();
     if let Ok(hv) = HeaderValue::from_str(&format!(
@@ -7364,6 +7433,13 @@ mod tests {
             )
             .unwrap(),
         );
+        let unavailable = plane
+            .provision_workspace("ws_unavailable", "ws_unavailable", "Unavailable", "fixture")
+            .unwrap();
+        std::fs::create_dir_all(
+            std::path::Path::new(&unavailable.worker_dir).join("openbot.sqlite"),
+        )
+        .unwrap();
         let (addr, handle) = CompanionWebServer::new(sup, bridge, Some("op-secret".into()), None)
             .with_hosted_plane(plane)
             .bind_and_serve("127.0.0.1:0")
@@ -7500,6 +7576,67 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(cross.status(), 403);
+
+        let enrollment: serde_json::Value = client
+            .post(format!("{base}/api/v1/auth/enroll"))
+            .bearer_auth("op-secret")
+            .json(&serde_json::json!({"ws_id": "ws_fresh_a", "user_id": "alice", "role": "owner"}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let device = client.post(format!("{base}/api/v1/auth/session"))
+            .json(&serde_json::json!({"enrollment_token": enrollment["enrollment_token"], "mode": "device"}))
+            .send().await.unwrap().error_for_status().unwrap();
+        assert!(!device.headers().contains_key(header::SET_COOKIE));
+        let device: serde_json::Value = device.json().await.unwrap();
+        assert_eq!(device["ws_id"], "ws_fresh_a");
+        let session = device["device_session"].as_str().unwrap();
+        let messages: Vec<serde_json::Value> = client
+            .get(format!("{base}/api/v1/dm/muse/messages"))
+            .bearer_auth(session)
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), msgs_a.len());
+        assert_eq!(
+            client
+                .post(format!("{base}/api/v1/auth/logout"))
+                .bearer_auth(session)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            client
+                .get(format!("{base}/api/v1/dm/muse/messages"))
+                .bearer_auth(session)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+
+        let (cookie_unavailable, _) = login("ws_unavailable", "carol").await;
+        let unavailable = client
+            .get(format!("{base}/api/v1/dm/muse/messages"))
+            .header(header::COOKIE, cookie_unavailable)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unavailable.status(), 503);
 
         handle.abort();
     }

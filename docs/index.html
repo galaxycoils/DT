@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>DT v1.0.6 — Native Hybrid Desktop, Web, Mobile & Self-Hostable Agent</title>
+  <title>DT v1.0.7 — Native Hybrid Desktop, Web, Mobile & Self-Hostable Agent</title>
   <meta name="description" content="DT is a native Rust computer-use and multi-agent coworker suite across macOS, Windows 11, Ubuntu 24.04 (X11/Wayland), React Web, Expo Mobile, Voice/SIP/Meetings, and Hosted multi-tenant deployments." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -696,12 +696,12 @@
       <a href="#top" class="brand">
         <span class="brand-mark">DT</span>
         <span>DT Hybrid Agent</span>
-        <span class="version-tag mono">v1.0.6</span>
+        <span class="version-tag mono">v1.0.7</span>
       </a>
       <nav class="nav-links" aria-label="Primary Navigation">
         <a href="#workspace" class="nav-btn">Interactive Workspace</a>
         <a href="#downloads" class="nav-btn">Binaries &amp; Installers</a>
-        <a href="#gates" class="nav-btn">G1–G8 &amp; 36/36 Coverage</a>
+        <a href="#gates" class="nav-btn">Release Verification</a>
         <button type="button" id="open-palette-btn" class="nav-btn outline mono">⌘K Palette</button>
         <button type="button" id="theme-toggle-btn" class="nav-btn outline">Light / Dark</button>
         <a href="https://github.com/galaxycoils/DT/releases" class="nav-btn primary">GitHub Releases</a>
@@ -723,8 +723,8 @@
             <div class="metric-lbl">CI Test Matrix</div>
           </div>
           <div class="metric-box">
-            <div class="metric-val mono">36 / 36</div>
-            <div class="metric-lbl">Coverage Inventory IDs</div>
+            <div class="metric-val mono">28</div>
+            <div class="metric-lbl">Required Coverage Rows</div>
           </div>
           <div class="metric-box">
             <div class="metric-val mono">&lt; 50 MB</div>
@@ -736,7 +736,7 @@
           </div>
         </div>
         <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-          <a href="https://github.com/galaxycoils/DT/releases/latest" class="nav-btn primary" style="padding: 10px 18px;">Download Latest Release (v1.0.6)</a>
+          <a href="https://github.com/galaxycoils/DT/releases/tag/v1.0.7" class="nav-btn primary" style="padding: 10px 18px;">Download v1.0.7 prerelease</a>
           <a href="https://github.com/galaxycoils/DT" class="nav-btn outline" style="padding: 10px 18px;">View Source on GitHub</a>
         </div>
       </div>
@@ -832,7 +832,7 @@
     <!-- G1-G8 & Coverage Inventory Scorecard -->
     <div class="section-header" id="gates">
       <div>
-        <h2>Release Gates (G1–G8) &amp; 36/36 Coverage Inventory Scorecard</h2>
+        <h2>Release Gates and Coverage</h2>
         <p>Enforced by <code>cargo nextest</code>, <code>xtask eval</code>, and <code>tools/test_release_tools.py</code>.</p>
       </div>
     </div>
@@ -850,13 +850,13 @@
           <tr>
             <td><strong>Rust Workspace Unit &amp; Integration</strong></td>
             <td><code>cargo clippy -- -D warnings</code> + <code>cargo nextest</code></td>
-            <td class="mono">0 warnings · 422 / 422 tests passed</td>
+            <td class="mono">Results in the GitHub tag CI run</td>
             <td><span class="badge-ok">PASS</span></td>
           </tr>
           <tr>
             <td><strong>Release Coverage Inventory</strong></td>
-            <td>All 28 required rows &amp; 36 <code>test_ids</code> in <code>coverage-inventory.json</code></td>
-            <td class="mono">36 / 36 test_ids verified in codebase</td>
+            <td>28 required rows in <code>coverage-inventory.json</code></td>
+            <td class="mono">Automated test IDs checked in source</td>
             <td><span class="badge-ok">PASS</span></td>
           </tr>
           <tr>
@@ -904,56 +904,56 @@
   </footer>
 
   <script>
-    const RELEASE_TAG = 'v1.0.6';
+    const RELEASE_TAG = 'v1.0.7';
     const REPO_URL = 'https://github.com/galaxycoils/DT';
 
     const OS_DOWNLOADS = {
       linux: {
         assets: [
           {
-            name: 'dt_1.0.6_amd64.deb',
+            name: 'dt_1.0.7_amd64.deb',
             sub: 'Ubuntu 24.04 LTS (x86_64) · Includes dt, gm, dt-doctor, gm-daemon, gm-cu-helper, gm-ui + systemd user services',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/dt_1.0.6_amd64.deb`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/dt_1.0.7_amd64.deb`
           },
           {
-            name: 'DT-1.0.6-linux-x86_64-binaries.tar.gz',
+            name: 'DT-1.0.7-linux-x86_64-binaries.tar.gz',
             sub: 'Standalone optimized Linux x86_64 release binaries archive + SHA-256 checksum',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.6-linux-x86_64-binaries.tar.gz`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.7-linux-x86_64-binaries.tar.gz`
           },
           {
-            name: 'dt_1.0.6_arm64.deb',
+            name: 'dt_1.0.7_arm64.deb',
             sub: 'Ubuntu 24.04 LTS (ARM64) Debian package',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/dt_1.0.6_arm64.deb`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/dt_1.0.7_arm64.deb`
           }
         ],
-        cmd: 'sudo apt install ./dt_1.0.6_amd64.deb && dt doctor check'
+        cmd: 'sudo apt install ./dt_1.0.7_amd64.deb && dt doctor check'
       },
       macos: {
         assets: [
           {
-            name: 'DT-1.0.6-macos-aarch64.dmg',
+            name: 'DT-1.0.7-macos-aarch64.dmg',
             sub: 'macOS Apple Silicon (M1/M2/M3/M4) · Contains DT.app, DTCUHelper.app & Install DT.pkg',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.6-macos-aarch64.dmg`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.7-macos-aarch64.dmg`
           },
           {
-            name: 'DT-1.0.6-macos-x86_64.dmg',
+            name: 'DT-1.0.7-macos-x86_64.dmg',
             sub: 'macOS Intel (x86_64) · Contains DT.app, DTCUHelper.app & Install DT.pkg',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.6-macos-x86_64.dmg`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.7-macos-x86_64.dmg`
           }
         ],
-        cmd: 'shasum -a 256 -c DT-1.0.6-macos-aarch64.dmg.sha256 && dt onboard'
+        cmd: 'shasum -a 256 -c DT-1.0.7-macos-aarch64.dmg.sha256 && dt onboard'
       },
       windows: {
         assets: [
           {
-            name: 'DT-1.0.6-windows-x86_64-setup.exe',
+            name: 'DT-1.0.7-windows-x86_64-setup.exe',
             sub: 'Windows 11 (x64) NSIS per-user installer with SID-scoped named pipes & scheduled tasks',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.6-windows-x86_64-setup.exe`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.7-windows-x86_64-setup.exe`
           },
           {
-            name: 'DT-1.0.6-windows-aarch64-setup.exe',
+            name: 'DT-1.0.7-windows-aarch64-setup.exe',
             sub: 'Windows 11 (ARM64) NSIS per-user installer',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.6-windows-aarch64-setup.exe`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.7-windows-aarch64-setup.exe`
           }
         ],
         cmd: 'dt.exe doctor check --json'
@@ -961,9 +961,9 @@
       docker: {
         assets: [
           {
-            name: 'DT-1.0.6-web-client.tar.gz',
+            name: 'DT-1.0.7-web-client.tar.gz',
             sub: 'Production Vite React Web Client bundle with Rakazo UI tokens & Cookie+CSRF session client',
-            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.6-web-client.tar.gz`
+            url: `${REPO_URL}/releases/download/${RELEASE_TAG}/DT-1.0.7-web-client.tar.gz`
           },
           {
             name: 'deploy/docker/docker-compose.yml',
@@ -999,13 +999,13 @@
       lastArrowPos: null,
       messages: {
         'dm:muse': [
-          { author: '@muse', role: 'bot', time: 'Just now', text: 'Welcome to DT v1.0.6. Switch between coworkers on the left to verify per-target draft isolation, or type "->" in the composer to test smart typography.' }
+          { author: '@muse', role: 'bot', time: 'Just now', text: 'Welcome to DT v1.0.7. Switch between coworkers on the left to verify per-target draft isolation, or type "->" in the composer to test smart typography.' }
         ],
         'dm:researcher': [
           { author: '@researcher', role: 'bot', time: '2m ago', text: 'Notice how your unsent draft ("Synthesize benchmark citations -> ") was preserved specifically for @researcher!' }
         ],
         'dm:coder': [
-          { author: '@coder', role: 'bot', time: '1m ago', text: 'All 422 workspace tests and 36/36 release coverage inventory test_ids are passing with zero clippy warnings.' }
+          { author: '@coder', role: 'bot', time: '1m ago', text: 'Open Release Verification for CI results and native evidence requirements.' }
         ],
         'dm:guardian': [
           { author: '@guardian', role: 'bot', time: 'Just now', text: 'Outbound relay HMAC-SHA256 replay window (<= 300s) and DISCRETION.md deny-wins rules are enforced.' }
@@ -1306,7 +1306,7 @@
       { label: 'Open Split-View Static Space Sandbox', tag: 'View', run: () => { state.activeView = 'spaces'; renderViewTabs(); renderCanvas(); } },
       { label: 'Open 5-Tier Provider Connection Pipeline', tag: 'View', run: () => { state.activeView = 'providers'; renderViewTabs(); renderCanvas(); } },
       { label: 'Run DT Doctor Readiness Check', tag: 'Diagnostics', run: () => { state.activeView = 'doctor'; renderViewTabs(); renderCanvas(); } },
-      { label: 'Download Ubuntu 24.04 Debian Package (dt_1.0.6_amd64.deb)', tag: 'Binary', run: () => { state.os = 'linux'; renderOsDownloads(); location.hash = '#downloads'; } },
+      { label: 'Download Ubuntu 24.04 Debian Package (dt_1.0.7_amd64.deb)', tag: 'Binary', run: () => { state.os = 'linux'; renderOsDownloads(); location.hash = '#downloads'; } },
       { label: 'Download macOS Apple Silicon & Intel DMG', tag: 'Binary', run: () => { state.os = 'macos'; renderOsDownloads(); location.hash = '#downloads'; } },
       { label: 'Download Windows 11 x64 & ARM64 Setup.exe', tag: 'Binary', run: () => { state.os = 'windows'; renderOsDownloads(); location.hash = '#downloads'; } },
       { label: 'Toggle Dark / Light Rakazo Theme', tag: 'Theme', run: () => document.getElementById('theme-toggle-btn').click() }

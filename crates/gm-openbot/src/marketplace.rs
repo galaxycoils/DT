@@ -2,9 +2,10 @@
 //! atomic install/update/remove lifecycle, and workspace scoping.
 
 use chrono::Utc;
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -35,22 +36,22 @@ pub struct InstalledMarketplacePlugin {
 
 #[derive(Clone)]
 pub struct MarketplaceStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Database>>,
 }
 
 impl MarketplaceStore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init(conn)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
+        let conn = Database::in_memory()
             .map_err(|e| GmError::Platform(format!("Marketplace DB error: {e}")))?;
         Self::init(conn)
     }
 
-    fn init(conn: Connection) -> Result<Self> {
+    fn init(conn: Database) -> Result<Self> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS installed_plugins_v1 (
                 id TEXT PRIMARY KEY,

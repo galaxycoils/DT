@@ -29,6 +29,26 @@ export default function InboxScreen() {
     return avatarPalette[index % avatarPalette.length];
   }
 
+  const [refreshKey, setRefreshKey] = useState(0);
+  const refreshWorkspace = useCallback(async (signal?: AbortSignal) => {
+    setBots([]);
+    setChannels([]);
+    setPosts([]);
+    setStatus("Loading workspace…");
+    const results = await Promise.allSettled([
+      connectedRequest<Bot[]>("/bots", { signal }),
+      connectedRequest<Channel[]>("/channels", { signal }),
+      listActivity(signal),
+    ] as const);
+    if (signal?.aborted) return;
+    const [bots, channels, activity] = results;
+    if (bots.status === "fulfilled") setBots(bots.value);
+    if (channels.status === "fulfilled") setChannels(channels.value);
+    if (activity.status === "fulfilled") setPosts(activity.value);
+    const failed = ["bots", "channels", "activity"].filter((_, index) => results[index]?.status === "rejected");
+    setStatus(failed.length ? `Could not load ${failed.join(", ")}.` : "");
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       const controller = new AbortController();
@@ -44,17 +64,7 @@ export default function InboxScreen() {
             return;
           }
           setConnected(true);
-          setStatus("Loading workspace…");
-          const [botList, chanList, actPosts] = await Promise.all([
-            connectedRequest<Bot[]>("/bots", { signal: controller.signal }),
-            connectedRequest<Channel[]>("/channels", { signal: controller.signal }).catch(() => []),
-            listActivity(controller.signal).catch(() => []),
-          ]);
-          if (controller.signal.aborted) return;
-          setBots(Array.isArray(botList) ? botList : []);
-          setChannels(Array.isArray(chanList) ? chanList : []);
-          setPosts(actPosts);
-          setStatus(botList.length ? "" : "No bots configured yet.");
+          await refreshWorkspace(controller.signal);
         })
         .catch((error) => {
           if (controller.signal.aborted) return;
@@ -66,7 +76,7 @@ export default function InboxScreen() {
       return () => {
         controller.abort();
       };
-    }, []),
+    }, [refreshKey, refreshWorkspace]),
   );
 
   if (connected === false) {
@@ -92,7 +102,7 @@ export default function InboxScreen() {
             Connect to DT
           </Text>
           <Text style={{ color: tokens.mutedForeground, fontSize: 15, lineHeight: 22 }}>
-            Sign in with your HTTPS DT server origin, workspace ID, and operator access token to
+            Sign in with your HTTPS DT server origin and one-time workspace enrollment token to
             open chats, approvals, and routines.
           </Text>
           <Link href="/settings" asChild>
@@ -145,6 +155,7 @@ export default function InboxScreen() {
         </View>
       </View>
 
+      {status.startsWith("Could not") ? <Button title="Retry workspace" color={tokens.primary} onPress={() => setRefreshKey((key) => key + 1)} /> : null}
       {status ? (
         <Text accessibilityLiveRegion="polite" style={{ color: tokens.mutedForeground }}>
           {status}

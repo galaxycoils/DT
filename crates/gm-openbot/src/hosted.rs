@@ -8,6 +8,7 @@ use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use chrono::{DateTime, Duration, Utc};
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use hkdf::Hkdf;
 use parking_lot::Mutex;
@@ -1280,11 +1281,21 @@ impl PostgresHostedStore {
         let ct_b64: String = row.get("ciphertext_b64");
         decrypt_secret_aes_gcm(&self.master_key, &clean_ws, account, &nonce_b64, &ct_b64)
     }
+
+    async fn delete_secret(&self, ws_id: &str, account: &str) -> Result<()> {
+        sqlx::query("DELETE FROM encrypted_secrets WHERE ws_id = $1 AND account = $2")
+            .bind(ws_id)
+            .bind(account)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| GmError::Platform(error.to_string()))?;
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
 pub struct HostedControlPlane {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Database>>,
     workers_root: PathBuf,
     master_key: [u8; 32],
     revocation_tx: tokio::sync::broadcast::Sender<(String, String)>,
@@ -1301,17 +1312,17 @@ impl HostedControlPlane {
                 "Hosted master encryption key must be at least 16 bytes".into(),
             ));
         }
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init(conn, workers_root.as_ref().to_path_buf(), master_key)
     }
 
     pub fn in_memory(workers_root: impl AsRef<Path>, master_key: &[u8]) -> Result<Self> {
-        let conn = Connection::open_in_memory()
+        let conn = Database::in_memory()
             .map_err(|e| GmError::Platform(format!("Hosted control plane DB error: {e}")))?;
         Self::init(conn, workers_root.as_ref().to_path_buf(), master_key)
     }
 
-    fn init(conn: Connection, workers_root: PathBuf, master_key: &[u8]) -> Result<Self> {
+    fn init(conn: Database, workers_root: PathBuf, master_key: &[u8]) -> Result<Self> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS hosted_workspaces_v1 (
                 ws_id TEXT PRIMARY KEY,
@@ -2146,6 +2157,56 @@ impl HostedPlaneBackend {
             Self::Sqlite(p) => p.revoke_membership(ws_id, user_id),
             Self::Postgres(p) => p.revoke_membership(ws_id, user_id).await,
         }
+    }
+}
+
+pub(crate) struct PostgresTenantSecretVault {
+    pub(crate) plane: std::sync::Arc<PostgresHostedStore>,
+    pub(crate) ws_id: String,
+}
+
+impl PostgresTenantSecretVault {
+    fn run<T: Send>(operation: impl std::future::Future<Output = Result<T>> + Send) -> Result<T> {
+        // The native vault interface is synchronous. Use a separate runtime for PostgreSQL I/O.
+        static RUNTIME: std::sync::OnceLock<std::io::Result<tokio::runtime::Runtime>> =
+            std::sync::OnceLock::new();
+        let runtime = RUNTIME
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(1)
+                    .enable_all()
+                    .build()
+            })
+            .as_ref()
+            .map_err(|error| GmError::Platform(error.to_string()))?;
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    runtime.block_on(async {
+                        tokio::time::timeout(std::time::Duration::from_secs(8), operation)
+                            .await
+                            .map_err(|_| {
+                                GmError::Platform("Workspace vault request timed out".into())
+                            })?
+                    })
+                })
+                .join()
+                .map_err(|_| GmError::Platform("Workspace vault worker stopped".into()))?
+        })
+    }
+}
+
+impl SecretBackend for PostgresTenantSecretVault {
+    fn get_secret(&self, account: &str) -> Result<String> {
+        Self::run(self.plane.get_secret(&self.ws_id, account))
+    }
+
+    fn set_secret(&self, account: &str, secret: &str) -> Result<()> {
+        Self::run(self.plane.set_secret(&self.ws_id, account, secret))
+    }
+
+    fn delete_secret(&self, account: &str) -> Result<()> {
+        Self::run(self.plane.delete_secret(&self.ws_id, account))
     }
 }
 

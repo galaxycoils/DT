@@ -1,4 +1,5 @@
 use chrono::Utc;
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -65,22 +66,22 @@ pub fn normalize_channel_id(id: &str) -> String {
 /// with single-task owner controls (`Stop`, `Resume`, `Reassign`, `Archive`, `Restore`).
 #[derive(Clone)]
 pub struct ChannelStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Database>>,
 }
 
 impl ChannelStore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init_conn(conn)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
+        let conn = Database::in_memory()
             .map_err(|e| GmError::Platform(format!("Failed to open in-memory channel DB: {e}")))?;
         Self::init_conn(conn)
     }
 
-    fn init_conn(conn: Connection) -> Result<Self> {
+    fn init_conn(conn: Database) -> Result<Self> {
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;

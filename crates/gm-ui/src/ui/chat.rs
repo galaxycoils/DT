@@ -80,6 +80,7 @@ pub enum ChatCanvasAction {
     ToggleVoice,
     ToggleDictation,
     VoiceConsent(bool),
+    VoiceRecord,
     VoiceSpeak(String),
     VoiceBargeIn,
     VoiceStop,
@@ -511,21 +512,20 @@ pub fn draw_chat_canvas(
                                 || ui_state.dictation_active
                                 || voice_state["active"].as_bool().unwrap_or(false);
                             if voice_running {
-                                let mode_str = voice_state["mode"]
-                                    .as_str()
-                                    .unwrap_or(if ui_state.dictation_active {
+                                let mode_str = voice_state["mode"].as_str().unwrap_or(
+                                    if ui_state.dictation_active {
                                         "dictate"
                                     } else {
                                         "voice"
-                                    });
+                                    },
+                                );
                                 let consent_ok = voice_state["consent_acknowledged"]
                                     .as_bool()
                                     .unwrap_or(false);
                                 let stt_installed =
                                     voice_state["stt_installed"].as_bool().unwrap_or(false);
-                                let voice_err = voice_state["last_error"]
-                                    .as_str()
-                                    .unwrap_or_default();
+                                let voice_err =
+                                    voice_state["last_error"].as_str().unwrap_or_default();
                                 let last_assistant = rows
                                     .iter()
                                     .rev()
@@ -545,10 +545,10 @@ pub fn draw_chat_canvas(
                                             });
                                             ui.small(
                                                 RichText::new(if consent_ok {
-                                                    if stt_installed {
-                                                        "Mic consent granted · Local STT ready"
+                                                    if ui_state.voice_recording {
+                                                        "Recording · up to 10 seconds"
                                                     } else {
-                                                        "Mic consent granted · Local STT not installed"
+                                                        "Microphone consent granted"
                                                     }
                                                 } else {
                                                     "Waiting for microphone consent"
@@ -560,22 +560,31 @@ pub fn draw_chat_canvas(
                                                 }),
                                             );
                                             if !consent_ok {
-                                                if ui
-                                                    .small_button("Allow Microphone")
-                                                    .clicked()
-                                                {
-                                                    push_action(ChatCanvasAction::VoiceConsent(true));
+                                                if ui.small_button("Allow Microphone").clicked() {
+                                                    push_action(ChatCanvasAction::VoiceConsent(
+                                                        true,
+                                                    ));
                                                 }
-                                            } else if ui
-                                                .small_button("Revoke Consent")
-                                                .clicked()
-                                            {
+                                            } else if ui.small_button("Revoke Consent").clicked() {
                                                 push_action(ChatCanvasAction::VoiceConsent(false));
+                                            }
+                                            if consent_ok
+                                                && ui
+                                                    .small_button(if ui_state.voice_recording {
+                                                        "Transcribe Recording"
+                                                    } else {
+                                                        "Record Microphone"
+                                                    })
+                                                    .clicked()
+                                            {
+                                                push_action(ChatCanvasAction::VoiceRecord);
                                             }
                                             if let Some(reply_text) = last_assistant
                                                 && ui.small_button("Speak Last Reply").clicked()
                                             {
-                                                push_action(ChatCanvasAction::VoiceSpeak(reply_text));
+                                                push_action(ChatCanvasAction::VoiceSpeak(
+                                                    reply_text,
+                                                ));
                                             }
                                             if voice_state["state"].as_str() == Some("speaking")
                                                 && ui.small_button("Interrupt").clicked()

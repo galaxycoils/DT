@@ -185,25 +185,125 @@ pub struct ManagedLocalVlmBackend {
     spec: ManagedVlmWorkerSpec,
     status: VlmAcceleratorStatus,
     child: Mutex<Option<std::process::Child>>,
+    startup: tokio::sync::Mutex<Option<String>>,
+    api_key: String,
     client: reqwest::Client,
 }
 
 impl ManagedLocalVlmBackend {
     pub fn new(spec: ManagedVlmWorkerSpec) -> Result<Self> {
         let status = spec.validate_before_launch()?;
-        if !spec.endpoint.starts_with("http://127.0.0.1:")
-            && !spec.endpoint.starts_with("http://localhost:")
+        let endpoint = reqwest::Url::parse(&spec.endpoint)
+            .map_err(|e| gm_core::GmError::Config(format!("Invalid local VLM endpoint: {e}")))?;
+        if endpoint.scheme() != "http"
+            || !matches!(endpoint.host_str(), Some("127.0.0.1" | "localhost"))
+            || !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || endpoint.query().is_some()
+            || endpoint.fragment().is_some()
+            || endpoint.path() != "/"
         {
-            return Err(gm_core::error::GmError::SafetyViolation(
-                "Local VLM worker endpoint must bind to loopback only".into(),
+            return Err(gm_core::GmError::SafetyViolation(
+                "Local VLM worker endpoint must be a loopback HTTP origin".into(),
             ));
         }
         Ok(Self {
             spec,
             status,
             child: Mutex::new(None),
-            client: reqwest::Client::new(),
+            startup: tokio::sync::Mutex::new(None),
+            api_key: uuid::Uuid::new_v4().simple().to_string(),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .map_err(|e| gm_core::GmError::Platform(e.to_string()))?,
         })
+    }
+
+    async fn endpoint(&self) -> Result<String> {
+        if !self.spec.endpoint.ends_with(":0") {
+            return Ok(self.spec.endpoint.trim_end_matches('/').to_string());
+        }
+        let mut startup = self.startup.lock().await;
+        {
+            let mut guard = self.child.lock();
+            if let Some(worker) = guard.as_mut()
+                && worker.try_wait()?.is_none()
+                && let Some(endpoint) = startup.as_ref()
+            {
+                return Ok(endpoint.clone());
+            }
+        }
+        self.unload();
+        let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+            .local_addr()?
+            .port();
+        let endpoint = format!("http://127.0.0.1:{port}");
+        let projector = self
+            .spec
+            .mmproj_path
+            .as_ref()
+            .ok_or_else(|| gm_core::GmError::Config("Local VLM projector is missing".into()))?;
+        let cpu = self.status.actual == VlmDevice::Cpu;
+        let worker = std::process::Command::new(&self.spec.worker_bin)
+            .args([
+                "--host",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+                "--ctx-size",
+                "4096",
+                "--parallel",
+                "1",
+                "--n-gpu-layers",
+                if cpu { "0" } else { "auto" },
+                "--model",
+            ])
+            .arg(&self.spec.model_path)
+            .arg("--mmproj")
+            .arg(projector)
+            .env("LLAMA_API_KEY", &self.api_key)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| {
+                gm_core::GmError::Platform(format!("Cannot start the local model worker: {e}"))
+            })?;
+        *self.child.lock() = Some(worker);
+        *startup = None;
+        let started = tokio::time::Instant::now();
+        while started.elapsed() < std::time::Duration::from_secs(90) {
+            if self
+                .child
+                .lock()
+                .as_mut()
+                .is_none_or(|worker| !matches!(worker.try_wait(), Ok(None)))
+            {
+                self.unload();
+                return Err(gm_core::GmError::Platform(
+                    "Local model worker exited before loading the model".into(),
+                ));
+            }
+            if self
+                .client
+                .get(format!("{endpoint}/health"))
+                .timeout(std::time::Duration::from_secs(1))
+                .send()
+                .await
+                .is_ok_and(|response| response.status().is_success())
+            {
+                *startup = Some(endpoint.clone());
+                return Ok(endpoint);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+        self.unload();
+        Err(gm_core::GmError::Platform(
+            "Local model worker did not become ready within 90 seconds".into(),
+        ))
     }
 
     pub fn accelerator_status(&self) -> &VlmAcceleratorStatus {
@@ -275,10 +375,12 @@ impl LocalVlmBackend for ManagedLocalVlmBackend {
     async fn generate(&self, image_jpeg: &[u8], prompt: &str) -> Result<String> {
         use base64::Engine;
         let b64 = base64::engine::general_purpose::STANDARD.encode(image_jpeg);
-        let resp = self
-            .client
-            .post(format!("{}/v1/chat/completions", self.spec.endpoint.trim_end_matches('/')))
-            .json(&serde_json::json!({
+        let endpoint = self.endpoint().await?;
+        let mut request = self.client.post(format!("{endpoint}/v1/chat/completions"));
+        if self.spec.endpoint.ends_with(":0") {
+            request = request.bearer_auth(&self.api_key);
+        }
+        let resp = request.json(&serde_json::json!({
                 "model": self.spec.model_id,
                 "messages": [{
                     "role": "user",

@@ -104,7 +104,7 @@ Section: utils
 Priority: optional
 Architecture: ${DEB_ARCH}
 Maintainer: DT Contributors <https://github.com/galaxycoils/DT/issues>
-Depends: libc6 (>= 2.38), libssl3, libsqlite3-0, libxkbcommon0, libxcb-render0, libxcb-shape0, libxcb-xfixes0, libpipewire-0.3-0, libatspi2.0-0, libsecret-1-0, xdg-desktop-portal
+Depends: libasound2t64, pipewire-bin, libc6 (>= 2.38), libssl3, libsqlite3-0, libxkbcommon0, libxcb-render0, libxcb-shape0, libxcb-xfixes0, libpipewire-0.3-0, libatspi2.0-0, libsecret-1-0, xdg-desktop-portal
 Description: DT Hybrid Agent for Ubuntu 24.04 Desktop (X11 and Wayland)
  Fast computer-use, local VLM & voice runtimes, multi-agent coworkers, and
  unified Doctor recovery for Ubuntu 24.04 LTS.

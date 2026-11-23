@@ -1,161 +1,165 @@
-//! SQLite connection opening with automated corruption recovery and backup preservation.
-//! Never silently deletes corrupted databases; copies them to timestamped `.bak` files.
+//! SQLite integrity checks and explicit, resumable preservation of corrupt stores.
 
-use chrono::Utc;
+use gm_core::database::{acquire_database_lease, corrupt_header, recovery_directory};
 use gm_core::error::{GmError, Result};
-use rusqlite::Connection;
 use rusqlite::backup::{Backup, StepResult};
+use rusqlite::{Connection, ErrorCode, OpenFlags};
+use std::fs;
 use std::path::Path;
-use tracing::warn;
 
-/// Perform a non-destructive, read-only integrity check on a SQLite database.
+const READ_ONLY: OpenFlags =
+    OpenFlags::SQLITE_OPEN_READ_ONLY.union(OpenFlags::SQLITE_OPEN_NO_MUTEX);
+
+/// Perform a non-destructive integrity check on a SQLite database.
 pub fn check_sqlite_integrity(path: &Path) -> Result<()> {
-    if !path.exists() {
+    if !path.try_exists()? {
         return Ok(());
     }
-    let conn = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| GmError::Platform(format!("Failed to open SQLite database for check: {e}")))?;
-    let mut check = sqlite_quick_check(&conn)?;
-    if check.starts_with("unable to validate the inverted index")
-        && check.ends_with("attempt to write a readonly database")
-    {
-        // SQLite 3.45.0 needs a writable connection to check FTS indexes.
-        let snapshot_error =
-            |e| GmError::Platform(format!("Cannot snapshot SQLite for check: {e}"));
-        let mut snapshot = Connection::open("").map_err(snapshot_error)?;
-        let copied = Backup::new(&conn, &mut snapshot)
-            .and_then(|backup| backup.step(-1))
-            .map_err(snapshot_error)?;
-        if !matches!(copied, StepResult::Done) {
-            return Err(GmError::Platform(format!(
-                "SQLite snapshot for integrity check did not complete: {copied:?}"
-            )));
-        }
-        check = sqlite_quick_check(&snapshot)?;
-    }
+    let check = quick_check(path).map_err(|e| check_error(path, e))?;
     if check.eq_ignore_ascii_case("ok") {
         Ok(())
     } else {
         Err(GmError::Platform(format!(
-            "Integrity check failed: {check}"
+            "SQLite integrity check failed for {}: {check}",
+            path.display()
         )))
     }
 }
 
-fn sqlite_quick_check(conn: &Connection) -> Result<String> {
-    conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))
-        .map_err(|e| GmError::Platform(format!("Integrity check query failed: {e}")))
+fn check_error(path: &Path, error: rusqlite::Error) -> GmError {
+    GmError::Platform(format!(
+        "SQLite integrity check failed for {}: {error}",
+        path.display()
+    ))
 }
 
-pub fn open_sqlite_with_recovery(path: &Path) -> Result<Connection> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+fn quick_check(path: &Path) -> rusqlite::Result<String> {
+    let conn = Connection::open_with_flags(path, READ_ONLY)?;
+    let mut check: String = conn.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
+    if check.starts_with("unable to validate the inverted index")
+        && check.ends_with("attempt to write a readonly database")
+    {
+        // SQLite 3.45.0 needs a writable connection to check FTS indexes.
+        let mut snapshot = Connection::open("")?;
+        let copied = Backup::new(&conn, &mut snapshot)?.step(-1)?;
+        if !matches!(copied, StepResult::Done) {
+            return Err(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                Some(format!(
+                    "SQLite snapshot for integrity check did not complete: {copied:?}"
+                )),
+            ));
+        }
+        check = snapshot.query_row("PRAGMA quick_check(1)", [], |row| row.get(0))?;
     }
+    if check.starts_with("unable to validate the inverted index") {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(check),
+        ));
+    }
+    Ok(check)
+}
 
-    if path.exists() {
-        let is_healthy = match Connection::open(path) {
-            Ok(c) => {
-                let check_res: rusqlite::Result<String> = c
-                    .prepare("PRAGMA quick_check(1)")
-                    .and_then(|mut stmt| stmt.query_row([], |r| r.get(0)));
-                match check_res {
-                    Ok(res) => res.eq_ignore_ascii_case("ok"),
-                    Err(_) => false,
-                }
+/// Preserve the database and its sidecars by moving them into a private
+/// quarantine on the same filesystem. A subsequent normal open initializes it.
+pub fn quarantine_corrupt_database(path: &Path) -> Result<bool> {
+    let staging = recovery_directory(path);
+    if !path.try_exists()? && !staging.try_exists()? {
+        return Ok(false);
+    }
+    let _lease = acquire_database_lease(path, true)?;
+    if !staging.try_exists()? {
+        if !corrupt_header(path)? {
+            match quick_check(path) {
+                Ok(check) if check.eq_ignore_ascii_case("ok") => return Ok(false),
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.sqlite_error_code(),
+                        Some(ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase)
+                    ) => {}
+                Err(error) => return Err(check_error(path, error)),
             }
-            Err(_) => false,
-        };
-
-        if !is_healthy {
-            let ts = Utc::now().timestamp();
-            let backup_path = path.with_extension(format!("corrupt.{ts}.bak"));
-            warn!(
-                "SQLite database at {:?} failed integrity check; preserving corrupt data at {:?} before reinitializing",
-                path, backup_path
-            );
-            // Always preserve user data before touching existing corrupted file.
-            // If backup preservation fails, refuse to destroy original data!
-            let preserved = if std::fs::rename(path, &backup_path).is_ok() {
-                true
-            } else if std::fs::copy(path, &backup_path).is_ok() {
-                let _ = std::fs::remove_file(path);
-                true
-            } else {
-                false
-            };
-
-            if !preserved {
-                return Err(GmError::Platform(format!(
-                    "SQLite database at {:?} failed integrity check and could not be preserved to {:?}; refusing to destroy original file",
-                    path, backup_path
+        }
+        gm_core::storage::ensure_private_dir(&staging)?;
+    }
+    if !staging.symlink_metadata()?.file_type().is_dir() {
+        return Err(GmError::SafetyViolation(
+            "Invalid database recovery directory".into(),
+        ));
+    }
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        let source = Path::new(&name);
+        let destination = staging.join(
+            source
+                .file_name()
+                .ok_or_else(|| GmError::Config("Missing database file name".into()))?,
+        );
+        match source.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() && !destination.try_exists()? => {
+                fs::rename(source, destination)?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => {
+                return Err(GmError::SafetyViolation(format!(
+                    "Unexpected database recovery entry {}",
+                    source.display()
                 )));
-            }
-
-            let wal = format!("{}-wal", path.display());
-            let wal_path = Path::new(&wal);
-            if wal_path.exists() {
-                let wal_bak = path.with_extension(format!("corrupt.{ts}.wal.bak"));
-                if std::fs::rename(wal_path, &wal_bak).is_err()
-                    && std::fs::copy(wal_path, &wal_bak).is_ok()
-                {
-                    let _ = std::fs::remove_file(wal_path);
-                }
-            }
-
-            let shm = format!("{}-shm", path.display());
-            let shm_path = Path::new(&shm);
-            if shm_path.exists() {
-                let shm_bak = path.with_extension(format!("corrupt.{ts}.shm.bak"));
-                if std::fs::rename(shm_path, &shm_bak).is_err()
-                    && std::fs::copy(shm_path, &shm_bak).is_ok()
-                {
-                    let _ = std::fs::remove_file(shm_path);
-                }
             }
         }
     }
-
-    Connection::open(path).map_err(|e| {
-        GmError::Platform(format!("Failed to open SQLite database at {:?}: {e}", path))
-    })
+    let quarantine = path.with_extension(format!("corrupt-{}.bak", uuid::Uuid::new_v4()));
+    fs::rename(staging, quarantine)?;
+    Ok(true)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gm_core::database::Database;
 
     #[test]
-    fn test_corrupt_sqlite_preserved_and_reinitialized() {
-        let dir = std::env::temp_dir().join(format!("gm-corrupt-test-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let db_path = dir.join("test.sqlite");
+    fn database_recovery_is_explicit_and_resumable() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("test.sqlite");
+        let original = b"NOT_A_VALID_SQLITE_DATABASE";
+        fs::write(&path, original).unwrap();
+        assert!(Database::open(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
 
-        // Write corrupt garbage to simulate unexpected corruption / truncated write
-        let corrupt_data = b"NOT_A_VALID_SQLITE_HEADER_GARBAGE_DATA";
-        std::fs::write(&db_path, corrupt_data).unwrap();
+        let staged = recovery_directory(&path);
+        fs::create_dir(&staged).unwrap();
+        fs::rename(&path, staged.join("test.sqlite")).unwrap();
+        fs::write(root.path().join("test.sqlite-wal"), b"wal").unwrap();
+        assert!(Database::open(&path).is_err());
+        assert!(quarantine_corrupt_database(&path).unwrap());
+        assert!(!path.exists());
 
-        // open_sqlite_with_recovery must succeed by archiving corrupted file and opening fresh DB
-        let conn = open_sqlite_with_recovery(&db_path).unwrap();
-        conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY);", [])
+        let backup = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|name| name.extension().is_some_and(|ext| ext == "bak"))
             .unwrap();
-        drop(conn);
+        assert_eq!(fs::read(backup.join("test.sqlite")).unwrap(), original);
+        assert_eq!(fs::read(backup.join("test.sqlite-wal")).unwrap(), b"wal");
 
-        // Verify that a .bak file was created containing the original corrupt data
-        let mut found_bak = false;
-        for entry in std::fs::read_dir(&dir).unwrap() {
-            let entry = entry.unwrap();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with("test.corrupt.") && name.ends_with(".bak") {
-                let contents = std::fs::read(entry.path()).unwrap();
-                assert_eq!(contents, corrupt_data);
-                found_bak = true;
-            }
-        }
-        assert!(found_bak, "Expected backup of corrupt DB to be preserved");
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let live = Database::open(&path).unwrap();
+        live.execute_batch(
+            "CREATE TABLE notes (body TEXT); INSERT INTO notes VALUES ('preserved');",
+        )
+        .unwrap();
+        assert!(quarantine_corrupt_database(&path).is_err());
+        drop(live);
+        assert!(!quarantine_corrupt_database(&path).unwrap());
+        let live = Database::open(&path).unwrap();
+        assert_eq!(
+            live.query_row("SELECT body FROM notes", [], |row| row.get::<_, String>(0))
+                .unwrap(),
+            "preserved"
+        );
     }
 }

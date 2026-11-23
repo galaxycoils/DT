@@ -756,6 +756,11 @@ async fn run_doctor_inner(
             } else {
                 path
             };
+            if gm_core::database::recovery_directory(&path).try_exists()? {
+                return Err(GmError::Platform(
+                    "Resume diagnostics recover-database before migration".into(),
+                ));
+            }
             if path.try_exists()? {
                 gm_openbot::check_sqlite_integrity(&path)?;
             }
@@ -918,33 +923,35 @@ async fn run_doctor_inner(
         .as_ref()
         .map(|m| m.installed_components_for_kind(crate::components::ComponentKind::VlmWorker))
         .unwrap_or_default();
-    let (vlm_readiness, vlm_summary, vlm_next) = if !vlm_models.is_empty()
-        && !vlm_workers.is_empty()
-    {
-        let ids: Vec<&str> = vlm_models.iter().map(|c| c.id.as_str()).collect();
+    let verified_model = component_mgr.as_ref().and_then(|manager| {
+        vlm_models
+            .iter()
+            .find(|model| manager.has_passing_vlm_probe(&model.id))
+    });
+    let (vlm_readiness, vlm_summary, vlm_next) = if let Some(model) = verified_model {
         (
             ReadinessState::Ready,
-            format!("Verified local VLM assets installed: {}", ids.join(", ")),
+            format!("Offline image inference passed for {}", model.id),
             None,
         )
     } else if !vlm_models.is_empty() || !vlm_workers.is_empty() {
         (
             ReadinessState::NeedsAction,
             format!(
-                "Partial local VLM install ({} model(s), {} worker(s))",
+                "Downloaded local VLM assets ({} model(s), {} worker(s))",
                 vlm_models.len(),
                 vlm_workers.len()
             ),
             Some(
-                "Install both a local VLM model and vlm_worker in Settings -> Local Components."
+                "Install the matching model assets, then run dt models probe <model> <image.jpg>."
                     .into(),
             ),
         )
     } else {
         (
             ReadinessState::Unconfigured,
-            "Local multimodal assets are downloaded on demand when enabled".into(),
-            Some("Install a local VLM model and worker in Settings -> Local Components.".into()),
+            "Catalog VLM assets are available on demand".into(),
+            Some("Run dt models install <model> or use Settings → Local Components.".into()),
         )
     };
     capabilities.push(CapabilityStatus {
@@ -963,21 +970,23 @@ async fn run_doctor_inner(
         .as_ref()
         .map(|m| m.installed_components_for_kind(crate::components::ComponentKind::SpeechTts))
         .unwrap_or_default();
-    let (voice_readiness, voice_summary, voice_next) = if !stt_installed.is_empty() {
+    let (voice_readiness, voice_summary, voice_next) = if !stt_installed.is_empty()
+        || !tts_installed.is_empty()
+    {
         (
-            ReadinessState::Ready,
+            ReadinessState::NeedsAction,
             format!(
                 "Local speech assets installed (STT: {}, TTS: {})",
                 stt_installed.len(),
                 tts_installed.len()
             ),
-            None,
+            Some("Check microphone permission and a working local speech runtime before using Voice.".into()),
         )
     } else {
         (
             ReadinessState::Unconfigured,
-            "Speech assets are downloaded and started on demand when voice mode is enabled".into(),
-            Some("Install whisper-stt-base-en in Settings -> Local Components to enable offline voice.".into()),
+            "Local speech runtime has not been verified".into(),
+            Some("Configure a local speech runtime and verify dictation and playback.".into()),
         )
     };
     capabilities.push(CapabilityStatus {

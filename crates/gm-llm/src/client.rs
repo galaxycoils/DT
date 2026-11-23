@@ -372,12 +372,15 @@ pub fn parse_model_catalog(
     Ok(models)
 }
 
+type WorkspaceSecretLookup = Arc<dyn Fn(&str) -> Result<String> + Send + Sync>;
+
 pub struct ReqwestLlmBackend {
     client: reqwest::Client,
     meta_api_key: Option<String>,
     xai_api_key: Option<String>,
     secrets: KeychainSecrets,
     scoped_bearer: Option<(String, Option<String>)>,
+    workspace_secret: Option<WorkspaceSecretLookup>,
 }
 
 impl Default for ReqwestLlmBackend {
@@ -401,6 +404,7 @@ impl ReqwestLlmBackend {
             xai_api_key,
             secrets,
             scoped_bearer: None,
+            workspace_secret: None,
         }
     }
 
@@ -415,6 +419,7 @@ impl ReqwestLlmBackend {
             xai_api_key: xai_key,
             secrets: KeychainSecrets::default(),
             scoped_bearer: None,
+            workspace_secret: None,
         }
     }
 
@@ -431,12 +436,21 @@ impl ReqwestLlmBackend {
             xai_api_key,
             secrets: secrets.clone(),
             scoped_bearer: None,
+            workspace_secret: None,
         }
     }
 
     pub fn for_provider(target: &ModelTarget, bearer: Option<String>) -> Self {
         let mut backend = Self::with_keys(None, None);
         backend.scoped_bearer = Some((target.api_base.clone(), bearer));
+        backend
+    }
+
+    pub fn with_workspace_secrets(
+        lookup: impl Fn(&str) -> Result<String> + Send + Sync + 'static,
+    ) -> Self {
+        let mut backend = Self::with_keys(None, None);
+        backend.workspace_secret = Some(Arc::new(lookup));
         backend
     }
 
@@ -464,6 +478,7 @@ impl ReqwestLlmBackend {
         if target.provider == ProviderKind::NousPortal
             && target.auth_mode == ProviderAuthMode::NousPortalOAuth
             && self.scoped_bearer.is_none()
+            && self.workspace_secret.is_none()
             && let Some(reference) = &target.credential_ref
             && let Some(base) = load_oauth_bundle(&self.secrets, reference)?.inference_base_url
         {
@@ -509,6 +524,28 @@ impl ReqwestLlmBackend {
                 ));
             }
             return Ok(bearer.clone());
+        }
+
+        if let Some(lookup) = &self.workspace_secret {
+            return match target.auth_mode {
+                ProviderAuthMode::None => Ok(None),
+                ProviderAuthMode::ApiKey => {
+                    let account = target
+                        .credential_ref
+                        .as_deref()
+                        .and_then(|reference| reference.strip_prefix("secret://keychain/"))
+                        .ok_or_else(|| {
+                            GmError::Config(
+                                "Connect an API key in this workspace before sending a message"
+                                    .into(),
+                            )
+                        })?;
+                    lookup(account).map(Some)
+                }
+                _ => Err(GmError::Config(
+                    "This hosted workspace requires an API-key provider".into(),
+                )),
+            };
         }
 
         match target.auth_mode {

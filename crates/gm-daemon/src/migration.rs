@@ -173,10 +173,10 @@ impl StorageLease {
 }
 
 fn sha256_file(path: &Path) -> Result<(String, u64)> {
-    let bytes = fs::read(path)?;
+    let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok((hex::encode(hasher.finalize()), bytes.len() as u64))
+    let size = std::io::copy(&mut file, &mut hasher)?;
+    Ok((hex::encode(hasher.finalize()), size))
 }
 
 fn current_executable_digest() -> Option<String> {
@@ -185,7 +185,7 @@ fn current_executable_digest() -> Option<String> {
     Some(digest)
 }
 
-fn validate_safe_relative_path(rel: &str) -> Result<PathBuf> {
+pub(crate) fn validate_safe_relative_path(rel: &str) -> Result<PathBuf> {
     if rel.is_empty() || rel.contains('\\') {
         return Err(GmError::SafetyViolation(format!(
             "Unsafe snapshot relative path '{rel}'"
@@ -211,26 +211,22 @@ fn validate_safe_relative_path(rel: &str) -> Result<PathBuf> {
     Ok(clean)
 }
 
-fn is_sqlite_name(rel: &str) -> bool {
-    rel.ends_with(".sqlite") || rel.ends_with(".sqlite3")
+fn is_sqlite_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("sqlite" | "sqlite3")
+    ) || path.ends_with("memory.sqlite/memory.db")
 }
 
-fn check_sqlite_quick(path: &Path) -> Result<()> {
-    let conn = Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| GmError::Platform(format!("Cannot reopen SQLite {}: {e}", path.display())))?;
-    let status: String = conn
-        .query_row("PRAGMA quick_check(1)", [], |row| row.get(0))
-        .map_err(|e| GmError::Platform(format!("SQLite quick_check failed: {e}")))?;
-    if !status.eq_ignore_ascii_case("ok") {
-        return Err(GmError::Platform(format!(
-            "SQLite integrity check failed for {}: {status}",
-            path.display()
-        )));
-    }
-    Ok(())
+fn is_sqlite_sidecar(path: &Path) -> bool {
+    let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    ["-wal", "-shm", "-journal"].iter().any(|suffix| {
+        filename
+            .strip_suffix(suffix)
+            .is_some_and(|base| is_sqlite_path(&path.with_file_name(base)))
+    })
 }
 
 pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
@@ -326,26 +322,27 @@ fn write_schema_marker(storage_dir: &Path, version: u32, package_version: &str) 
     Ok(())
 }
 
-/// Snapshot a SQLite database consistently using SQLite `VACUUM INTO` and verify the copy.
+/// Verify a consistent SQLite snapshot before publishing it to disk.
 pub fn backup_sqlite_consistent(src: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
         gm_core::storage::ensure_private_dir(parent)?;
     }
-    if dst.exists() {
-        fs::remove_file(dst)?;
-    }
+    let parent = dst.parent().unwrap_or(Path::new("."));
+    let snapshot = tempfile::NamedTempFile::new_in(parent)?;
     let src_conn = Connection::open_with_flags(
         src,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| GmError::Platform(format!("Cannot open {} for backup: {e}", src.display())))?;
-    let dst_str = dst
-        .to_str()
-        .ok_or_else(|| GmError::Platform("Non-UTF8 snapshot path".into()))?;
     src_conn
-        .execute("VACUUM INTO ?1", [dst_str])
-        .map_err(|e| GmError::Platform(format!("SQLite snapshot VACUUM INTO failed: {e}")))?;
-    check_sqlite_quick(dst)?;
+        .backup(rusqlite::DatabaseName::Main, snapshot.path(), None)
+        .map_err(|e| {
+            GmError::Platform(format!("SQLite snapshot failed for {}: {e}", src.display()))
+        })?;
+    gm_openbot::check_sqlite_integrity(snapshot.path())?;
+    snapshot.as_file().sync_all()?;
+    snapshot.persist(dst).map_err(|e| e.error)?;
+
     Ok(())
 }
 
@@ -353,8 +350,6 @@ fn should_skip_storage_entry(name: &str) -> bool {
     name.starts_with('.')
         || name.ends_with(".sock")
         || name.ends_with(".lock")
-        || name.ends_with("-wal")
-        || name.ends_with("-shm")
         || matches!(
             name,
             "dt-schema-version.json"
@@ -389,7 +384,16 @@ fn collect_snapshot_files_recursive(
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if current == base && should_skip_storage_entry(name) {
+        if name.ends_with(".recovering") {
+            return Err(GmError::Platform(format!(
+                "Finish interrupted database recovery before snapshotting {}",
+                path.display()
+            )));
+        }
+        if name.ends_with(".lease")
+            || (meta.is_dir() && name.ends_with(".bak") && name.contains(".corrupt-"))
+            || (current == base && should_skip_storage_entry(name))
+        {
             continue;
         }
         if meta.is_dir() {
@@ -460,6 +464,9 @@ fn create_rollback_snapshot_unlocked(
 
     let mut files = Vec::new();
     for rel in rel_paths {
+        if is_sqlite_sidecar(&rel) {
+            continue;
+        }
         let rel_str = rel
             .to_str()
             .ok_or_else(|| GmError::Platform("Non-UTF8 relative path in storage".into()))?
@@ -470,7 +477,7 @@ fn create_rollback_snapshot_unlocked(
         if let Some(parent) = dst.parent() {
             gm_core::storage::ensure_private_dir(parent)?;
         }
-        if is_sqlite_name(&rel_str) {
+        if is_sqlite_path(&rel) {
             backup_sqlite_consistent(&src, &dst)?;
         } else {
             fs::copy(&src, &dst)?;
@@ -900,16 +907,15 @@ pub fn execute_journaled_rollback(
 
         gm_core::storage::ensure_private_dir(&journal.preserved_newer_dir)?;
         for rel in &current_files {
+            if is_sqlite_sidecar(rel) {
+                continue;
+            }
             let src = target_storage_dir.join(rel);
             let dst = journal.preserved_newer_dir.join(rel);
             if let Some(parent) = dst.parent() {
                 gm_core::storage::ensure_private_dir(parent)?;
             }
-            if src
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(is_sqlite_name)
-            {
+            if is_sqlite_path(rel) {
                 backup_sqlite_consistent(&src, &dst)?;
             } else {
                 fs::copy(&src, &dst)?;
@@ -954,7 +960,7 @@ pub fn execute_journaled_rollback(
         for rel in live_files {
             let p = target_storage_dir.join(&rel);
             if p.is_file() {
-                let _ = fs::remove_file(&p);
+                fs::remove_file(&p)?;
             }
         }
         for file in &snapshot.files {
@@ -989,8 +995,8 @@ pub fn execute_journaled_rollback(
                     file.relative_path
                 )));
             }
-            if is_sqlite_name(&file.relative_path) {
-                check_sqlite_quick(&dst)?;
+            if is_sqlite_path(&rel) {
+                gm_openbot::check_sqlite_integrity(&dst)?;
             }
         }
         invalidate_restored_runtime_state(target_storage_dir, &mut monotonic)?;
@@ -1028,6 +1034,38 @@ pub fn restore_rollback_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_reads_fts_rows_from_active_memory_wal() {
+        let root = tempfile::tempdir().unwrap();
+        let storage = root.path().join("store");
+        let folder = storage.join("memory.sqlite");
+        fs::create_dir_all(&folder).unwrap();
+        let db_path = folder.join("memory.db");
+        let db = Connection::open(&db_path).unwrap();
+        db.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+            CREATE VIRTUAL TABLE facts USING fts5(body);
+            INSERT INTO facts VALUES ('release test');",
+        )
+        .unwrap();
+
+        let snapshot =
+            create_rollback_snapshot(&storage, "1.0.6", &root.path().join("snapshots")).unwrap();
+        assert_eq!(snapshot.files.len(), 1);
+        let file = snapshot.snapshot_dir.join("memory.sqlite/memory.db");
+        let backup = Connection::open(&file).unwrap();
+        let text: String = backup
+            .query_row(
+                "SELECT body FROM facts WHERE facts MATCH 'release'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "release test");
+        drop(backup);
+        assert!(inspect_rollback_snapshot(&snapshot.snapshot_dir).is_ok());
+    }
 
     #[test]
     fn in_place_migration_is_pending_then_current_and_refuses_downgrades() {

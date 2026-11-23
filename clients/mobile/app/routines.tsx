@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Button, Pressable, ScrollView, Text, useColorScheme, View } from "react-native";
 import { useFocusEffect } from "expo-router";
 import {
@@ -20,6 +20,8 @@ export default function RoutinesScreen() {
   const [outcomes, setOutcomes] = useState<Record<string, string>>({});
   const [status, setStatus] = useState("Loading routines…");
 
+  const historyRequest = useRef<AbortController | null>(null);
+  const focus = useRef<AbortSignal | null>(null);
   const reload = useCallback((signal?: AbortSignal) => {
     setStatus("Loading routines…");
     void listRoutines(signal)
@@ -40,46 +42,63 @@ export default function RoutinesScreen() {
   useFocusEffect(
     useCallback(() => {
       const controller = new AbortController();
+      focus.current = controller.signal;
+      setSelected(null);
+      setRuns([]);
+      setOutcomes({});
       reload(controller.signal);
-      return () => controller.abort();
+      return () => {
+        controller.abort();
+        historyRequest.current?.abort();
+      };
     }, [reload]),
   );
 
   async function showRuns(routine: Routine) {
+    historyRequest.current?.abort();
+    const controller = new AbortController();
+    historyRequest.current = controller;
     setStatus("Loading run history…");
     setSelected(routine);
     setRuns([]);
     try {
-      const history = await listRoutineRuns(routine.id);
-      setRuns(Array.isArray(history) ? history : []);
+      const history = await listRoutineRuns(routine.id, controller.signal);
+      if (controller.signal.aborted) return;
+      setRuns(history);
       setStatus(history.length ? "" : "No recorded runs yet.");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not load runs.");
+      if (!controller.signal.aborted) {
+        setStatus(error instanceof Error ? error.message : "Could not load runs.");
+      }
     }
   }
 
   async function triggerTest(routine: Routine) {
+    const signal = focus.current ?? undefined;
     setStatus("Starting test run…");
     try {
       await connectedRequest(`/routines/${encodeURIComponent(routine.id)}/test`, {
         method: "POST",
         body: "{}",
+        signal,
       });
-      await showRuns(routine);
+      if (!signal?.aborted) await showRuns(routine);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not start test run.");
+      if (!signal?.aborted) setStatus(error instanceof Error ? error.message : "Could not start test run.");
     }
   }
 
   async function handleTriggerNow(routine: Routine) {
+    const signal = focus.current ?? undefined;
     setStatus("Triggering routine…");
     try {
       const deliveryId = `mobile-${routine.id}-${Date.now()}`;
-      const res = await triggerRoutine(routine.id, deliveryId);
+      const res = await triggerRoutine(routine.id, deliveryId, signal);
+      if (signal?.aborted) return;
       setOutcomes((prev) => ({ ...prev, [routine.id]: res.status || "queued" }));
       await showRuns(routine);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "Could not trigger routine.");
+      if (!signal?.aborted) setStatus(error instanceof Error ? error.message : "Could not trigger routine.");
     }
   }
 

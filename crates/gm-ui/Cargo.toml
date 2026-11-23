@@ -13,6 +13,8 @@ default = []
 hardware-wgpu = ["eframe/wgpu", "dep:wgpu"]
 
 [dependencies]
+cpal = "0.16"
+hound = "3.5"
 base64 = "0.22"
 chrono = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

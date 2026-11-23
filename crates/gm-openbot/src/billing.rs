@@ -4,9 +4,10 @@
 use crate::bridges::{compute_hmac_sha256_hex, constant_time_eq};
 use chrono::Utc;
 use gm_core::config::extract_provider_origin;
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
@@ -82,19 +83,19 @@ pub fn verify_stripe_signature(
 
 #[derive(Clone)]
 pub struct BillingStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Database>>,
     self_hosted: bool,
     stripe_api_base: String,
 }
 
 impl BillingStore {
     pub fn open(db_path: impl AsRef<Path>, self_hosted: bool) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init(conn, self_hosted, "https://api.stripe.com")
     }
 
     pub fn in_memory(self_hosted: bool) -> Result<Self> {
-        let conn = Connection::open_in_memory()
+        let conn = Database::in_memory()
             .map_err(|e| GmError::Platform(format!("Billing DB error: {e}")))?;
         Self::init(conn, self_hosted, "https://api.stripe.com")
     }
@@ -105,7 +106,7 @@ impl BillingStore {
         Ok(self)
     }
 
-    fn init(conn: Connection, self_hosted: bool, stripe_api_base: &str) -> Result<Self> {
+    fn init(conn: Database, self_hosted: bool, stripe_api_base: &str) -> Result<Self> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS workspace_entitlements_v1 (
                 ws_id TEXT PRIMARY KEY,

@@ -5,10 +5,11 @@
 //! `RULE-SECRET-001`: Plaintext passwords, CVVs, API keys, and tokens NEVER enter SQLite or logs.
 
 use chrono::Utc;
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use gm_llm::KeychainSecrets;
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -168,13 +169,13 @@ pub struct VaultCsvImportReport {
 
 #[derive(Clone)]
 pub struct VaultStore {
-    conn: Arc<Mutex<Connection>>,
+    conn: Arc<Mutex<Database>>,
     secrets: Arc<dyn SecretBackend>,
 }
 
 impl VaultStore {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init_conn(conn, Arc::new(KeychainSecretBackend::default()))
     }
 
@@ -182,17 +183,17 @@ impl VaultStore {
         db_path: impl AsRef<Path>,
         secrets: Arc<dyn SecretBackend>,
     ) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init_conn(conn, secrets)
     }
 
     pub fn in_memory_with_backend(secrets: Arc<dyn SecretBackend>) -> Result<Self> {
-        let conn = Connection::open_in_memory()
+        let conn = Database::in_memory()
             .map_err(|e| GmError::Platform(format!("Failed to open in-memory vault DB: {e}")))?;
         Self::init_conn(conn, secrets)
     }
 
-    fn init_conn(conn: Connection, secrets: Arc<dyn SecretBackend>) -> Result<Self> {
+    fn init_conn(conn: Database, secrets: Arc<dyn SecretBackend>) -> Result<Self> {
         conn.execute_batch(
             r#"
             PRAGMA journal_mode = WAL;

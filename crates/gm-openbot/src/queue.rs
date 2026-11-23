@@ -1,7 +1,8 @@
 use chrono::Utc;
+use gm_core::database::Database;
 use gm_core::error::{GmError, Result};
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -80,23 +81,23 @@ pub struct QueuedTask {
 /// "Take the Wheel" human handoff states, reboot recovery, and JSONL backup/restore.
 #[derive(Clone)]
 pub struct DurableTaskQueue {
-    pub(crate) conn: Arc<Mutex<Connection>>,
+    pub(crate) conn: Arc<Mutex<Database>>,
     max_recoveries: u32,
 }
 
 impl DurableTaskQueue {
     pub fn open(db_path: impl AsRef<Path>) -> Result<Self> {
-        let conn = crate::db_recovery::open_sqlite_with_recovery(db_path.as_ref())?;
+        let conn = gm_core::database::Database::open(db_path.as_ref())?;
         Self::init_conn(conn)
     }
 
     pub fn in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
+        let conn = Database::in_memory()
             .map_err(|e| GmError::Platform(format!("Failed to open in-memory queue DB: {e}")))?;
         Self::init_conn(conn)
     }
 
-    fn init_conn(mut conn: Connection) -> Result<Self> {
+    fn init_conn(mut conn: Database) -> Result<Self> {
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| GmError::Platform(e.to_string()))?;
         conn.execute_batch(
