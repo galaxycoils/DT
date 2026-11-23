@@ -6,3 +6,4 @@ target
 **/.env
 **/.env.*
 deploy/docker/postgres-password
+deploy/docker/hosted-master-key

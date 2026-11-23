@@ -49,7 +49,7 @@ Run `dt models install smolvlm` to download the pinned model, projector, and wor
 
 ## Self-host with PostgreSQL
 
-Set `DT_DOMAIN` for Caddy and `DT_DATABASE_URL` for the PostgreSQL 16 service, using the Compose hostname `postgres` and database `dt_hosted`. Provide the Compose password and hosted master-key files using `DT_POSTGRES_PASSWORD_FILE` and `DT_HOSTED_MASTER_KEY_FILE`. Set `DT_COMPANION_TOKEN` for operator access.
+Set `DT_DOMAIN` for Caddy and `DT_DATABASE_URL` for the PostgreSQL 16 service, using the Compose hostname `postgres` and database `dt_hosted`. Store the Compose password and hosted master-key files outside the source checkout and pass their absolute paths using `DT_POSTGRES_PASSWORD_FILE` and `DT_HOSTED_MASTER_KEY_FILE`. Set `DT_COMPANION_TOKEN` for operator access.
 
 ```sh
 cd deploy/docker
