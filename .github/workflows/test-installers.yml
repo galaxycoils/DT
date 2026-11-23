@@ -1,0 +1,59 @@
+name: Test published installer upgrades
+on:
+  workflow_dispatch:
+    inputs:
+      from_tag:
+        description: Installed release tag
+        required: true
+        type: string
+      to_tag:
+        description: Upgrade release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            suffix: macos-aarch64.dmg
+          - runner: macos-15-intel
+            suffix: macos-x86_64.dmg
+          - runner: windows-2025
+            suffix: windows-x86_64-setup.exe
+          - runner: windows-11-arm
+            suffix: windows-aarch64-setup.exe
+          - runner: ubuntu-24.04
+            suffix: amd64.deb
+          - runner: ubuntu-24.04-arm
+            suffix: arm64.deb
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    env:
+      FROM_TAG: ${{ inputs.from_tag }}
+      TO_TAG: ${{ inputs.to_tag }}
+      SUFFIX: ${{ matrix.suffix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Download both published installers and checksum files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for tag in "$FROM_TAG" "$TO_TAG"; do
+            [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            gh release download "$tag" --dir "downloads/$tag" --pattern "*$SUFFIX" --pattern "*$SUFFIX.sha256"
+          done
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install, upgrade and restore a saved profile
+        env:
+          DT_INSTALLER_RUNNER: ${{ runner.environment }}
+        run: python tools/test-installer-upgrade.py
