@@ -1,0 +1,50 @@
+name: Test hosted Compose deployment
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: DT commit or tag to deploy on the disposable runner
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  hosted:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Start PostgreSQL, DT and Caddy and enroll a workspace over TLS
+        working-directory: deploy/docker
+        run: |
+          set -euo pipefail
+          secrets_dir=$(mktemp -d)
+          export DT_POSTGRES_PASSWORD_FILE="$secrets_dir/password"
+          export DT_HOSTED_MASTER_KEY_FILE="$secrets_dir/master-key"
+          openssl rand -hex 32 > "$DT_POSTGRES_PASSWORD_FILE"
+          openssl rand -hex 32 > "$DT_HOSTED_MASTER_KEY_FILE"
+          export DT_DATABASE_URL="postgres://dt:$(cat "$DT_POSTGRES_PASSWORD_FILE")@postgres:5432/dt_hosted"
+          export DT_COMPANION_TOKEN=$(openssl rand -hex 32)
+          export DT_DOMAIN=localhost
+          trap 'docker compose down --volumes; rm -rf "$secrets_dir"' EXIT
+          docker compose up --build -d
+          docker compose cp tls-proxy:/data/caddy/pki/authorities/local/root.crt "$secrets_dir/ca.crt" || {
+            sleep 5
+            docker compose cp tls-proxy:/data/caddy/pki/authorities/local/root.crt "$secrets_dir/ca.crt"
+          }
+          export CURL_CA_BUNDLE="$secrets_dir/ca.crt"
+          curl -fsS --retry 25 --retry-all-errors --retry-delay 2 https://localhost/api/v1/health/ready | jq -e '.hosted_backend == "postgres"'
+          curl -fsS https://localhost/app/ | grep -q 'id="root"'
+          api=https://localhost/api/v1
+          auth=(-H "Authorization: Bearer $DT_COMPANION_TOKEN")
+          curl -fsS "${auth[@]}" --json '{"ws_id":"qa","name":"QA","owner_user_id":"tester"}' "$api/workspaces" >/dev/null
+          token=$(curl -fsS "${auth[@]}" --json '{"ws_id":"qa","user_id":"tester","role":"owner"}' "$api/auth/enroll" | jq -er '.enrollment_token')
+          jq -n --arg token "$token" '{enrollment_token:$token}' | curl -fsS --json @- -c "$secrets_dir/session" "$api/auth/session" >/dev/null
+          curl -fsS -b "$secrets_dir/session" "$api/dm/muse/messages" >/dev/null
+          curl -fsS "${auth[@]}" --json '{"ws_id":"qa","user_id":"tester"}' "$api/auth/revoke" >/dev/null
+          [[ "$(curl -sS -o /dev/null -w '%{http_code}' -b "$secrets_dir/session" "$api/dm/muse/messages")" == 401 ]]
