@@ -2,7 +2,7 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
-## [v1.0.7] — Reliability and recovery preview (2026-11-23)
+## [v1.0.8] — Reliability and recovery preview (2026-11-23)
 
 - Preserve SQLite data on failed ordinary opens. Verify consistent nested memory snapshots and stream file checksums during recovery.
 - Stop hosted requests on workspace initialization errors, scope provider settings and usage, and add revocable mobile device enrollment.

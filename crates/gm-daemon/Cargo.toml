@@ -57,10 +57,10 @@ async-trait = { workspace = true }
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 
+tempfile = { workspace = true }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 gm-vlm-candle = { workspace = true, features = ["metal"] }
-
-tempfile = { workspace = true }
 
 [dev-dependencies]
 gm-cu-helper = { workspace = true }

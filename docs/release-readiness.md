@@ -1,10 +1,12 @@
 # DT release readiness
 
-## v1.0.7 reliability prerelease
+## v1.0.8 reliability prerelease
 
-The GitHub prerelease provides six CI-built installers, a standalone Linux archive, and the React web bundle. Its files carry SHA-256 checksums. macOS uses ad hoc signatures and Windows installers are unsigned. Use the manual upgrade procedure. [Release notes](releases/v1.0.7.md) · [Installation and checksums](../README.md#downloads)
+The GitHub prerelease provides six CI-built installers, a standalone Linux archive, and the React web bundle. Its files carry SHA-256 checksums. macOS uses ad hoc signatures and Windows installers are unsigned. Use the manual upgrade procedure. [Release notes](releases/v1.0.8.md) · [Installation and checksums](../README.md#downloads)
 
 Native installer lifecycle across the target matrix, iOS/Android device flows, external provider and connector accounts, guest boot, and the seven-day soak still require recorded results. The repository lacks a configured publisher signing environment and native certification runners. See the audit and the machine-readable inventory for required evidence. [Audit and acceptance tests](plans/v1.0.6-reliability-audit.md) · [Coverage inventory](release/coverage-inventory.md)
+
+On the Apple Silicon development host, the candidate measured 201.6 MiB with the native UI open across 30 samples. The v1.0.6 package measured 182.6 MiB on the same host. The 120 MiB UI target remains open. Snapshot repair stayed below 24 MiB across the 1 MiB, 64 MiB and 1 GiB attachment fixtures.
 
 ## Historical v1.0.1 notes
 
@@ -44,7 +46,7 @@ Official CLI package inputs are pinned with npm integrity records in `tools/work
 
 - Claude Code: `@anthropic-ai/claude-code@2.1.318`.
 - Codex: `@openai/codex@0.166.0`.
-- Grok Build: `@xai-official/grok@1.0.70`, from [xAI's official distribution](https://github.com/xai-org/grok-build/tree/main/crates/codegen/xai-grok-pager/npm/grok). [Headless documentation](https://docs.x.ai/build/cli/headless-scripting) specifies single-prompt mode and update suppression; [enterprise documentation](https://docs.x.ai/build/enterprise) identifies proxy behavior/hosts. This replaces the previously unspecified `grok` package assumption.
+- Grok Build: `@xai-official/grok@1.0.80`, from [xAI's official distribution](https://github.com/xai-org/grok-build/tree/main/crates/codegen/xai-grok-pager/npm/grok). [Headless documentation](https://docs.x.ai/build/cli/headless-scripting) specifies single-prompt mode and update suppression; [enterprise documentation](https://docs.x.ai/build/enterprise) identifies proxy behavior/hosts. This replaces the previously unspecified `grok` package assumption.
 
 **Still required:** provision/test signed x64 and ARM guest images; implement the separate CLI-agent protocol and provider-only egress broker with isolated credentials and process-tree cancellation; integrate/test all three pinned CLI protocols against real accounts. The offline workspace profile must retain no network adapter and no host mounts. A provider proxy or network option must not be enabled merely because a CLI binary is present.
 

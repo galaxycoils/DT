@@ -2944,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "gm-agent"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2971,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "gm-core"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "chrono",
  "libc",
@@ -2985,7 +2985,7 @@ dependencies = [
 
 [[package]]
 name = "gm-cu-helper"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "clap",
  "gm-core",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "gm-daemon"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "gm-eval"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "chrono",
  "darius-tools",
@@ -3063,7 +3063,7 @@ dependencies = [
 
 [[package]]
 name = "gm-goals"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3090,7 +3090,7 @@ dependencies = [
 
 [[package]]
 name = "gm-llm"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "axum",
@@ -3116,7 +3116,7 @@ dependencies = [
 
 [[package]]
 name = "gm-memory"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "chrono",
  "darius-memory",
@@ -3138,7 +3138,7 @@ dependencies = [
 
 [[package]]
 name = "gm-muse"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -3161,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "gm-openbot"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3203,7 +3203,7 @@ dependencies = [
 
 [[package]]
 name = "gm-platform"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "ashpd",
  "async-trait",
@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "gm-safety"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "chrono",
  "darius-safety",
@@ -3242,7 +3242,7 @@ dependencies = [
 
 [[package]]
 name = "gm-ui"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "base64 0.22.1",
  "cc",
@@ -3270,7 +3270,7 @@ dependencies = [
 
 [[package]]
 name = "gm-vlm-candle"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "async-trait",
  "candle-core",
@@ -8569,7 +8569,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "1.0.7"
+version = "1.0.8"
 dependencies = [
  "chrono",
  "clap",
