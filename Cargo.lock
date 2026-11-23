@@ -301,15 +301,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -899,7 +890,7 @@ dependencies = [
  "tokenizers",
  "yoke",
  "zerocopy",
- "zip 9.3.0",
+ "zip",
 ]
 
 [[package]]
@@ -1566,6 +1557,7 @@ checksum = "5614204febbc33cc07a2806aa6440b904ac012b68eecc37f4493ea4a76455a3d"
 [[package]]
 name = "darius-cognitive"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1583,6 +1575,7 @@ dependencies = [
 [[package]]
 name = "darius-core"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "libc",
  "parking_lot",
@@ -1597,6 +1590,7 @@ dependencies = [
 [[package]]
 name = "darius-daemon"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1627,6 +1621,7 @@ dependencies = [
 [[package]]
 name = "darius-hashline"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "blake3",
  "darius-core",
@@ -1637,6 +1632,7 @@ dependencies = [
 [[package]]
 name = "darius-lsp"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "darius-core",
  "darius-hashline",
@@ -1650,6 +1646,7 @@ dependencies = [
 [[package]]
 name = "darius-memory"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "chrono",
  "darius-core",
@@ -1663,6 +1660,7 @@ dependencies = [
 [[package]]
 name = "darius-rlm"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "darius-core",
  "serde",
@@ -1677,6 +1675,7 @@ dependencies = [
 [[package]]
 name = "darius-safety"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "darius-core",
  "parking_lot",
@@ -1687,6 +1686,7 @@ dependencies = [
 [[package]]
 name = "darius-skill-parser"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "serde",
  "serde_json",
@@ -1696,6 +1696,7 @@ dependencies = [
 [[package]]
 name = "darius-skills"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "darius-core",
  "darius-skill-parser",
@@ -1707,6 +1708,7 @@ dependencies = [
 [[package]]
 name = "darius-tools"
 version = "1.5.0"
+source = "git+https://github.com/galaxycoils/darius.git?rev=f47a4ce980abecb751c9f5c79e1c424a20100433#f47a4ce980abecb751c9f5c79e1c424a20100433"
 dependencies = [
  "chrono",
  "darius-core",
@@ -1822,17 +1824,6 @@ dependencies = [
  "const-oid 0.10.3",
  "pem-rfc7468",
  "zeroize",
-]
-
-[[package]]
-name = "derive_arbitrary"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b034bd7d5f032402a2479444dcc6f74e36a03f31854d41680fb240ef682a1ac"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.9",
 ]
 
 [[package]]
@@ -2944,7 +2935,7 @@ dependencies = [
 
 [[package]]
 name = "gm-agent"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -2971,7 +2962,7 @@ dependencies = [
 
 [[package]]
 name = "gm-core"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "chrono",
  "libc",
@@ -2985,7 +2976,7 @@ dependencies = [
 
 [[package]]
 name = "gm-cu-helper"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "clap",
  "gm-core",
@@ -3001,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "gm-daemon"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3035,12 +3026,12 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
- "zip 2.6.1",
+ "zip",
 ]
 
 [[package]]
 name = "gm-eval"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "chrono",
  "darius-tools",
@@ -3063,7 +3054,7 @@ dependencies = [
 
 [[package]]
 name = "gm-goals"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3090,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "gm-llm"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "async-trait",
  "axum",
@@ -3116,7 +3107,7 @@ dependencies = [
 
 [[package]]
 name = "gm-memory"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "chrono",
  "darius-memory",
@@ -3138,7 +3129,7 @@ dependencies = [
 
 [[package]]
 name = "gm-muse"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "chrono",
  "chrono-tz",
@@ -3161,7 +3152,7 @@ dependencies = [
 
 [[package]]
 name = "gm-openbot"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3203,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "gm-platform"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "ashpd",
  "async-trait",
@@ -3227,7 +3218,7 @@ dependencies = [
 
 [[package]]
 name = "gm-safety"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "chrono",
  "darius-safety",
@@ -3242,7 +3233,7 @@ dependencies = [
 
 [[package]]
 name = "gm-ui"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "base64 0.22.1",
  "cc",
@@ -3258,6 +3249,7 @@ dependencies = [
  "hound",
  "image",
  "libc",
+ "memmap2",
  "serde",
  "serde_json",
  "tokio",
@@ -3270,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "gm-vlm-candle"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "async-trait",
  "candle-core",
@@ -8569,7 +8561,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "1.0.8"
+version = "1.0.9"
 dependencies = [
  "chrono",
  "clap",
@@ -8870,26 +8862,12 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "2.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1dcb24d0152526ae49b9b96c1dcf71850ca1e0b882e4e28ed898a93c41334744"
-dependencies = [
- "arbitrary",
- "crc32fast",
- "crossbeam-utils",
- "flate2",
- "indexmap",
- "memchr",
- "zopfli",
-]
-
-[[package]]
-name = "zip"
 version = "9.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eaeb7f16d2605b49aef586996ded29e65642fab7259a3077e537351df6d80426"
 dependencies = [
  "crc32fast",
+ "flate2",
  "getrandom 0.4.3",
  "indexmap",
  "libc",
@@ -8897,6 +8875,7 @@ dependencies = [
  "nix 0.31.3",
  "typed-path",
  "windows-sys 0.61.2",
+ "zopfli",
 ]
 
 [[package]]

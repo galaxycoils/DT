@@ -1,5 +1,9 @@
 # DT release readiness
 
+## v1.0.9 desktop and dependency update
+
+The macOS UI maps the existing system fallback font into memory. The Windows model installer shares the patched ZIP reader used by the model runtime. Cargo fetches the reviewed Darius Git commit for local builds, CI, containers, and dependency scanning. The signing, native device, external account and soak requirements below still apply. [Release notes](releases/v1.0.9.md)
+
 ## v1.0.8 reliability prerelease
 
 The GitHub prerelease provides six CI-built installers, a standalone Linux archive, and the React web bundle. Its files carry SHA-256 checksums. macOS uses ad hoc signatures and Windows installers are unsigned. Use the manual upgrade procedure. [Release notes](releases/v1.0.8.md) · [Installation and checksums](../README.md#downloads)

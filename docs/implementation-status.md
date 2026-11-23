@@ -41,7 +41,7 @@ This branch implements the task/runtime foundation, native daily-use features, s
 
 ## Running locally
 
-Run `tools/bootstrap.sh` to verify the pinned sibling Darius checkout and locked workspace dependencies. It preserves an existing checkout at a different revision and explains the mismatch.
+Run `tools/bootstrap.sh` to check the workspace with the locked dependencies, including the pinned Darius Git revision.
 
 Build the binaries with `cargo build --workspace --bins`. Launch `gm-ui` for the shared native interface; `gm-ui --config /absolute/path/config.json native` selects a configuration explicitly.
 

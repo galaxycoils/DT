@@ -22,13 +22,6 @@ jobs:
           ref: ${{ inputs.tag }}
           path: grok-muse
 
-      - name: Checkout Darius
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          repository: galaxycoils/darius
-          ref: f47a4ce980abecb751c9f5c79e1c424a20100433
-          path: Darius
-
       - name: Install Node for React web client tarball
         uses: actions/setup-node@v4
         with:
@@ -51,12 +44,13 @@ jobs:
           mkdir -p downloaded upload-dir
 
           # 1. Prefer completed signed release.yml artifacts for this tag; otherwise use CI tag artifacts
-          REL_RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" -w release.yml --branch "$TAG" --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
+          COMMIT=$(git -C grok-muse rev-parse HEAD)
+          REL_RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" -w release.yml --branch "$TAG" --commit "$COMMIT" --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
           if [[ -n "$REL_RUN_ID" ]]; then
             echo "Downloading artifacts from release.yml run $REL_RUN_ID..."
             gh run download "$REL_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir downloaded
           else
-            CI_RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" -w ci.yml --branch "$TAG" --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
+            CI_RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" -w ci.yml --branch "$TAG" --commit "$COMMIT" --status success --limit 1 --json databaseId --jq '.[0].databaseId // ""')
             if [[ -n "$CI_RUN_ID" ]]; then
               echo "Downloading installer artifacts from ci.yml run $CI_RUN_ID..."
               for art in installer-ubuntu-24.04 installer-ubuntu-24.04-arm installer-windows installer-macos; do
@@ -75,22 +69,8 @@ jobs:
           tar -czf "upload-dir/${WEB_TAR}" -C grok-muse/clients/web dist
           (cd upload-dir && sha256sum "${WEB_TAR}" > "${WEB_TAR}.sha256")
 
-          # 3. Package Linux x86_64 binaries tarball + SHA-256 (from CI-built amd64 .deb, or fallback compile)
+          # 3. Package Linux x86_64 binaries tarball + SHA-256 from the verified CI or signed amd64 .deb
           AMD64_DEB="upload-dir/dt_${VERSION}_amd64.deb"
-          if [[ ! -f "$AMD64_DEB" ]]; then
-            echo "No CI amd64 .deb found; building locally..."
-            sudo DEBIAN_FRONTEND=noninteractive apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-              pkg-config libssl-dev libsqlite3-dev libxkbcommon-dev \
-              libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
-              libasound2-dev libpipewire-0.3-dev libspa-0.2-dev clang
-            rustup toolchain install 1.99.1
-            rustup default 1.99.1
-            cargo build --manifest-path grok-muse/Cargo.toml --release --locked -p gm-daemon -p gm-cu-helper -p gm-ui --bins
-            DT_SKIP_WEB_BUILD=1 bash grok-muse/tools/installers/linux/build-deb.sh "$VERSION" grok-muse/target/release "$AMD64_DEB" amd64
-            (cd upload-dir && sha256sum "$(basename "$AMD64_DEB")" > "$(basename "$AMD64_DEB").sha256")
-          fi
-
           BIN_STAGE="bin-stage/DT-${VERSION}-linux-x86_64"
           mkdir -p "${BIN_STAGE}/bin" "${BIN_STAGE}/share/dt"
           dpkg-deb -x "$AMD64_DEB" deb-extract
@@ -108,10 +88,12 @@ jobs:
             "dt_${VERSION}_amd64.deb" "dt_${VERSION}_arm64.deb"
           )
           for installer in "${installers[@]}"; do
-            if [[ ! -s "upload-dir/$installer" || ! -s "upload-dir/$installer.sha256" ]]; then
-              echo "Missing installer or SHA-256 sidecar for $installer" >&2
+            if [[ ! -s "upload-dir/$installer" || ! -s "upload-dir/$installer.sha256" || ! -s "upload-dir/$installer.build.json" || ! -s "upload-dir/$installer.sbom.json" ]]; then
+              echo "Missing installer or release metadata for $installer" >&2
               exit 1
             fi
+            jq -e --arg sha "$COMMIT" --arg version "$VERSION" --arg digest "$(cut -d ' ' -f 1 "upload-dir/$installer.sha256")" '.commit == $sha and .version == $version and .sha256 == $digest' "upload-dir/$installer.build.json" >/dev/null
+            jq -e --arg sha "$COMMIT" --arg version "$VERSION" --arg name "$installer" '.commit == $sha and .version == $version and .asset == $name and (.packages | length > 0)' "upload-dir/$installer.sbom.json" >/dev/null
           done
 
           # 4. Verify every SHA-256 sidecar before uploading
@@ -122,9 +104,9 @@ jobs:
           if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             NOTES_FILE="grok-muse/docs/releases/${TAG}.md"
             if [[ -f "$NOTES_FILE" ]]; then
-              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "DT ${TAG}" --notes-file "$NOTES_FILE" --latest
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "DT ${TAG}" --notes-file "$NOTES_FILE" --verify-tag --draft --prerelease
             else
-              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "DT ${TAG}" --generate-notes --latest
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "DT ${TAG}" --generate-notes --verify-tag --draft --prerelease
             fi
           fi
           gh release upload "$TAG" upload-dir/* --repo "$GITHUB_REPOSITORY" --clobber

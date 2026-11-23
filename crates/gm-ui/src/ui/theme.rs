@@ -347,6 +347,38 @@ pub const SOURCE_SANS_3_SEMIBOLD: &[u8] =
     include_bytes!("../../assets/fonts/SourceSans3-Semibold.ttf");
 pub const SOURCE_SANS_3_LICENSE: &str = include_str!("../../assets/fonts/LICENSE.md");
 
+#[cfg(target_os = "macos")]
+fn system_fallback_font() -> Option<egui::FontData> {
+    // egui clones owned font bytes when constructing its glyph parser. Map the
+    // system collection once so all contexts and parsers borrow the same pages.
+    static FONT: std::sync::OnceLock<Option<memmap2::Mmap>> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| {
+        [
+            "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+            "/System/Library/Fonts/PingFang.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        ]
+        .iter()
+        .find_map(|path| {
+            let file = std::fs::File::open(path).ok()?;
+            // SAFETY: these fixed paths are on the read-only macOS system
+            // volume. Its font files stay immutable throughout this process.
+            unsafe { memmap2::Mmap::map(&file) }.ok()
+        })
+    })
+    .as_deref()
+    .map(egui::FontData::from_static)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_fallback_font() -> Option<egui::FontData> {
+    #[cfg(windows)]
+    let path = "C:/Windows/Fonts/segoeui.ttf";
+    #[cfg(not(windows))]
+    let path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
+    std::fs::read(path).ok().map(egui::FontData::from_owned)
+}
+
 /// Bundle Source Sans 3 Regular and Semibold while retaining glyph fallbacks and monospace for code.
 pub fn install_system_font(ctx: &egui::Context) {
     let _ = SOURCE_SANS_3_LICENSE;
@@ -367,24 +399,12 @@ pub fn install_system_font(ctx: &egui::Context) {
         .unwrap_or_default();
 
     let mut proportional = vec!["source-sans-3".to_string()];
-    // Retain system CJK/glyph fallback if present on host, plus egui defaults (including emoji/symbols).
-    let sys_fallbacks = [
-        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ];
-    for (idx, path) in sys_fallbacks.iter().enumerate() {
-        if let Ok(bytes) = std::fs::read(path) {
-            let key = format!("sys-fallback-{idx}");
-            fonts.font_data.insert(
-                key.clone(),
-                std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-            );
-            proportional.push(key);
-            break;
-        }
+    if let Some(data) = system_fallback_font() {
+        let key = "sys-fallback".to_string();
+        fonts
+            .font_data
+            .insert(key.clone(), std::sync::Arc::new(data));
+        proportional.push(key);
     }
     for name in &default_prop {
         if !proportional.contains(name) {

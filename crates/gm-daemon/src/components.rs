@@ -1116,6 +1116,24 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    #[cfg(windows)]
+    #[test]
+    fn installs_nested_windows_worker_from_deflated_zip() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("worker.zip");
+        let mut writer = zip::ZipWriter::new(File::create(&archive).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("bin/llama-server.exe", options).unwrap();
+        writer.write_all(b"worker fixture").unwrap();
+        writer.finish().unwrap();
+        let (digest, _) = sha256_file_hex(&archive).unwrap();
+        let server = extract_worker(&archive, &digest).unwrap();
+        assert_eq!(fs::read(&server).unwrap(), b"worker fixture");
+        assert_eq!(extract_worker(&archive, &digest).unwrap(), server);
+    }
+
     #[test]
     fn test_bundled_component_catalog_has_real_pinned_parts_for_all_targets() {
         let catalog = ComponentCatalog::parse_unverified(BUNDLED_COMPONENT_CATALOG_JSON).unwrap();

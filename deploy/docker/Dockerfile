@@ -6,7 +6,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src/DT
-COPY --from=darius / /src/Darius
 COPY . .
 RUN cargo build --release --locked -p gm-daemon --bin dt --bin gm --bin gm-daemon --bin dt-doctor
 

@@ -4,9 +4,8 @@ set -euo pipefail
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$project_root"
 
-# Ensure non-interactive bash sessions source ~/.bashrc exports.
+# Keep user shell startup logic intact when adding toolchain paths.
 touch "$HOME/.bashrc"
-sed -i '/case \$- in/,/esac/d' "$HOME/.bashrc" 2>/dev/null || true
 
 append_bashrc() {
   local line="$1"
@@ -77,23 +76,7 @@ if [[ "$(uname -s)" == "Linux" && "$(uname -m)" == "x86_64" ]]; then
   fi
 fi
 
-# 4. Clone/verify pinned sibling Darius checkout (matching tools/bootstrap.sh).
-darius_path="$(dirname "$project_root")/Darius"
-darius_revision="$(sed -n 's/^darius_revision=//p' tools/bootstrap.sh | head -n 1)"
-if [[ -n "$darius_revision" ]]; then
-  if [[ ! -d "$darius_path/.git" ]]; then
-    git clone --no-checkout https://github.com/galaxycoils/darius.git "$darius_path"
-    git -C "$darius_path" checkout --detach "$darius_revision"
-  else
-    actual_revision="$(git -C "$darius_path" rev-parse HEAD)"
-    if [[ "$actual_revision" != "$darius_revision" ]]; then
-      git -C "$darius_path" fetch origin "$darius_revision"
-      git -C "$darius_path" checkout --detach "$darius_revision"
-    fi
-  fi
-fi
-
-# 5. Install Node dependencies for companion, web, and mobile clients.
+# 4. Install Node dependencies for companion, web, and mobile clients.
 if command -v npm >/dev/null 2>&1; then
   npm ci --prefer-offline --no-audit --no-fund --prefix tools/companion
   npm ci --prefer-offline --no-audit --no-fund --prefix clients/web

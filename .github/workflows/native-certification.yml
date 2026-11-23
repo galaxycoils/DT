@@ -12,11 +12,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: grok-muse
-      - uses: actions/checkout@v4
-        with:
-          repository: galaxycoils/darius
-          ref: f47a4ce980abecb751c9f5c79e1c424a20100433
-          path: Darius
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.99.1

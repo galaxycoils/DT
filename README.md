@@ -1,32 +1,31 @@
-# DT v1.0.8
+# DT v1.0.9
 
 DT is a native desktop agent with web and mobile clients. It combines computer use, a persistent coworker workspace, and configurable model routing. Run it on your own machine or host workspaces behind HTTPS with PostgreSQL.
 
-[Downloads](https://github.com/galaxycoils/DT/releases/tag/v1.0.8) · [Release notes](docs/releases/v1.0.8.md) · [Interactive demo](https://galaxycoils.github.io/DT/) · [Operations guide](docs/OPERATIONS.md)
+[Downloads](https://github.com/galaxycoils/DT/releases/tag/v1.0.9) · [Release notes](docs/releases/v1.0.9.md) · [Interactive demo](https://galaxycoils.github.io/DT/) · [Operations guide](docs/OPERATIONS.md)
 
 ## What's new
 
-- Doctor snapshots nested memory databases consistently and verifies full-text indexes during migration and restore. Explicit database recovery preserves the database and its journal files before a fresh store can open.
-- Hosted requests stop when their workspace store is unavailable. Mobile uses a one-time enrollment token to obtain a revocable device session. Routine history follows the selected routine when requests finish out of order.
-- Local model installation checks the download of the model, projector, and worker. Desktop dictation sends a bounded microphone recording to a local speech runtime. Local HTTP speech responses are passed to the platform audio player.
-- Snapshot hashing streams from disk to bound memory use on large profiles.
+- The macOS desktop shares a read-only mapping of its fallback font, preserving multilingual text while using less memory.
+- Windows model worker installation uses the updated ZIP library. Cargo now fetches Darius at the pinned commit, so source builds work from a single checkout.
+- For the previous storage recovery, enrollment, local model and voice fixes, see the [v1.0.8 notes](docs/releases/v1.0.8.md).
 
 ## Downloads
 
 | Platform | Asset |
 | --- | --- |
-| Ubuntu 24.04 x86-64 | [`dt_1.0.8_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/dt_1.0.8_amd64.deb) |
-| Ubuntu 24.04 ARM64 | [`dt_1.0.8_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/dt_1.0.8_arm64.deb) |
-| Linux x86-64 standalone | [`DT-1.0.8-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/DT-1.0.8-linux-x86_64-binaries.tar.gz) |
-| macOS Apple Silicon | [`DT-1.0.8-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/DT-1.0.8-macos-aarch64.dmg) |
-| macOS Intel | [`DT-1.0.8-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/DT-1.0.8-macos-x86_64.dmg) |
-| Windows 11 x64 | [`DT-1.0.8-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/DT-1.0.8-windows-x86_64-setup.exe) |
-| Windows 11 ARM64 | [`DT-1.0.8-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/DT-1.0.8-windows-aarch64-setup.exe) |
-| React web client | [`DT-1.0.8-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.8/DT-1.0.8-web-client.tar.gz) |
+| Ubuntu 24.04 x86-64 | [`dt_1.0.9_amd64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/dt_1.0.9_amd64.deb) |
+| Ubuntu 24.04 ARM64 | [`dt_1.0.9_arm64.deb`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/dt_1.0.9_arm64.deb) |
+| Linux x86-64 standalone | [`DT-1.0.9-linux-x86_64-binaries.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/DT-1.0.9-linux-x86_64-binaries.tar.gz) |
+| macOS Apple Silicon | [`DT-1.0.9-macos-aarch64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/DT-1.0.9-macos-aarch64.dmg) |
+| macOS Intel | [`DT-1.0.9-macos-x86_64.dmg`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/DT-1.0.9-macos-x86_64.dmg) |
+| Windows 11 x64 | [`DT-1.0.9-windows-x86_64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/DT-1.0.9-windows-x86_64-setup.exe) |
+| Windows 11 ARM64 | [`DT-1.0.9-windows-aarch64-setup.exe`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/DT-1.0.9-windows-aarch64-setup.exe) |
+| React web client | [`DT-1.0.9-web-client.tar.gz`](https://github.com/galaxycoils/DT/releases/download/v1.0.9/DT-1.0.9-web-client.tar.gz) |
 
 Download the package and its matching `.sha256` file into the same directory. Run `sha256sum -c <asset>.sha256` on Linux or `shasum -a 256 -c <asset>.sha256` on macOS. On Windows, compare `Get-FileHash -Algorithm SHA256 <asset>` with the sidecar. The installers also have build metadata and SBOMs.
 
-v1.0.8 is a CI-built prerelease. The macOS apps use ad hoc signatures, Windows installers ship without Authenticode, and updates use a manual download. Current certification requirements and verification coverage are in the [release readiness guide](docs/release-readiness.md).
+v1.0.9 is a CI-built prerelease. The macOS apps use ad hoc signatures, Windows installers ship without Authenticode, and updates use a manual download. Current certification requirements and verification coverage are in the [release readiness guide](docs/release-readiness.md).
 
 ## Run DT locally
 
@@ -42,7 +41,7 @@ Open the React app at [http://127.0.0.1:7433/app/](http://127.0.0.1:7433/app/) a
 
 The Ubuntu packages, standalone Linux archive, and Docker image include the React build. For macOS and Windows, verify and extract the matching web client archive. Copy the contents of `dist` into the `web` subdirectory of your DT storage directory, then restart the background daemon. For foreground use, set `DT_WEB_DIST` to the extracted `dist` directory before starting `dt serve`.
 
-Use the v1.0.8 daemon and web bundle together. The React client resumes its live stream after transient disconnects. For split-view Pages, open the canonical `127.0.0.1` app URL on the machine running DT.
+Use the v1.0.9 daemon and web bundle together. The React client resumes its live stream after transient disconnects. For split-view Pages, open the canonical `127.0.0.1` app URL on the machine running DT.
 
 ### Verify a local model
 
@@ -61,12 +60,10 @@ Create a workspace with your operator token, then issue a one-time enrollment to
 
 ## Build from source
 
-Use the Rust toolchain pinned in `rust-toolchain.toml` and Node.js 22. Ubuntu builds of the desktop client require `libasound2-dev`. DT's Rust workspace uses the sibling Darius checkout at the pinned commit below.
+Use the Rust toolchain pinned in `rust-toolchain.toml`, Node.js 22, and Python 3.11 or newer. Ubuntu builds of the desktop client require `libasound2-dev`. Cargo fetches the pinned Darius revision from GitHub on the first build.
 
 ```sh
-git clone https://github.com/galaxycoils/darius.git Darius
-git -C Darius checkout f47a4ce980abecb751c9f5c79e1c424a20100433
-git clone --branch v1.0.8 https://github.com/galaxycoils/DT.git DT
+git clone --branch v1.0.9 https://github.com/galaxycoils/DT.git DT
 cd DT
 ./tools/bootstrap.sh
 cargo build --release --locked --workspace --bins

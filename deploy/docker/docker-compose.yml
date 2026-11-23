@@ -1,8 +1,6 @@
 x-dt-build: &dt-build
   context: ../..
   dockerfile: deploy/docker/Dockerfile
-  additional_contexts:
-    darius: https://github.com/galaxycoils/darius.git#f47a4ce980abecb751c9f5c79e1c424a20100433
 
 services:
   postgres:

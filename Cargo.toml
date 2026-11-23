@@ -20,7 +20,7 @@ members = [
 exclude = ["target"]
 
 [workspace.package]
-version = "1.0.8"
+version = "1.0.9"
 edition = "2024"
 license = "MIT"
 authors = ["DT Contributors"]
@@ -41,12 +41,12 @@ gm-openbot = { path = "crates/gm-openbot" }
 gm-daemon = { path = "crates/gm-daemon" }
 gm-cu-helper = { path = "crates/gm-cu-helper" }
 
-# Darius path dependencies
-darius-core = { path = "../Darius/crates/darius-core" }
-darius-safety = { path = "../Darius/crates/darius-safety" }
-darius-memory = { path = "../Darius/crates/darius-memory" }
-darius-daemon = { path = "../Darius/crates/darius-daemon" }
-darius-tools = { path = "../Darius/crates/darius-tools" }
+# Darius crates share one reviewed upstream revision.
+darius-core = { git = "https://github.com/galaxycoils/darius.git", rev = "f47a4ce980abecb751c9f5c79e1c424a20100433" }
+darius-safety = { git = "https://github.com/galaxycoils/darius.git", rev = "f47a4ce980abecb751c9f5c79e1c424a20100433" }
+darius-memory = { git = "https://github.com/galaxycoils/darius.git", rev = "f47a4ce980abecb751c9f5c79e1c424a20100433" }
+darius-daemon = { git = "https://github.com/galaxycoils/darius.git", rev = "f47a4ce980abecb751c9f5c79e1c424a20100433" }
+darius-tools = { git = "https://github.com/galaxycoils/darius.git", rev = "f47a4ce980abecb751c9f5c79e1c424a20100433" }
 
 # Shared external dependencies
 tokio = { version = "1", features = ["full"] }

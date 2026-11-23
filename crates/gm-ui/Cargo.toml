@@ -36,6 +36,9 @@ gm-daemon = { workspace = true }
 gm-muse = { workspace = true }
 libc = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+memmap2 = "0.9"
+
 [build-dependencies]
 cc = "1.2"
 

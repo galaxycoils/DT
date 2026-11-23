@@ -2,6 +2,12 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
+## [v1.0.9] — Desktop memory and component updates (2026-11-23)
+
+- Share the macOS fallback font across text renderers and load its pages on demand.
+- Use the patched ZIP reader already in the workspace for Windows model worker installation.
+- Let Cargo fetch Darius at its pinned revision so fresh checkouts and dependency updates resolve the same source.
+
 ## [v1.0.8] — Reliability and recovery preview (2026-11-23)
 
 - Preserve SQLite data on failed ordinary opens. Verify consistent nested memory snapshots and stream file checksums during recovery.

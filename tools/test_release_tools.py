@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EVIDENCE = runpy.run_path(str(ROOT / 'tools/verify-release-evidence.py'))
@@ -225,6 +226,11 @@ class EvidenceTests(unittest.TestCase):
             PACKAGE['verify_binary_architecture'](linux_arm, 'linux', 'aarch64')
             with self.assertRaises(ValueError):
                 PACKAGE['verify_binary_architecture'](linux_arm, 'linux', 'x86_64')
+
+            universal = root / 'universal'
+            universal.write_bytes(bytes.fromhex('cafebabe00000002'))
+            with patch('shutil.which', return_value=None), self.assertRaisesRegex(ValueError, 'lipo'):
+                PACKAGE['verify_binary_architecture'](universal, 'macos', 'aarch64')
 
     def test_sign_release_rejects_dirty_checkout_and_accepts_clean_temp_staging(self):
         openssl = MANIFEST['find_openssl']()

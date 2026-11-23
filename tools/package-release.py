@@ -45,16 +45,18 @@ def archive_name(version, os_name, arch):
 
 def verify_binary_architecture(path: pathlib.Path, os_name: str, arch: str):
     """Fail closed if an executable's machine header does not match the target OS/architecture."""
-    header = path.read_bytes()[:4096]
+    with path.open('rb') as stream:
+        header = stream.read(64)
     if os_name == 'windows':
         if len(header) < 64 or header[:2] != b'MZ':
             raise ValueError(f'Not a valid Windows PE executable: {path}')
         pe_offset = struct.unpack_from('<I', header, 0x3C)[0]
-        if pe_offset + 6 > len(header):
-            header = path.read_bytes()[:pe_offset + 6]
-        if header[pe_offset:pe_offset + 4] != b'PE\x00\x00':
+        with path.open('rb') as stream:
+            stream.seek(pe_offset)
+            pe = stream.read(6)
+        if len(pe) != 6 or pe[:4] != b'PE\x00\x00':
             raise ValueError(f'Missing PE header in {path}')
-        machine = struct.unpack_from('<H', header, pe_offset + 4)[0]
+        machine = struct.unpack_from('<H', pe, 4)[0]
         expected = {'x86_64': 0x8664, 'aarch64': 0xAA64}[arch]
         if machine != expected:
             raise ValueError(f'Wrong PE architecture for {path}: expected 0x{expected:04x} ({arch}), got 0x{machine:04x}')
@@ -70,14 +72,14 @@ def verify_binary_architecture(path: pathlib.Path, os_name: str, arch: str):
             raise ValueError(f'Truncated Mach-O executable: {path}')
         magic = struct.unpack_from('<I', header, 0)[0]
         cputype = struct.unpack_from('<I', header, 4)[0]
-        if magic in (0xCAFEBABE, 0xBEBAFECA):
-            # Fat binary: check via lipo if available on macOS
-            if shutil.which('lipo'):
-                archs = subprocess.check_output(['lipo', '-archs', str(path)], text=True).split()
-                expected = {'aarch64': 'arm64', 'x86_64': 'x86_64'}[arch]
-                if expected not in archs:
-                    raise ValueError(f'Wrong Mach-O fat architecture for {path}: expected {expected}, got {archs}')
-                return
+        if magic in (0xCAFEBABE, 0xBEBAFECA, 0xCAFEBABF, 0xBFBAFECA):
+            lipo = shutil.which('lipo')
+            if not lipo:
+                raise ValueError(f'lipo is required to verify universal Mach-O binaries: {path}')
+            archs = subprocess.check_output([lipo, '-archs', str(path)], text=True).split()
+            expected = {'aarch64': 'arm64', 'x86_64': 'x86_64'}[arch]
+            if expected not in archs:
+                raise ValueError(f'Wrong Mach-O fat architecture for {path}: expected {expected}, got {archs}')
         elif magic in (0xFEEDFACF, 0xCFFAEDFE):
             if magic == 0xCFFAEDFE:
                 cputype = struct.unpack_from('>I', header, 4)[0]
