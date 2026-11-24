@@ -457,6 +457,35 @@ fn create_app_bundles_in_dir(
     if license_src.exists() {
         fs::copy(license_src, app_res_dir.join("SourceSans3-LICENSE.md"))?;
     }
+    let web_dist = Path::new("clients/web/dist");
+    if release
+        && std::env::var("DT_SKIP_WEB_BUILD").ok().as_deref() != Some("1")
+        && !web_dist.join("index.html").is_file()
+        && Path::new("clients/web/package.json").is_file()
+    {
+        if !Path::new("clients/web/node_modules").exists() {
+            let npm_ci = Command::new("npm")
+                .args(["ci", "--prefix", "clients/web"])
+                .status()?;
+            if !npm_ci.success() {
+                return Err("Failed to install clients/web dependencies".into());
+            }
+        }
+        let npm_build = Command::new("npm")
+            .args(["run", "build", "--prefix", "clients/web"])
+            .status()?;
+        if !npm_build.success() {
+            return Err("Failed to build React web client for DT.app".into());
+        }
+    }
+    if web_dist.join("index.html").is_file() {
+        copy_dir_all(web_dist, app_res_dir.join("web"))?;
+    } else if release {
+        return Err(
+            "Built React web bundle (clients/web/dist/index.html) is required for release DT.app"
+                .into(),
+        );
+    }
 
     let app_plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -910,6 +939,15 @@ fn run_verify_dmg(dmg_path_str: &str) -> Result<(), Box<dyn std::error::Error>> 
         }
         if let Some(arch) = expected_arch {
             println!("    ✔ Binary architecture verified: {arch}");
+            if !ui_app.join("Contents/Resources/web/index.html").is_file() {
+                return Err(
+                    "DT.app is missing bundled React web app (Contents/Resources/web/index.html)"
+                        .into(),
+                );
+            }
+            println!("    ✔ Bundled React web app verified: Contents/Resources/web/index.html");
+        } else if ui_app.join("Contents/Resources/web/index.html").is_file() {
+            println!("    ✔ Bundled React web app verified: Contents/Resources/web/index.html");
         }
         let pkg_sig = Command::new("pkgutil")
             .args([

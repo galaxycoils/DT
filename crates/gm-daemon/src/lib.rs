@@ -925,7 +925,7 @@ pub async fn run_permissions(
         if !granted {
             println!("      -> Deep Link: {}", pane.url());
             println!(
-                "      -> Open via:  gm permissions --open {}",
+                "      -> Open via:  dt permissions --open {}",
                 pane.pane_name()
             );
         }
@@ -950,7 +950,7 @@ pub async fn run_permissions(
     } else if status.cu_granted() {
         println!("Overall Status: Computer-Use Ready (Proactive EventKit permissions partial)");
     } else {
-        println!("Overall Status: ACTION REQUIRED (Run 'gm permissions --open-missing')");
+        println!("Overall Status: ACTION REQUIRED (Run 'dt permissions --open-missing')");
     }
     println!("============================================================\n");
 
@@ -1422,7 +1422,7 @@ pub async fn run_chat_loop<R: BufRead, W: Write>(
     let mut line_buf = String::new();
     loop {
         line_buf.clear();
-        write!(writer, "grok-muse> ")?;
+        write!(writer, "dt> ")?;
         writer.flush()?;
 
         let bytes_read = reader.read_line(&mut line_buf)?;
@@ -2872,6 +2872,7 @@ pub async fn run_doctor_cli(
             return Ok(());
         }
         Some(DoctorSubcommand::InspectSnapshot { snapshot_id, json }) => {
+            validate_safe_id("snapshot_id", &snapshot_id)?;
             let config = GmConfig::load(config_path.as_deref()).unwrap_or_default();
             let snap_dir = config.storage_dir.join("snapshots").join(&snapshot_id);
             let snap = inspect_rollback_snapshot(&snap_dir)?;
@@ -2893,6 +2894,10 @@ pub async fn run_doctor_cli(
             run_id,
             json,
         }) => {
+            validate_safe_id("snapshot_id", &snapshot_id)?;
+            if let Some(ref id) = run_id {
+                validate_safe_id("run_id", id)?;
+            }
             let config = GmConfig::load(config_path.as_deref()).unwrap_or_default();
             let snap_dir = config.storage_dir.join("snapshots").join(&snapshot_id);
             let effective_run_id = run_id.unwrap_or_else(|| {

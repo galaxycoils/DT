@@ -164,6 +164,14 @@ pub fn resolve_binaries(custom_bin_dir: Option<&Path>) -> (PathBuf, PathBuf) {
         ("target/release/gm-daemon", "target/release/gm-cu-helper"),
         ("target/debug/gm-daemon", "target/debug/gm-cu-helper"),
         (
+            "dt-stable-release/target/release/gm-daemon",
+            "dt-stable-release/target/release/gm-cu-helper",
+        ),
+        (
+            "dt-stable-release/target/debug/gm-daemon",
+            "dt-stable-release/target/debug/gm-cu-helper",
+        ),
+        (
             "grok-muse/target/release/gm-daemon",
             "grok-muse/target/release/gm-cu-helper",
         ),
@@ -188,7 +196,7 @@ pub fn resolve_binaries(custom_bin_dir: Option<&Path>) -> (PathBuf, PathBuf) {
         }
     }
 
-    (app_daemon, app_helper)
+    (dt_daemon, dt_helper)
 }
 
 fn binaries_near(executable: &Path) -> Option<(PathBuf, PathBuf)> {

@@ -2,6 +2,13 @@
 
 All notable changes to **DT** (formerly Grok-Muse) are documented in this file.
 
+## [v1.0.10] — Web bundling, safety gates, and cross-platform Doctor fixes (2026-11-23)
+
+- Bundle the built React web client (`clients/web/dist`) directly inside macOS (`DT.app/Contents/Resources/web`) and Windows (`share\dt\web`) installers, matching Ubuntu and Docker.
+- Enforce the disabled host CLI safety gate in `gm-llm` (fail closed on host CLI probes/execution, prevent screenshot routing to CLI targets, and route `openai` to `openai-api`).
+- Validate `snapshot_id` and `run_id` against path traversal in Doctor snapshot inspection and rollback, and harden `workspace-guest` file import path checks.
+- Fix cross-platform `os_grants` and diagnostics checks on Linux and Windows, update Doctor hints to `dt models install`, fix `service.rs` fallback to `DT.app`, and sync release drift guards.
+
 ## [v1.0.9] — Desktop memory and component updates (2026-11-23)
 
 - Share the macOS fallback font across text renderers and load its pages on demand.

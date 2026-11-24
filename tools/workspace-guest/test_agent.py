@@ -30,6 +30,21 @@ class ExportTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 agent.export_artifacts(root)
 
+    def test_import_rejects_traversal_backslashes_empty_and_symlinks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = pathlib.Path(folder)
+            outside = root / 'outside'
+            outside.mkdir()
+            ws = root / 'workspace'
+            ws.mkdir()
+            (ws / 'linkdir').symlink_to(outside)
+            payload = base64.b64encode(b'hello').decode()
+            for bad in ('', '.', './sub/file.txt', r'a\..\b', 'linkdir/pwn.txt', '/etc/passwd'):
+                with self.subTest(bad=bad):
+                    with self.assertRaises(ValueError):
+                        agent.run({'version': 1, 'command': 'true', 'files': [{'path': bad, 'data': payload}]}, root=ws)
+            self.assertFalse((outside / 'pwn.txt').exists())
+
 
 if __name__ == '__main__':
     unittest.main()

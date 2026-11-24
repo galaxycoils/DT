@@ -1,6 +1,6 @@
 # DT Platform Support Matrix
 
-This matrix describes target coverage for **DT v1.0.1** (`galaxycoils/DT`). Source builds, unit/contract tests, and Apple Silicon DMG packaging pass locally; CI builds all 6 desktop installers (`DT-1.0.1-macos-aarch64.dmg`, `DT-1.0.1-macos-x86_64.dmg`, `DT-1.0.1-windows-x86_64-setup.exe`, `DT-1.0.1-windows-aarch64-setup.exe`, `dt_1.0.1_amd64.deb`, `dt_1.0.1_arm64.deb`). Full 8-target native certification remains gated on platform signing identities, physical non-Mac hardware, live provider accounts, and the 7-day soak. See [coverage inventory](release/coverage-inventory.md) and [release readiness](release-readiness.md).
+This matrix describes target coverage for **DT v1.0.10** (`galaxycoils/DT`). Source builds, unit/contract tests, and Apple Silicon DMG packaging pass locally; CI builds all 6 desktop installers (`DT-1.0.10-macos-aarch64.dmg`, `DT-1.0.10-macos-x86_64.dmg`, `DT-1.0.10-windows-x86_64-setup.exe`, `DT-1.0.10-windows-aarch64-setup.exe`, `dt_1.0.10_amd64.deb`, `dt_1.0.10_arm64.deb`), each bundling the React web client, plus the standalone Linux archive and Expo Mobile source. Full 8-target native certification remains gated on platform signing identities, physical non-Mac/mobile hardware, live provider accounts, and the 7-day soak. See [coverage inventory](release/coverage-inventory.md) and [release readiness](release-readiness.md).
 
 ---
 
@@ -10,8 +10,8 @@ This matrix describes target coverage for **DT v1.0.1** (`galaxycoils/DT`). Sour
 |---|---|---|---|---|---|
 | **macOS 14+ (Sonoma, Sequoia)** | Apple Silicon (`aarch64`) | Preview / certification pending | HVF (Hypervisor.framework) | Metal (MPS) | Native evidence pending |
 | **macOS 14+ (Sonoma, Sequoia)** | Intel (`x86_64`) | Preview / certification pending | HVF (Hypervisor.framework) | CPU / Accelerate | Native evidence pending |
-| **Linux (Ubuntu 24.04 LTS)** | AMD64 (`x86_64`) | Preview / certification pending | KVM (`/dev/kvm`) | CUDA / Vulkan / CPU | Native evidence pending |
-| **Windows 11 (23H2+)** | AMD64 (`x86_64`) | Preview / certification pending | WHPX (Windows Hypervisor Platform) | DirectML / CUDA | Native evidence pending |
+| **Linux (Ubuntu 24.04 LTS)** | AMD64 & ARM64 (X11 & Wayland) | Preview / certification pending | KVM (`/dev/kvm`) | CUDA / Vulkan / CPU | Native evidence pending |
+| **Windows 11 (25H2+)** | AMD64 (`x86_64`) & ARM64 (`aarch64`) | Preview / certification pending | WHPX (Windows Hypervisor Platform) | DirectML / CUDA / CPU | Native evidence pending |
 | Other Linux Distributions | `x86_64` / `aarch64` | Tier 2 (Experimental) | KVM | CPU | Experimental / evidence pending |
 
 ---

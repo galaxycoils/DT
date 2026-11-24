@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use gm_core::error::{GmError, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CliProvider {
@@ -83,6 +82,7 @@ pub struct CliAvailability {
 #[derive(Debug, Clone)]
 pub struct CliDriver {
     provider: CliProvider,
+    #[allow(dead_code)]
     custom_binary_path: Option<PathBuf>,
 }
 
@@ -103,196 +103,38 @@ impl CliDriver {
         self.provider
     }
 
-    /// Check availability of the CLI tool and return structured diagnosis.
+    /// Host CLI probing is disabled until isolated VM CLI-agent execution is enabled.
     pub fn check_availability(&self) -> CliAvailability {
-        let binary_path = if let Some(ref custom) = self.custom_binary_path {
-            if custom.is_file() {
-                Some(custom.clone())
-            } else {
-                None
-            }
-        } else {
-            find_binary_on_path(self.provider.binary_name())
-        };
-
-        let Some(bin) = binary_path else {
-            return CliAvailability {
-                provider: self.provider,
-                binary_name: self.provider.binary_name().to_string(),
-                installed: false,
-                binary_path: None,
-                version: None,
-                authenticated: false,
-                auth_instructions: self.provider.auth_flow_instructions().to_string(),
-                install_instructions: self.provider.install_instructions().to_string(),
-                error_message: Some(format!(
-                    "{} ('{}') not found on PATH. {}",
-                    self.provider.display_name(),
-                    self.provider.binary_name(),
-                    self.provider.install_instructions()
-                )),
-            };
-        };
-
-        // Check version
-        let version_out = Command::new(&bin).arg("--version").output();
-        let (version, ver_err) = match version_out {
-            Ok(output) if output.status.success() => {
-                let ver_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                (Some(ver_str), None)
-            }
-            Ok(output) => {
-                let err_str = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                (
-                    None,
-                    Some(format!(
-                        "Binary execution failed with code {:?}: {}",
-                        output.status.code(),
-                        err_str
-                    )),
-                )
-            }
-            Err(e) => (
-                None,
-                Some(format!("Failed to execute {}: {e}", bin.display())),
-            ),
-        };
-
-        // Check authentication presence
-        let auth_env = std::env::var(self.provider.environment_auth_var()).ok();
-        let authenticated = auth_env.is_some_and(|v| !v.trim().is_empty());
-
-        let error_message = if let Some(err) = ver_err {
-            Some(err)
-        } else if !authenticated {
-            Some(format!(
-                "{} is installed but not authenticated. {}",
-                self.provider.display_name(),
-                self.provider.auth_flow_instructions()
-            ))
-        } else {
-            None
-        };
-
         CliAvailability {
             provider: self.provider,
             binary_name: self.provider.binary_name().to_string(),
-            installed: true,
-            binary_path: Some(bin),
-            version,
-            authenticated,
+            installed: false,
+            binary_path: None,
+            version: None,
+            authenticated: false,
             auth_instructions: self.provider.auth_flow_instructions().to_string(),
             install_instructions: self.provider.install_instructions().to_string(),
-            error_message,
+            error_message: Some(format!(
+                "Host CLI execution and probes for {} are disabled; configure an API or OAuth provider profile in DT.",
+                self.provider.display_name()
+            )),
         }
     }
 
-    /// Complete a prompt using the CLI driver.
-    ///
-    /// Costs are labeled honestly as 0.0 with unknown_cli_cost metadata.
+    /// Host CLI execution is disabled until isolated VM CLI-agent execution is enabled.
     pub async fn complete(
         &self,
-        model: Option<&str>,
-        prompt: &str,
+        _model: Option<&str>,
+        _prompt: &str,
     ) -> Result<ChatCompletionResponse> {
-        let availability = self.check_availability();
-        if !availability.installed {
-            return Err(GmError::Config(availability.error_message.unwrap_or_else(
-                || format!("{} binary is not installed", self.provider.display_name()),
-            )));
-        }
-
-        let bin = availability
-            .binary_path
-            .as_ref()
-            .ok_or_else(|| GmError::Config("Binary path resolution error".into()))?;
-
-        // Format command invocation based on provider
-        let mut cmd = tokio::process::Command::new(bin);
-        match self.provider {
-            CliProvider::Claude => {
-                cmd.arg("-p").arg(prompt);
-                if let Some(m) = model
-                    && m != self.provider.binary_name()
-                {
-                    cmd.arg("--model").arg(m);
-                }
-            }
-            CliProvider::Codex => {
-                cmd.arg("exec").arg(prompt);
-                if let Some(m) = model
-                    && m != self.provider.binary_name()
-                {
-                    cmd.arg("--model").arg(m);
-                }
-            }
-            CliProvider::Grok => {
-                cmd.arg("-p").arg(prompt);
-                if let Some(m) = model
-                    && m != self.provider.binary_name()
-                {
-                    cmd.arg("--model").arg(m);
-                }
-            }
-        }
-
-        let output = cmd.output().await.map_err(|e| {
-            GmError::Provider(format!(
-                "Failed to spawn {} process: {e}",
-                self.provider.display_name()
-            ))
-        })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GmError::Provider(format!(
-                "{} failed (status {}): {stderr}. If this is an authentication issue, {}",
-                self.provider.display_name(),
-                output.status,
-                self.provider.auth_flow_instructions()
-            )));
-        }
-
-        let content = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let prompt_tokens = (prompt.len() / 4).max(1) as u32;
-        let completion_tokens = (content.len() / 4).max(1) as u32;
-
-        Ok(ChatCompletionResponse {
-            id: format!(
-                "cli-{}-{}",
-                self.provider.binary_name(),
-                uuid::Uuid::new_v4()
-            ),
-            content,
-            model: model.unwrap_or(self.provider.binary_name()).to_string(),
-            prompt_tokens,
-            completion_tokens,
-            // Milestone 4: Label unknown CLI costs honestly (0.0 USD, non-metered)
-            estimated_cost_usd: 0.0,
-        })
+        Err(GmError::SafetyViolation(format!(
+            "Host CLI execution for {} is disabled; configure an API or OAuth provider profile in DT.",
+            self.provider.display_name()
+        )))
     }
 }
 
-pub fn find_binary_on_path(binary_name: &str) -> Option<PathBuf> {
-    if let Some(paths) = std::env::var_os("PATH") {
-        for path in std::env::split_paths(&paths) {
-            let candidate = path.join(binary_name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            #[cfg(windows)]
-            {
-                let candidate_exe = path.join(format!("{binary_name}.exe"));
-                if candidate_exe.is_file() {
-                    return Some(candidate_exe);
-                }
-                let candidate_cmd = path.join(format!("{binary_name}.cmd"));
-                if candidate_cmd.is_file() {
-                    return Some(candidate_cmd);
-                }
-            }
-        }
-    }
+pub fn find_binary_on_path(_binary_name: &str) -> Option<PathBuf> {
     None
 }
 
@@ -352,14 +194,22 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_binary_returns_actionable_error() {
-        let driver = CliDriver::new(CliProvider::Claude)
-            .with_binary_path(PathBuf::from("/nonexistent/bin/claude"));
+    fn test_host_cli_probe_disabled_even_with_existing_binary() {
+        let driver = CliDriver::new(CliProvider::Claude).with_binary_path(PathBuf::from("/bin/sh"));
         let avail = driver.check_availability();
         assert!(!avail.installed);
+        assert!(avail.binary_path.is_none());
+        assert!(avail.version.is_none());
         assert!(!avail.authenticated);
-        assert!(avail.error_message.is_some());
-        assert!(avail.error_message.unwrap().contains("Install via npm"));
+        let err = avail.error_message.unwrap_or_default();
+        assert!(err.contains("disabled"));
+    }
+
+    #[tokio::test]
+    async fn test_host_cli_complete_fails_closed() {
+        let driver = CliDriver::new(CliProvider::Codex).with_binary_path(PathBuf::from("/bin/sh"));
+        let err = driver.complete(None, "hello").await.unwrap_err();
+        assert!(matches!(err, GmError::SafetyViolation(_)));
     }
 
     #[test]

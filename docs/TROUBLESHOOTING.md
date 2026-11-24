@@ -1,27 +1,31 @@
-# Grok Muse Troubleshooting Guide
+# DT Troubleshooting Guide
 
-This guide covers common issues, diagnostic procedures, and recovery paths for Grok Muse.
+This guide covers common issues, diagnostic procedures, and recovery paths for **DT** (`dt` / `dt-doctor`; legacy alias `gm`).
 
 ---
 
 ## 1. Running System Diagnostics
 
-When encountering issues, first run the automated health check:
+When encountering issues, first run DT Doctor and local diagnostics:
 
-```bash
-# Check all subsystem statuses
-gm diagnostics check
+```sh
+# Read-only readiness check (does not mutate storage)
+dt doctor check --json
 
-# Or output structured JSON
-gm diagnostics check --json
+# Safe repairs (up to 2 attempts per check)
+dt doctor repair --json
+
+# Resume an interrupted repair or rollback run
+dt doctor resume <RUN_ID> --json
 ```
 
-If reporting an issue to support, generate a redacted diagnostic bundle:
+If reporting an issue to support, generate and review a scrubbed diagnostic bundle before sharing:
 
-```bash
-gm diagnostics export --output /tmp/grok-muse-support.json
+```sh
+dt diagnostics export --output dt-support.json
 ```
-The export automatically scrubs all API keys, bearer tokens, passwords, and sensitive system settings via `SecretScrubber`.
+
+The export is built from an allowlist and verified against registered secrets via `SecretScrubber`.
 
 ---
 
@@ -32,29 +36,33 @@ The export automatically scrubs all API keys, bearer tokens, passwords, and sens
 - **Fix**: Sockets are bound in `/tmp/` with short truncated hashes (e.g. `/tmp/gm-ses-*.sock`). Ensure `/tmp` is accessible and writable.
 
 ### Issue: Daemon not responding or socket disconnected
-- Verify the daemon service is running:
-  ```bash
-  gm status
-  gm service status
+- Verify the background service is running:
+  ```sh
+  dt status
+  dt service status
   ```
-- If the LaunchAgent or service needs reinstallation:
-  ```bash
-  gm service install
+- Reinstall the user service (macOS LaunchAgent, Linux graphical user systemd unit, or Windows logon task):
+  ```sh
+  dt service install
   ```
+- Remember that `dt service` and foreground `dt serve` share an exclusive storage lease; stop the background service before running `dt serve`.
 
 ---
 
-## 3. Database Recovery and Integrity
+## 3. Database Recovery and Snapshot Rollback
 
-### Issue: Database corruption or unexpected power loss
-- **Automatic Recovery**: Grok Muse monitors database health using `PRAGMA quick_check(1)`. If corruption is detected, the corrupted database (and any WAL/SHM files) is automatically preserved as `<name>.corrupt.<timestamp>.bak` before a fresh store is initialized. User data is never deleted silently.
-- **Restoring from JSONL Backup**:
-  ```bash
-  # Check for existing backups
-  ls -l "$HOME/Library/Application Support/GrokMuse/"*.bak
-
-  # Restore queue from a JSONL export
-  gm queue restore /path/to/backup.jsonl
+### Issue: SQLite database error or confirmed corruption
+- **Fail-closed opens**: DT never silently resets or overwrites a corrupt SQLite database on ordinary opens. Operational errors (busy/locked/permissions) are reported without moving files.
+- **Explicit quarantine recovery**: Stop DT UI and background services, then quarantine the confirmed corrupt store (preserving the database and its WAL/SHM sidecars in a private `.bak` directory):
+  ```sh
+  dt diagnostics recover-database --db <relative-database-path>
+  ```
+  The next startup initializes a fresh store while keeping the `.bak` directory for inspection.
+- **Snapshot inspection & rollback**:
+  ```sh
+  dt doctor snapshots --json
+  dt doctor inspect-snapshot <SNAPSHOT_ID> --json
+  dt doctor restore <SNAPSHOT_ID> --json
   ```
 
 ---
@@ -62,44 +70,37 @@ The export automatically scrubs all API keys, bearer tokens, passwords, and sens
 ## 4. macOS Privacy & Security Permissions
 
 ### Issue: "Screen Recording not granted" or "Accessibility permission missing"
-- Grok Muse requires macOS permissions for computer-use automation:
-  - **Screen Recording**: For capturing display state during computer-use tasks.
-  - **Accessibility**: For inspecting UI elements via AXUIElement.
+- DT requires macOS TCC permissions for computer-use automation:
+  - **Screen Recording**: Capturing display frames for visual grounding.
+  - **Accessibility**: Inspecting UI elements via `AXUIElement`.
 - **Remediation**:
-  ```bash
-  # Open all missing permission settings panes automatically
-  gm permissions --open-missing
-
-  # Or open specific settings pane directly
-  gm permissions --open screen
-  gm permissions --open accessibility
+  ```sh
+  dt permissions --open-missing
+  dt permissions --open screen
+  dt permissions --open accessibility
   ```
 
 ---
 
-## 5. Model Providers & CLI Drivers
+## 5. Model Providers & Local Components
 
-### Issue: Claude / Codex / Grok CLI not detected
-- Verify that the CLI binary is installed and present in your system `PATH`:
-  - **Claude**: Install via `npm install -g @anthropic-ai/claude-code`. Authenticate via `claude login` or `export ANTHROPIC_API_KEY="..."`.
-  - **Codex**: Install via `npm install -g @openai/codex`. Authenticate via `codex login` or `export OPENAI_API_KEY="..."`.
-  - **Grok**: Authenticate via `grok auth` or `export XAI_API_KEY="..."`.
+### Issue: Host CLI providers (`claude` / `codex` / `grok`) are disabled
+- Host CLI execution, `--version` probes, and environment-variable login inference are intentionally disabled until isolated VM CLI-agent execution is certified.
+- Configure an API key or OAuth provider profile in **Settings → Providers** (ChatGPT OAuth, OpenAI API, Meta, xAI, Kilo, OpenRouter, Nous Portal, or Custom/Local).
 
-### Issue: Local Candle VLM not found
-- Download open-weight vision-language models for offline operation:
-  ```bash
-  gm models pull qwen2-vl-2b
+### Issue: Local VLM or Speech Runtime not ready
+- Install pinned local components with SHA-256 verification and probe offline inference:
+  ```sh
+  dt models install smolvlm
+  dt models probe smolvlm image.jpg
   ```
+  Restart the daemon after installation so it picks up the newly verified model.
 
 ---
 
 ## 6. Workspace VM Isolation
 
 ### Issue: VM fails to launch
-- **Linux**: Verify `/dev/kvm` exists and your user belongs to the `kvm` group:
-  ```bash
-  ls -la /dev/kvm
-  sudo usermod -aG kvm $USER
-  ```
-- **macOS**: Ensure Hypervisor.framework entitlement is active.
+- **Linux**: Verify `/dev/kvm` exists and your user belongs to the `kvm` group (`ls -la /dev/kvm`, `sudo usermod -aG kvm $USER`).
+- **macOS**: Ensure Hypervisor.framework (`kern.hv_support=1`) is available.
 - **Windows**: Ensure Windows Hypervisor Platform (WHPX) is enabled under Windows Features.

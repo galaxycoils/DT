@@ -526,9 +526,28 @@ pub fn list_rollback_snapshots(snapshots_root: &Path) -> Result<Vec<RollbackSnap
     Ok(out)
 }
 
+pub fn validate_safe_id(label: &str, value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || matches!(value, "." | "..")
+        || !value
+            .bytes()
+            .all(|b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'))
+    {
+        return Err(GmError::SafetyViolation(format!(
+            "Unsafe {label} '{value}'"
+        )));
+    }
+    Ok(())
+}
+
 pub fn inspect_rollback_snapshot(snapshot_dir: &Path) -> Result<RollbackSnapshot> {
+    if let Some(name) = snapshot_dir.file_name().and_then(|s| s.to_str()) {
+        validate_safe_id("snapshot_id", name)?;
+    }
     let manifest_raw = fs::read_to_string(snapshot_dir.join("rollback.json"))?;
     let snapshot: RollbackSnapshot = serde_json::from_str(&manifest_raw)?;
+    validate_safe_id("snapshot_id", &snapshot.snapshot_id)?;
     for file in &snapshot.files {
         let rel = validate_safe_relative_path(&file.relative_path)?;
         let src = snapshot_dir.join(&rel);
@@ -750,6 +769,7 @@ fn rollback_journal_path(storage_dir: &Path, run_id: &str) -> PathBuf {
 }
 
 pub fn load_rollback_journal(storage_dir: &Path, run_id: &str) -> Result<Option<RollbackJournal>> {
+    validate_safe_id("run_id", run_id)?;
     let path = rollback_journal_path(storage_dir, run_id);
     match fs::read_to_string(&path) {
         Ok(raw) => Ok(Some(serde_json::from_str(&raw)?)),
@@ -759,6 +779,7 @@ pub fn load_rollback_journal(storage_dir: &Path, run_id: &str) -> Result<Option<
 }
 
 pub fn save_rollback_journal(storage_dir: &Path, journal: &RollbackJournal) -> Result<()> {
+    validate_safe_id("run_id", &journal.run_id)?;
     let dir = storage_dir.join("doctor-runs");
     gm_core::storage::ensure_private_dir(&dir)?;
     let bytes = serde_json::to_vec_pretty(journal)?;
@@ -826,6 +847,7 @@ pub fn execute_journaled_rollback(
     target_storage_dir: &Path,
     run_id: &str,
 ) -> Result<RollbackOutcome> {
+    validate_safe_id("run_id", run_id)?;
     let _lease = StorageLease::acquire(target_storage_dir)?;
     let snapshot = inspect_rollback_snapshot(snapshot_dir)?;
 
@@ -1270,8 +1292,14 @@ mod tests {
         // Full-disk check rejects snapshot/restore cleanly.
         assert!(check_space_available(Some(1024), 4096, "test").is_err());
 
-        // Path traversal check rejects unsafe path.
+        // Path traversal check rejects unsafe path and unsafe IDs.
         assert!(validate_safe_relative_path("../escape").is_err());
+        for unsafe_id in ["../escape", "nested/id", r"nested\id", "/abs/path", "", "."] {
+            assert!(validate_safe_id("snapshot_id", unsafe_id).is_err());
+            assert!(load_rollback_journal(&storage, unsafe_id).is_err());
+            assert!(execute_journaled_rollback(&snap.snapshot_dir, &storage, unsafe_id).is_err());
+        }
+        assert!(inspect_rollback_snapshot(&storage.join("snapshots/../escape")).is_err());
 
         // Second writer holding lease blocks restore.
         let _lease = StorageLease::acquire(&storage).unwrap();

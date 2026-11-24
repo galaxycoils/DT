@@ -241,6 +241,7 @@ impl LlmRouter {
         let mapped_profile_id = match lower.as_str() {
             "meta" | "muse" => Some("meta-default"),
             "xai" | "grok" => Some("xai-default"),
+            "openai" => Some("openai-api"),
             "chatgpt" => Some("chatgpt-default"),
             "kilo" | "kilo_gateway" => Some("kilo-default"),
             "openrouter" => Some("openrouter-default"),
@@ -279,14 +280,14 @@ impl LlmRouter {
                 provider: ProviderKind::Claude,
                 api_base: "cli://claude".into(),
                 model: "claude-3-5-sonnet".into(),
-                allow_vision: task == TaskType::CuVisionStep,
+                allow_vision: false,
                 profile_id: None,
                 protocol: WireProtocol::Cli,
                 auth_mode: ProviderAuthMode::Cli,
                 credential_ref: None,
                 validated_origin: Some("cli://claude".into()),
             },
-            "codex" | "openai" => ModelTarget {
+            "codex" => ModelTarget {
                 provider: ProviderKind::Codex,
                 api_base: "cli://codex".into(),
                 model: "codex".into(),
@@ -491,5 +492,24 @@ mod tests {
         let (p, fb) = router.route(TaskType::Planning);
         assert_eq!(p.provider, ProviderKind::KiloGateway);
         assert_eq!(fb.unwrap().provider, ProviderKind::OpenRouter);
+    }
+
+    #[test]
+    fn test_cli_selectors_never_route_screenshots_and_openai_uses_api_profile() {
+        let cfg = ProvidersConfig::default();
+        let claude_router = LlmRouter::new(cfg.clone())
+            .with_preference(Some("claude"), None)
+            .unwrap();
+        let (claude_target, _) = claude_router.route(TaskType::CuVisionStep);
+        assert_eq!(claude_target.provider, ProviderKind::Claude);
+        assert!(!claude_target.allow_vision);
+
+        let openai_router = LlmRouter::new(cfg)
+            .with_preference(Some("openai"), None)
+            .unwrap();
+        let (openai_target, _) = openai_router.route(TaskType::Planning);
+        assert_eq!(openai_target.provider, ProviderKind::Custom);
+        assert_eq!(openai_target.profile_id.as_deref(), Some("openai-api"));
+        assert!(!openai_target.allow_vision);
     }
 }

@@ -753,7 +753,7 @@ impl ReqwestLlmBackend {
             }
             if *provider == ProviderKind::OpenRouter {
                 req = req
-                    .header("HTTP-Referer", "https://github.com/galaxycoils/grok-muse")
+                    .header("HTTP-Referer", "https://github.com/galaxycoils/DT")
                     .header("X-Title", "DT");
             }
             match req.send().await {
@@ -808,22 +808,13 @@ impl LlmBackend for ReqwestLlmBackend {
         target: &ModelTarget,
         messages: &[ChatMessage],
     ) -> Result<ChatCompletionResponse> {
-        match target.provider {
-            crate::router::ProviderKind::Claude => {
-                let driver =
-                    crate::cli_driver::CliDriver::new(crate::cli_driver::CliProvider::Claude);
-                return crate::cli_driver::CliLlmBackend::new(driver)
-                    .complete(target, messages)
-                    .await;
-            }
-            crate::router::ProviderKind::Codex => {
-                let driver =
-                    crate::cli_driver::CliDriver::new(crate::cli_driver::CliProvider::Codex);
-                return crate::cli_driver::CliLlmBackend::new(driver)
-                    .complete(target, messages)
-                    .await;
-            }
-            _ => {}
+        if matches!(
+            target.provider,
+            crate::router::ProviderKind::Claude | crate::router::ProviderKind::Codex
+        ) {
+            return Err(GmError::SafetyViolation(
+                "Host CLI provider execution is disabled; configure an API or OAuth provider profile in DT.".into(),
+            ));
         }
 
         let mut key = self.resolve_bearer_token(target).await?;
@@ -969,9 +960,10 @@ impl LlmBackend for ReqwestLlmBackend {
             target.provider,
             crate::router::ProviderKind::Claude | crate::router::ProviderKind::Codex
         ) {
-            let resp = self.complete(target, messages).await?;
-            let _ = delta_tx.send(resp.content.clone()).await;
-            return Ok(resp);
+            let _ = delta_tx;
+            return Err(GmError::SafetyViolation(
+                "Host CLI provider execution is disabled; configure an API or OAuth provider profile in DT.".into(),
+            ));
         }
 
         let mut key = self.resolve_bearer_token(target).await?;

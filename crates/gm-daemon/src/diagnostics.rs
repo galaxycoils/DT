@@ -5,6 +5,7 @@
 use chrono::Utc;
 use gm_core::config::GmConfig;
 use gm_core::error::Result;
+#[cfg(target_os = "macos")]
 use gm_platform::permissions::{PrivacyPane, check_all_permissions};
 use gm_safety::SecretScrubber;
 use serde::{Deserialize, Serialize};
@@ -98,7 +99,10 @@ pub fn run_health_diagnostics(config: &GmConfig) -> HealthReport {
                     category: "Database".into(),
                     status: DiagnosticStatus::Error,
                     message: format!("Task queue database check failed: {e}"),
-                    remediation: Some("Run 'gm queue restore' or inspect backup files".into()),
+                    remediation: Some(
+                        "Stop DT and run 'dt doctor check' or 'dt diagnostics recover-database --db openbot.sqlite'"
+                            .into(),
+                    ),
                 });
             }
         }
@@ -131,47 +135,82 @@ pub fn run_health_diagnostics(config: &GmConfig) -> HealthReport {
                     category: "Database".into(),
                     status: DiagnosticStatus::Error,
                     message: format!("Channels database check failed: {e}"),
-                    remediation: Some("Inspect channel database backups".into()),
+                    remediation: Some(
+                        "Stop DT and run 'dt doctor check' or 'dt diagnostics recover-database --db channels.sqlite'"
+                            .into(),
+                    ),
                 });
             }
         }
     }
 
-    // 4. macOS / Platform Permissions
-    let perms = check_all_permissions();
-    let perm_items = [
-        (
-            "Screen Recording",
-            PrivacyPane::ScreenRecording,
-            perms.screen_recording,
-        ),
-        (
-            "Accessibility",
-            PrivacyPane::Accessibility,
-            perms.accessibility,
-        ),
-        ("Calendar", PrivacyPane::Calendars, perms.calendar),
-        ("Reminders", PrivacyPane::Reminders, perms.reminders),
-    ];
-    for (name, pane, is_granted) in perm_items {
+    // 4. OS / Platform Permissions
+    #[cfg(target_os = "macos")]
+    {
+        let perms = check_all_permissions();
+        let perm_items = [
+            (
+                "Screen Recording",
+                PrivacyPane::ScreenRecording,
+                perms.screen_recording,
+            ),
+            (
+                "Accessibility",
+                PrivacyPane::Accessibility,
+                perms.accessibility,
+            ),
+            ("Calendar", PrivacyPane::Calendars, perms.calendar),
+            ("Reminders", PrivacyPane::Reminders, perms.reminders),
+        ];
+        for (name, pane, is_granted) in perm_items {
+            checks.push(DiagnosticCheck {
+                name: format!("{name} Permission"),
+                category: "Permissions".into(),
+                status: if is_granted {
+                    DiagnosticStatus::Ok
+                } else {
+                    DiagnosticStatus::Warning
+                },
+                message: format!("Permission {name}: granted={is_granted}"),
+                remediation: if is_granted {
+                    None
+                } else {
+                    Some(format!(
+                        "Open macOS System Settings via '{}' or 'dt permissions --open {}'",
+                        pane.url(),
+                        pane.pane_name()
+                    ))
+                },
+            });
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
         checks.push(DiagnosticCheck {
-            name: format!("{name} Permission"),
+            name: "Desktop Display Session".into(),
             category: "Permissions".into(),
-            status: if is_granted {
+            status: if has_wayland || has_x11 {
                 DiagnosticStatus::Ok
             } else {
                 DiagnosticStatus::Warning
             },
-            message: format!("Permission {name}: granted={is_granted}"),
-            remediation: if is_granted {
-                None
-            } else {
-                Some(format!(
-                    "Open macOS System Settings via '{}' or 'gm permissions --open {}'",
-                    pane.url(),
-                    pane.pane_name()
-                ))
-            },
+            message: format!("Display session: wayland={has_wayland}, x11={has_x11}"),
+            remediation: (!(has_wayland || has_x11)).then(|| {
+                "Run DT in an active Wayland or X11 desktop session for desktop automation.".into()
+            }),
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        checks.push(DiagnosticCheck {
+            name: "Desktop Interactive Session".into(),
+            category: "Permissions".into(),
+            status: DiagnosticStatus::Ok,
+            message: "Windows Graphics Capture and UI Automation use the active user session"
+                .into(),
+            remediation: None,
         });
     }
 

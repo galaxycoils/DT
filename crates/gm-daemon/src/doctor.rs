@@ -10,6 +10,7 @@ use chrono::Utc;
 use gm_core::config::GmConfig;
 use gm_core::error::{GmError, Result};
 use gm_platform::IpcPlatformClient;
+#[cfg(target_os = "macos")]
 use gm_platform::permissions::check_all_permissions;
 use gm_safety::SecretScrubber;
 use serde::{Deserialize, Serialize};
@@ -353,6 +354,73 @@ fn check_credential_store_actionable() -> (DoctorCheckOutcome, String, Option<St
         (
             DoctorCheckOutcome::Pass,
             "Windows Credential Manager available for current user SID".into(),
+            None,
+        )
+    }
+}
+
+fn check_os_grants_actionable(run_id: &str) -> (DoctorCheckOutcome, String, Option<String>) {
+    #[cfg(target_os = "macos")]
+    {
+        let perms = check_all_permissions();
+        let all_perms = perms.screen_recording && perms.accessibility;
+        let summary = format!(
+            "ScreenRecording={}, Accessibility={}, Calendar={}, Reminders={}",
+            perms.screen_recording, perms.accessibility, perms.calendar, perms.reminders
+        );
+        let next = (!all_perms).then(|| {
+            format!(
+                "Grant Screen Recording & Accessibility in OS Settings, then run `dt doctor resume {run_id} --json`."
+            )
+        });
+        (
+            if all_perms {
+                DoctorCheckOutcome::Pass
+            } else {
+                DoctorCheckOutcome::ActionRequired
+            },
+            summary,
+            next,
+        )
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let hosted = std::env::var("DT_HOSTED_ENABLED")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+        let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+        let has_x11 = std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty());
+        if has_wayland || has_x11 {
+            (
+                DoctorCheckOutcome::Pass,
+                format!(
+                    "Linux desktop session detected (wayland={has_wayland}, x11={has_x11}); portal/AT-SPI grants prompt on first use"
+                ),
+                None,
+            )
+        } else if hosted {
+            (
+                DoctorCheckOutcome::Pass,
+                "Hosted Linux mode does not require local desktop display permissions".into(),
+                None,
+            )
+        } else {
+            (
+                DoctorCheckOutcome::ActionRequired,
+                "No active Wayland or X11 display session detected (WAYLAND_DISPLAY/DISPLAY unset)"
+                    .into(),
+                Some(format!(
+                    "Start DT inside a graphical desktop session, then run `dt doctor resume {run_id} --json`."
+                )),
+            )
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = run_id;
+        (
+            DoctorCheckOutcome::Pass,
+            "Windows Graphics Capture and UI Automation available in interactive user session"
+                .into(),
             None,
         )
     }
@@ -860,27 +928,14 @@ async fn run_doctor_inner(
     });
 
     // 8. OS permissions / grants
-    let perms = check_all_permissions();
-    let all_perms = perms.screen_recording && perms.accessibility;
+    let (grants_outcome, grants_summary, grants_next) = check_os_grants_actionable(&journal.run_id);
     checks.push(DoctorCheckEntry {
         id: "os_grants".into(),
         category: "permissions".into(),
-        outcome: if all_perms {
-            DoctorCheckOutcome::Pass
-        } else {
-            DoctorCheckOutcome::ActionRequired
-        },
+        outcome: grants_outcome,
         attempts: 1,
-        summary: format!(
-            "ScreenRecording={}, Accessibility={}, Calendar={}, Reminders={}",
-            perms.screen_recording, perms.accessibility, perms.calendar, perms.reminders
-        ),
-        next_action: (!all_perms).then(|| {
-            format!(
-                "Grant Screen Recording & Accessibility in OS Settings, then run `dt doctor resume {} --json`.",
-                journal.run_id
-            )
-        }),
+        summary: grants_summary,
+        next_action: grants_next,
         repair_action: Some(FixedRepairAction::PromptOsPermissions),
     });
 
@@ -1083,7 +1138,7 @@ async fn run_doctor_inner(
         },
         first_missing_id.map(|(id, mb)| {
             format!(
-                "Optional: `dt models pull {id}` or install `{id}` in Settings -> Local Components (size: {mb} MB)."
+                "Optional: `dt models install {id}` or install `{id}` in Settings -> Local Components (size: {mb} MB)."
             )
         }),
     );
@@ -1474,7 +1529,7 @@ mod tests {
                 .next_action
                 .as_deref()
                 .unwrap_or("")
-                .contains("Optional:")
+                .contains("dt models install ")
         );
     }
 

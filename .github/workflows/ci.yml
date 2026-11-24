@@ -9,6 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   GM_RELEASE_PUBLIC_KEY_HEX: ${{ vars.GM_RELEASE_PUBLIC_KEY_HEX }}
 
 jobs:
@@ -53,10 +54,17 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Install Node for companion, web, and mobile verification
-        if: startsWith(matrix.os, 'ubuntu-')
+        if: runner.os != 'Linux' || matrix.os == 'ubuntu-24.04'
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+
+      - name: Build React web bundle for macOS and Windows installers
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        working-directory: grok-muse
+        run: |
+          npm ci --prefix clients/web
+          npm run build --prefix clients/web
 
       - name: Verify generated UI tokens, companion bundle, React web, and Expo mobile
         if: matrix.os == 'ubuntu-24.04'

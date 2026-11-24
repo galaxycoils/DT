@@ -138,6 +138,15 @@ def main():
         parser.error('Developer ID Application identity, Developer ID Installer identity, and notarization profile are required')
     if os_name == 'windows' and not args.windows_thumbprint:
         parser.error('A Windows signing certificate thumbprint is required')
+    if os_name in ('macos', 'windows'):
+        web_dist = ROOT / 'clients/web/dist'
+        if not (web_dist / 'index.html').is_file() and os.environ.get('DT_SKIP_WEB_BUILD') != '1':
+            if (ROOT / 'clients/web/package.json').is_file():
+                if not (ROOT / 'clients/web/node_modules').exists():
+                    run('npm', 'ci', '--prefix', str(ROOT / 'clients/web'))
+                run('npm', 'run', 'build', '--prefix', str(ROOT / 'clients/web'))
+        if not (web_dist / 'index.html').is_file():
+            parser.error('Built React web bundle (clients/web/dist/index.html) is required before packaging')
     args.output_dir.mkdir(parents=True, exist_ok=True)
     output = args.output_dir / name
     if output.exists():
@@ -185,6 +194,8 @@ def main():
                     target = macos / binary
                     shutil.copy2(destination / binary, target)
                     run('codesign', '--force', '--options', 'runtime', '--timestamp', '--entitlements', 'entitlements.plist', '--sign', args.apple_identity, target)
+                if app_name == 'DT':
+                    shutil.copytree(ROOT / 'clients/web/dist', app / 'Contents' / 'Resources' / 'web')
                 run('codesign', '--force', '--options', 'runtime', '--timestamp', '--sign', args.apple_identity, app)
                 run('codesign', '--verify', '--deep', '--strict', app)
 

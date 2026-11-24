@@ -16,6 +16,8 @@ permissions:
 concurrency:
   group: release-${{ github.sha }}
   cancel-in-progress: false
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 jobs:
   mode:
     runs-on: ubuntu-latest
@@ -89,6 +91,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, pinned for release
         with:
           toolchain: 1.99.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - name: Verify native runner identity
         env:
           TARGET_OS: ${{ matrix.os }}
@@ -102,6 +107,8 @@ jobs:
           python3 -c 'import os; assert len(bytes.fromhex(os.environ["GM_RELEASE_PUBLIC_KEY_HEX"]))==32'
           cargo build --release --locked --workspace --bins
           cargo test --locked --workspace
+          npm ci --prefix clients/web
+          npm run build --prefix clients/web
       - name: Package and verify platform signatures & installers
         env:
           GM_APPLE_SIGNING_IDENTITY: ${{ vars.GM_APPLE_SIGNING_IDENTITY }}

@@ -45,26 +45,55 @@ def export_artifacts(root):
     return artifacts
 
 
-def run(request):
+def validate_workspace_relative_path(raw_path):
+    if (
+        not isinstance(raw_path, str)
+        or not raw_path
+        or len(raw_path) > 1024
+        or "\\" in raw_path
+        or "\x00" in raw_path
+    ):
+        raise ValueError("Invalid workspace path")
+    raw_parts = raw_path.split("/")
+    if any(part in ("", ".", "..") or ":" in part for part in raw_parts):
+        raise ValueError("Invalid workspace path")
+    relative = Path(raw_path)
+    if relative.is_absolute() or not relative.parts:
+        raise ValueError("Invalid workspace path")
+    if any(part in ("", ".", "..") or ":" in part for part in relative.parts):
+        raise ValueError("Invalid workspace path")
+    return relative
+
+
+def write_workspace_file(root, relative, data):
+    current = root
+    for part in relative.parts[:-1]:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Workspace symlinks are forbidden")
+        current.mkdir(exist_ok=True)
+    target = current / relative.parts[-1]
+    if target.is_symlink() or (target.exists() and target.is_dir()):
+        raise ValueError("Invalid workspace file target")
+    target.write_bytes(data)
+
+
+def run(request, root=Path("/workspace")):
     if request.get("version") != 1:
         raise ValueError("Unsupported protocol")
-    root = Path("/workspace")
+    root = Path(root)
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     files = request.get("files", [])
     if len(files) > 1000:
         raise ValueError("Too many files")
     total = 0
     for entry in files:
-        relative = Path(entry["path"])
-        if relative.is_absolute() or ".." in relative.parts:
-            raise ValueError("Invalid workspace path")
-        target = root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
+        relative = validate_workspace_relative_path(entry.get("path"))
         data = base64.b64decode(entry["data"], validate=True)
         total += len(data)
         if total > 8 * 1024 * 1024:
             raise ValueError("Workspace too large")
-        target.write_bytes(data)
+        write_workspace_file(root, relative, data)
     process = subprocess.Popen(
         ["/bin/sh", "-c", request["command"]], cwd=root,
         env={"PATH": "/usr/local/bin:/usr/bin:/bin", "HOME": "/home/muse", "LANG": "C.UTF-8"},

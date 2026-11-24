@@ -1,5 +1,9 @@
 # DT release readiness
 
+## v1.0.10 web bundling, safety gates, and Doctor readiness update
+
+macOS (`DT.app/Contents/Resources/web`) and Windows (`share\dt\web`) installers bundle the React web client out of the box alongside Ubuntu and Docker. Host CLI execution and probes fail closed in `gm-llm`, Doctor snapshot/rollback IDs and workspace-guest imports reject traversal paths, and Linux/Windows Doctor checks evaluate platform session readiness. On the Apple Silicon development host, 30-sample `xtask bench-rss` measured **13.62 MiB** core idle (`< 50 MiB` budget) and **90.62 MiB** with the native UI open (`< 120 MiB` budget). Non-macOS hardware measurements, publisher signing/notarization, native mobile/live-account checks, and the seven-day soak remain pending. [Release notes](releases/v1.0.10.md)
+
 ## v1.0.9 desktop and dependency update
 
 The macOS UI maps the existing system fallback font into memory. The Windows model installer shares the patched ZIP reader used by the model runtime. Cargo fetches the reviewed Darius Git commit for local builds, CI, containers, and dependency scanning. The signing, native device, external account and soak requirements below still apply. [Release notes](releases/v1.0.9.md)
@@ -10,7 +14,7 @@ The GitHub prerelease provides six CI-built installers, a standalone Linux archi
 
 Native installer lifecycle across the target matrix, iOS/Android device flows, external provider and connector accounts, guest boot, and the seven-day soak still require recorded results. The repository lacks a configured publisher signing environment and native certification runners. See the audit and the machine-readable inventory for required evidence. [Audit and acceptance tests](plans/v1.0.6-reliability-audit.md) · [Coverage inventory](release/coverage-inventory.md)
 
-On the Apple Silicon development host, the candidate measured 201.6 MiB with the native UI open across 30 samples. The v1.0.6 package measured 182.6 MiB on the same host. The 120 MiB UI target remains open. Snapshot repair stayed below 24 MiB across the 1 MiB, 64 MiB and 1 GiB attachment fixtures.
+On the Apple Silicon development host, the `v1.0.10` candidate measured 13.62 MiB core idle and 90.62 MiB with the native UI open across 30 samples (`< 120 MiB` Gate G2 target met on Apple Silicon; non-macOS UI measurements remain open). Snapshot repair stayed below 24 MiB across the 1 MiB, 64 MiB and 1 GiB attachment fixtures.
 
 ## Historical v1.0.1 notes
 
@@ -34,7 +38,9 @@ On the Apple Silicon development host, the candidate measured 201.6 MiB with the
 - `DT-VERSION-macos-aarch64.dmg`
 - `DT-VERSION-macos-x86_64.dmg`
 - `DT-VERSION-windows-x86_64-setup.exe`
+- `DT-VERSION-windows-aarch64-setup.exe`
 - `dt_VERSION_amd64.deb`
+- `dt_VERSION_arm64.deb`
 
 Dispatch the signed release workflow with both run IDs empty to package a candidate on the protected `dt-release` runners. Certify those exact artifacts, then dispatch at the same commit with the packaging and evidence run IDs. Verification uses `GM_EVIDENCE_PUBLIC_KEY_HEX`. Publisher signing uses `GM_RELEASE_SIGNING_KEY_PEM` and `GM_RELEASE_PUBLIC_KEY_HEX`, matching the public key compiled into the release binaries. Signing compares all four installer SHA-256 digests against both the build receipts and verified certification evidence. The workflow uploads a signed candidate for publication.
 

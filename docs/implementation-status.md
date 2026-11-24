@@ -101,4 +101,4 @@ The native app was exercised through a private Xvfb display using software graph
 
 The release-manifest generator was independently checked with OpenSSL. The guest export boundary tests pass without claiming a booted VM. Hardware performance checks now run separately through the manually invoked native-desktop workflow on an authorized self-hosted Mac. Missing native services, measurements or live provider credentials fail explicitly; simulations do not certify a production release.
 
-A single post-task software-graphics sample measured approximately 116 MiB for the native UI and 159 MiB across UI/daemon/helper, above the 120 MiB whole-tree UI-open target. This is not a steady-state native-GPU measurement. The target remains unmet in this environment.
+A prior single post-task software-graphics sample on Linux Xvfb measured approximately 116 MiB for the native UI and 159 MiB across UI/daemon/helper, above the 120 MiB whole-tree UI-open target. On Apple Silicon (`v1.0.10`, 30 samples via `xtask bench-rss` / `footprint`), core idle measured 13.62 MiB (`< 50 MiB`) and native UI open measured 90.62 MiB (`< 120 MiB`); non-macOS native-GPU measurements remain open.

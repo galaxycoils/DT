@@ -44,6 +44,9 @@ Section "DT Core" SecCore
   File "${BIN_DIR}\gm-cu-helper.exe"
   File "${BIN_DIR}\gm-ui.exe"
 
+  SetOutPath "$INSTDIR\share\dt\web"
+  File /r "${SRC_ROOT}\clients\web\dist\*.*"
+
   SetOutPath "$INSTDIR"
   File "${SRC_ROOT}\LICENSE"
   File "${SRC_ROOT}\THIRD_PARTY_NOTICES.md"
@@ -84,6 +87,8 @@ Section "Uninstall"
   Delete "$INSTDIR\bin\gm-cu-helper.exe"
   Delete "$INSTDIR\bin\gm-ui.exe"
   RMDir "$INSTDIR\bin"
+  RMDir /r "$INSTDIR\share\dt"
+  RMDir "$INSTDIR\share"
   Delete "$INSTDIR\LICENSE"
   Delete "$INSTDIR\THIRD_PARTY_NOTICES.md"
   Delete "$INSTDIR\README.md"

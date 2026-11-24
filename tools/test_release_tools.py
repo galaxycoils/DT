@@ -1,4 +1,8 @@
 """Protocol/tool regressions. Synthetic inputs here do not certify a release."""
+import sys
+if sys.version_info < (3, 11):
+    raise SystemExit("Python 3.11+ is required to run DT release tool checks (e.g., python3.13 tools/test_release_tools.py)")
+
 import copy
 import datetime
 import hashlib
@@ -8,7 +12,6 @@ import pathlib
 import runpy
 import struct
 import subprocess
-import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -319,6 +322,12 @@ class EvidenceTests(unittest.TestCase):
         self.assertIn('DT_WEB_DIST', dockerfile)
         build_deb = (ROOT / 'tools/installers/linux/build-deb.sh').read_text()
         self.assertIn('usr/share/dt/web', build_deb)
+        nsi = (ROOT / 'tools/installers/windows/dt-installer.nsi').read_text()
+        self.assertIn(r'share\dt\web', nsi)
+        xtask_src = (ROOT / 'xtask/src/main.rs').read_text()
+        self.assertIn('app_res_dir.join("web")', xtask_src)
+        pkg_rel = (ROOT / 'tools/package-release.py').read_text()
+        self.assertIn("'Resources' / 'web'", pkg_rel)
         compose = (ROOT / 'deploy/docker/docker-compose.yml').read_text()
         for expected in ('dt-server:', 'tls-proxy:', '"443:443"'):
             self.assertIn(expected, compose)
@@ -331,7 +340,18 @@ class EvidenceTests(unittest.TestCase):
         web = json.loads((ROOT / 'clients/web/package.json').read_text())['version']
         mobile = json.loads((ROOT / 'clients/mobile/package.json').read_text())['version']
         app = json.loads((ROOT / 'clients/mobile/app.json').read_text())['expo']['version']
-        self.assertEqual({cargo, web, mobile, app}, {cargo}, f'version drift: cargo={cargo} web={web} mobile={mobile} app={app}')
+        rel_inv = json.loads((ROOT / 'docs/release/release-inventory.json').read_text())['version']
+        cov_inv = json.loads((ROOT / 'docs/release/coverage-inventory.json').read_text())['version']
+        ledger = json.loads((ROOT / 'docs/release/inference-budget-ledger.json').read_text())['release_version']
+        self.assertEqual(
+            {cargo, web, mobile, app, rel_inv, cov_inv, ledger},
+            {cargo},
+            f'version drift: cargo={cargo} web={web} mobile={mobile} app={app} rel={rel_inv} cov={cov_inv} ledger={ledger}',
+        )
+        self.assertIn(f'# DT v{cargo}', (ROOT / 'README.md').read_text())
+        self.assertIn(f'DT v{cargo}', (ROOT / 'docs/SUPPORT_MATRIX.md').read_text())
+        self.assertIn(f"const RELEASE_TAG = 'v{cargo}';", (ROOT / 'docs/index.html').read_text())
+        self.assertTrue((ROOT / f'docs/releases/v{cargo}.md').is_file(), f'Missing docs/releases/v{cargo}.md')
         self.assertNotIn('1.0.0', (ROOT / '.github/workflows/ci.yml').read_text(), 'ci.yml must not hard-code a version')
 
     def test_signed_metadata_not_expiring_soon(self):

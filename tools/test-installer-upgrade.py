@@ -70,6 +70,15 @@ def main():
         subprocess.run([cli, "--config", config, "doctor", "check", "--json"], env=env,
                        stdout=subprocess.PIPE, check=True)
         cli, doctor = install(os.environ["TO_TAG"], root)
+        doctor_json = json.loads(subprocess.check_output(
+            [doctor, "--config", config, "check", "--json"], env=env, text=True
+        ))
+        checks = {item["id"]: item["outcome"] for item in doctor_json.get("checks", [])}
+        if checks.get("migration_state") != "pass":
+            raise ValueError(f"Expected migration_state=pass, got {checks.get('migration_state')}")
+        target_ver = tuple(int(x) for x in os.environ["TO_TAG"][1:].split(".")[:3])
+        if target_ver >= (1, 0, 10) and checks.get("web_app_present") != "pass":
+            raise ValueError(f"Expected web_app_present=pass on {os.environ['TO_TAG']}, got {checks.get('web_app_present')}")
         with closing(sqlite3.connect(db_path)) as db:
             db.executescript("PRAGMA journal_mode=WAL; INSERT INTO sample VALUES ('wal');")
             subprocess.run([doctor, "--config", config, "repair", "--json"], env=env,
